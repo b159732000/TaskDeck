@@ -53,14 +53,22 @@ public struct AppConfig: Codable, Equatable {
     /// Login shell spawned in every pane (interactive, so user aliases and
     /// rc files load). Anything with `-il` semantics works: zsh/bash/fish.
     public var shell: String
+    /// Terminal font name. When unset, installed Nerd Fonts are probed
+    /// (MesloLGS NF first — powerline/PUA prompt glyphs need one), falling
+    /// back to the system monospaced font.
+    public var terminalFont: String?
+    public var terminalFontSize: Double?
 
     public init(tasksDir: String, defaultCwd: String, teams: [TeamDef],
-                quotaCommand: String?, shell: String = "/bin/zsh") {
+                quotaCommand: String?, shell: String = "/bin/zsh",
+                terminalFont: String? = nil, terminalFontSize: Double? = nil) {
         self.tasksDir = tasksDir
         self.defaultCwd = defaultCwd
         self.teams = teams
         self.quotaCommand = quotaCommand
         self.shell = shell
+        self.terminalFont = terminalFont
+        self.terminalFontSize = terminalFontSize
     }
 
     public static let fallback = AppConfig(
@@ -71,7 +79,7 @@ public struct AppConfig: Codable, Equatable {
     )
 
     enum CodingKeys: String, CodingKey {
-        case tasksDir, defaultCwd, teams, quotaCommand, shell
+        case tasksDir, defaultCwd, teams, quotaCommand, shell, terminalFont, terminalFontSize
     }
 
     public init(from decoder: Decoder) throws {
@@ -82,6 +90,8 @@ public struct AppConfig: Codable, Equatable {
         teams = try c.decodeIfPresent([TeamDef].self, forKey: .teams) ?? fb.teams
         quotaCommand = try c.decodeIfPresent(String.self, forKey: .quotaCommand)
         shell = try c.decodeIfPresent(String.self, forKey: .shell) ?? fb.shell
+        terminalFont = try c.decodeIfPresent(String.self, forKey: .terminalFont)
+        terminalFontSize = try c.decodeIfPresent(Double.self, forKey: .terminalFontSize)
     }
 
     public static func load() -> AppConfig {

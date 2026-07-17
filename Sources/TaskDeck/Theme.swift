@@ -5,14 +5,16 @@ import SwiftUI
 /// carries alpha so the behind-window blur (iTerm2-style glass) shows
 /// through. The terminal keeps the highest opacity for readability.
 enum Theme {
-    static let windowBG = Color(hex: 0x0E1116).opacity(0.45)
-    static let panelBG = Color(hex: 0x131820).opacity(0.52)
-    static let paneHeaderBG = Color(hex: 0x1A202A).opacity(0.66)
-    static let terminalBG = Color(hex: 0x14181F).opacity(0.74)
+    static let windowBG = Color(hex: 0x0E1116).opacity(0.22)
+    static let panelBG = Color(hex: 0x131820).opacity(0.26)
+    static let paneHeaderBG = Color(hex: 0x1A202A).opacity(0.33)
+    static let terminalBG = Color(hex: 0x14181F).opacity(0.37)
     static let border = Color(hex: 0x2A3341)
     static let accent = Color(hex: 0x5B9DFF)
 
-    static let terminalBGNS = NSColor(hex: 0x14181F).withAlphaComponent(0.74)
+    /// SwiftTerm paints its own background over ours — keep it clear and let
+    /// the translucent SwiftUI layer underneath provide the tint.
+    static let terminalBGNS = NSColor.clear
     static let terminalFGNS = NSColor(hex: 0xC9CFD8)
 
     /// One-Dark-flavored 16-color ANSI palette (8-bit components).

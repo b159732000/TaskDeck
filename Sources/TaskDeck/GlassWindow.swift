@@ -26,6 +26,7 @@ struct TransparentWindow: NSViewRepresentable {
             guard let w = window else { return }
             w.isOpaque = false
             w.backgroundColor = .clear
+            w.titlebarAppearsTransparent = true
         }
     }
 }

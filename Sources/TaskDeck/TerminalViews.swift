@@ -3,27 +3,38 @@ import SwiftTerm
 import SwiftUI
 import TaskDeckCore
 
+/// TerminalView that composites with alpha so the glass background shows
+/// through (stock SwiftTerm reports opaque).
+final class GlassTerminalView: TerminalView {
+    override var isOpaque: Bool { false }
+}
+
 /// SwiftTerm view attached to a daemon-owned pane over the socket.
 struct TerminalHostView: NSViewRepresentable {
     let paneID: String
     let client: DaemonClient
+    let font: NSFont
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
     func makeNSView(context: Context) -> TerminalView {
-        let tv = TerminalView(frame: CGRect(x: 0, y: 0, width: 600, height: 400))
+        let tv = GlassTerminalView(frame: CGRect(x: 0, y: 0, width: 600, height: 400))
         // Keep SwiftTerm's stock ANSI palette: a custom one shipped briefly
         // and made dim/dark-colored TUI text unreadable (invisible against
         // the dark background). Revisit only with side-by-side visual review.
         tv.nativeBackgroundColor = Theme.terminalBGNS
         tv.nativeForegroundColor = Theme.terminalFGNS
-        tv.font = NSFont.monospacedSystemFont(ofSize: 12.5, weight: .regular)
+        tv.font = font
         tv.terminalDelegate = context.coordinator
         context.coordinator.attach(tv: tv, client: client, paneID: paneID)
         return tv
     }
 
-    func updateNSView(_ nsView: TerminalView, context: Context) {}
+    func updateNSView(_ nsView: TerminalView, context: Context) {
+        if nsView.font.pointSize != font.pointSize || nsView.font.fontName != font.fontName {
+            nsView.font = font
+        }
+    }
 
     static func dismantleNSView(_ nsView: TerminalView, coordinator: Coordinator) {
         coordinator.detach()
@@ -113,7 +124,6 @@ struct TerminalGridView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        .background(Theme.windowBG)
     }
 }
 
@@ -203,7 +213,7 @@ struct PaneContainerView: View {
             header
             ZStack(alignment: .bottom) {
                 if let info {
-                    TerminalHostView(paneID: info.id, client: model.client)
+                    TerminalHostView(paneID: info.id, client: model.client, font: model.terminalFont)
                         .id(info.id)
                         .padding(.leading, 6)
                         .padding(.top, 4)
@@ -234,7 +244,7 @@ struct PaneContainerView: View {
                     : (info!.running ? Color(hex: 0x8FCF7F) : Color(hex: 0xE8646E)))
                 .frame(width: 7, height: 7)
             Text(spec?.title ?? "?")
-                .font(.system(size: 11, weight: .medium))
+                .font(.system(size: 11 * model.uiScale, weight: .medium))
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
             if let team = spec?.team {

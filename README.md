@@ -77,6 +77,8 @@ Everything user-specific lives **outside the repo** in
 | `tasksDir` | `~/Documents/TaskDeck/tasks` | where task notes (`<slug>.md`) live. Point it at a folder inside an Obsidian vault to get sync/backup/editing for free. |
 | `defaultCwd` | `~` | working directory for new panes |
 | `shell` | `/bin/zsh` | login shell for every pane (spawned `-il`); zsh/bash/fish all work |
+| `terminalFont` | auto | terminal font name. Unset: installed Nerd Fonts are probed (MesloLGS NF first), then the system mono font. Powerline/PUA prompt glyphs **require** a Nerd Font — there is no system fallback for private-use glyphs. |
+| `terminalFontSize` | 13 | terminal font size |
 | `teams` | one `claude` entry | one entry per AI CLI account — see below |
 | `quotaCommand` | none | CLI printing the quota JSON for the bottom bar — see below |
 

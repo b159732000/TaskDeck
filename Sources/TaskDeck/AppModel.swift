@@ -22,6 +22,16 @@ final class AppModel: ObservableObject {
     let client = DaemonClient()
     let hasITerm2 = FileManager.default.fileExists(atPath: "/Applications/iTerm.app")
 
+    /// App-wide content zoom (⌘+/⌘-/⌘0). Scales terminal/notes/quota text.
+    @Published var uiScale: Double {
+        didSet { UserDefaults.standard.set(uiScale, forKey: "uiScale") }
+    }
+
+    var terminalFont: NSFont { Self.resolveTerminalFont(config, scale: uiScale) }
+
+    /// Manual sidebar ordering (drag to reorder); slugs, persisted per machine.
+    @Published var taskOrder: [String] = []
+
     private var sessions: [String: TaskSession] = [:]
     private var dirWatcher: DispatchSourceFileSystemObject?
     private var dirFD: Int32 = -1
@@ -30,7 +40,11 @@ final class AppModel: ObservableObject {
     init() {
         config = AppConfig.load()
         store = TaskStore(dir: config.tasksDirURL)
-        tasks = store.scan()
+        let storedScale = UserDefaults.standard.double(forKey: "uiScale")
+        uiScale = storedScale == 0 ? 1.0 : min(1.6, max(0.7, storedScale))
+        taskOrder = (try? JSONDecoder().decode([String].self,
+                                               from: Data(contentsOf: Self.orderFile))) ?? []
+        rescan()
 
         client.onEvent = { [weak self] m in
             Task { @MainActor in self?.handleEvent(m) }
@@ -53,6 +67,25 @@ final class AppModel: ObservableObject {
         quotaTimer = Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.refreshQuota() }
         }
+    }
+
+    func zoomIn() { uiScale = min(1.6, ((uiScale + 0.1) * 10).rounded() / 10) }
+    func zoomOut() { uiScale = max(0.7, ((uiScale - 0.1) * 10).rounded() / 10) }
+    func zoomReset() { uiScale = 1.0 }
+
+    /// Prompt glyphs (powerline / Nerd Font private-use area) have NO system
+    /// font fallback — without a Nerd Font they render as "?". Probe the
+    /// configured font, then common Nerd Fonts, then give up gracefully.
+    static func resolveTerminalFont(_ config: AppConfig, scale: Double = 1.0) -> NSFont {
+        let size = CGFloat(config.terminalFontSize ?? 13) * CGFloat(scale)
+        var names: [String] = []
+        if let f = config.terminalFont { names.append(f) }
+        names += ["MesloLGS NF", "MesloLGS Nerd Font Mono", "JetBrainsMono Nerd Font Mono",
+                  "Hack Nerd Font Mono", "FiraCode Nerd Font Mono"]
+        for n in names {
+            if let f = NSFont(name: n, size: size) { return f }
+        }
+        return .monospacedSystemFont(ofSize: size, weight: .regular)
     }
 
     func session(_ slug: String) -> TaskSession {
@@ -91,8 +124,37 @@ final class AppModel: ObservableObject {
 
     // MARK: - Tasks
 
+    private static var orderFile: URL {
+        Paths.appSupport.appendingPathComponent("taskorder.json")
+    }
+
     func rescan() {
-        tasks = store.scan()
+        var list = store.scan()
+        // Merge manual order: unseen tasks go to the front, vanished ones drop.
+        let current = Set(list.map(\.id))
+        let known = Set(taskOrder)
+        let newOnes = list.map(\.id).filter { !known.contains($0) }
+        let merged = newOnes + taskOrder.filter { current.contains($0) }
+        if merged != taskOrder {
+            taskOrder = merged
+            saveOrder()
+        }
+        let index = Dictionary(uniqueKeysWithValues: taskOrder.enumerated().map { ($1, $0) })
+        list.sort { (index[$0.id] ?? .max) < (index[$1.id] ?? .max) }
+        tasks = list
+    }
+
+    func moveActiveTasks(from: IndexSet, to: Int) {
+        var active = tasks.filter { $0.status == "active" }.map(\.id)
+        let rest = tasks.filter { $0.status != "active" }.map(\.id)
+        active.move(fromOffsets: from, toOffset: to)
+        taskOrder = active + rest
+        saveOrder()
+        rescan()
+    }
+
+    private func saveOrder() {
+        try? (try? JSONEncoder().encode(taskOrder))?.write(to: Self.orderFile)
     }
 
     func newTask() {

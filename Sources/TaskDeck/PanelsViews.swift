@@ -12,6 +12,7 @@ struct SidebarView: View {
         List(selection: $model.selection) {
             Section("進行中") {
                 ForEach(model.tasks.filter { $0.status == "active" }) { row($0) }
+                    .onMove { from, to in model.moveActiveTasks(from: from, to: to) }
             }
             let done = model.tasks.filter { $0.status == "done" }
             if !done.isEmpty {
@@ -21,6 +22,7 @@ struct SidebarView: View {
             }
         }
         .listStyle(.sidebar)
+        .scrollContentBackground(.hidden)
         .safeAreaInset(edge: .bottom) {
             HStack {
                 Button {
@@ -35,7 +37,10 @@ struct SidebarView: View {
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 8)
-            .background(.bar)
+        }
+        .background(Theme.panelBG)
+        .overlay(alignment: .trailing) {
+            Rectangle().fill(Theme.border).frame(width: 1)
         }
         .alert("重新命名任務", isPresented: Binding(
             get: { renamingSlug != nil },
@@ -59,11 +64,11 @@ struct SidebarView: View {
                 .frame(width: 7, height: 7)
             VStack(alignment: .leading, spacing: 1) {
                 Text(t.title)
-                    .font(.system(size: 12.5))
+                    .font(.system(size: 12.5 * model.uiScale))
                     .lineLimit(1)
                 if let created = t.created {
                     Text(created)
-                        .font(.system(size: 9.5))
+                        .font(.system(size: 9.5 * model.uiScale))
                         .foregroundStyle(.tertiary)
                         .lineLimit(1)
                 }
@@ -116,32 +121,51 @@ struct TaskDetailView: View {
     @AppStorage("notesColumnWidth") private var notesWidth: Double = 380
 
     var body: some View {
-        GeometryReader { geo in
-            let clamped = min(max(120, notesWidth), max(120, Double(geo.size.width) - 168))
-            HStack(spacing: 0) {
-                TerminalGridView()
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                ColumnDividerHandle(width: $notesWidth, total: geo.size.width)
-                NotesColumn()
-                    .frame(width: CGFloat(clamped))
+        VStack(spacing: 0) {
+            HStack(spacing: 10) {
+                Text(slug)
+                    .font(.system(size: 13, weight: .semibold))
+                    .lineLimit(1)
+                if let team = session.machine.primaryTeam {
+                    Text("主力 \(team)")
+                        .font(.system(size: 10))
+                        .foregroundStyle(Theme.accent)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Theme.accent.opacity(0.14), in: Capsule())
+                }
+                Spacer()
+                NewPaneMenu(labelStyle: .toolbar)
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
+            }
+            .padding(.horizontal, 12)
+            .frame(height: 36)
+
+            Rectangle().fill(Theme.border).frame(height: 1)
+
+            GeometryReader { geo in
+                let clamped = min(max(120, notesWidth), max(120, Double(geo.size.width) - 168))
+                HStack(spacing: 0) {
+                    TerminalGridView()
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    ColumnDividerHandle(width: $notesWidth, total: geo.size.width)
+                    NotesColumn()
+                        .frame(width: CGFloat(clamped))
+                }
             }
         }
         .background(Theme.windowBG)
-        .toolbar {
-            ToolbarItemGroup(placement: .primaryAction) {
-                NewPaneMenu(labelStyle: .toolbar)
-            }
-        }
-        .navigationTitle(slug)
-        .navigationSubtitle(session.machine.primaryTeam.map { "主力：\($0)" } ?? "")
     }
 }
 
-/// Draggable divider for the terminal ↔ notes columns (notes width is the
-/// persisted value; dragging left widens the notes side).
+/// Draggable divider between columns. `sign` says which side of the handle
+/// the bound width belongs to: +1 = panel on the left grows when dragging
+/// right (sidebar); -1 = panel on the right grows when dragging left (notes).
 struct ColumnDividerHandle: View {
     @Binding var width: Double
     let total: CGFloat
+    var sign: Double = -1
     @State private var startWidth: Double?
     @State private var hovering = false
 
@@ -163,7 +187,7 @@ struct ColumnDividerHandle: View {
                 DragGesture(minimumDistance: 1)
                     .onChanged { v in
                         if startWidth == nil { startWidth = width }
-                        let next = (startWidth ?? width) - Double(v.translation.width)
+                        let next = (startWidth ?? width) + sign * Double(v.translation.width)
                         width = min(max(120, next), max(120, Double(total) - 168))
                     }
                     .onEnded { _ in startWidth = nil }
@@ -171,44 +195,7 @@ struct ColumnDividerHandle: View {
     }
 }
 
-/// NavigationSplitView doesn't expose its divider position, so we reach for
-/// the backing NSSplitView and give it an AppKit autosave name — sidebar
-/// width then persists across launches for free.
-struct SplitViewAutosave: NSViewRepresentable {
-    let name: String
-
-    func makeNSView(context: Context) -> NSView {
-        let v = ProbeView()
-        v.desiredName = name
-        return v
-    }
-
-    func updateNSView(_ nsView: NSView, context: Context) {}
-
-    final class ProbeView: NSView {
-        var desiredName = ""
-
-        override func viewDidMoveToWindow() {
-            super.viewDidMoveToWindow()
-            let name = desiredName
-            DispatchQueue.main.async { [weak self] in
-                guard let root = self?.window?.contentView, !name.isEmpty else { return }
-                for sv in Self.splitViews(in: root) where (sv.autosaveName ?? "").isEmpty {
-                    sv.autosaveName = name
-                }
-            }
-        }
-
-        static func splitViews(in view: NSView) -> [NSSplitView] {
-            var out: [NSSplitView] = []
-            if let sv = view as? NSSplitView { out.append(sv) }
-            for sub in view.subviews { out.append(contentsOf: splitViews(in: sub)) }
-            return out
-        }
-    }
-}
-
-enum NewPaneMenuStyle { case toolbar, button }
+enum NewPaneMenuStyle { case toolbar, button, icon }
 
 struct NewPaneMenu: View {
     @EnvironmentObject var model: AppModel
@@ -228,10 +215,14 @@ struct NewPaneMenu: View {
             Divider()
             Button("指令（server / 腳本）…") { showCommandSheet = true }
         } label: {
-            if labelStyle == .toolbar {
+            switch labelStyle {
+            case .toolbar:
                 Label("新終端", systemImage: "plus.rectangle.on.rectangle")
-            } else {
+            case .button:
                 Label("加一個終端", systemImage: "plus")
+            case .icon:
+                Image(systemName: "plus.rectangle.on.rectangle")
+                    .font(.system(size: 11))
             }
         }
         .sheet(isPresented: $showCommandSheet) {
@@ -270,6 +261,11 @@ struct NotesColumn: View {
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(.secondary)
                 Spacer()
+                NewPaneMenu(labelStyle: .icon)
+                    .menuStyle(.borderlessButton)
+                    .menuIndicator(.hidden)
+                    .frame(width: 26)
+                    .help("新終端（Shell／AI／指令）")
                 Button {
                     model.openInObsidian(session.slug)
                 } label: {
@@ -295,7 +291,7 @@ struct NotesColumn: View {
                 get: { session.noteText },
                 set: { session.noteText = $0 }
             ))
-            .font(.system(size: 13, design: .monospaced))
+            .font(.system(size: 13 * model.uiScale, design: .monospaced))
             .lineSpacing(2.5)
             .scrollContentBackground(.hidden)
             .padding(.horizontal, 8)
@@ -351,7 +347,8 @@ struct QuotaFooterView: View {
             .background(Theme.paneHeaderBG)
 
             ScrollView([.horizontal, .vertical], showsIndicators: false) {
-                Text(AnsiRenderer.render(model.quotaText.isEmpty ? "（讀取中…）" : model.quotaText))
+                Text(AnsiRenderer.render(model.quotaText.isEmpty ? "（讀取中…）" : model.quotaText,
+                                         size: 11 * model.uiScale))
                     .lineSpacing(2)
                     .fixedSize()
                     .padding(.horizontal, 12)
@@ -363,6 +360,6 @@ struct QuotaFooterView: View {
 
     private var quotaHeight: CGFloat {
         let lines = max(3, model.quotaText.split(separator: "\n", omittingEmptySubsequences: false).count)
-        return CGFloat(min(lines, 12)) * 17 + 16
+        return CGFloat(min(lines, 12)) * 17 * CGFloat(model.uiScale) + 16
     }
 }

@@ -28,6 +28,14 @@ struct TaskDeckApp: App {
                 Button("新任務") { model.newTask() }
                     .keyboardShortcut("n", modifiers: [.command, .shift])
             }
+            CommandGroup(after: .toolbar) {
+                Button("放大") { model.zoomIn() }
+                    .keyboardShortcut("=", modifiers: .command)
+                Button("縮小") { model.zoomOut() }
+                    .keyboardShortcut("-", modifiers: .command)
+                Button("實際大小") { model.zoomReset() }
+                    .keyboardShortcut("0", modifiers: .command)
+            }
         }
 
         WindowGroup("任務", id: "task", for: String.self) { $slug in
@@ -43,21 +51,28 @@ struct TaskDeckApp: App {
 struct ContentView: View {
     @EnvironmentObject var model: AppModel
 
+    @AppStorage("sidebarWidth") private var sidebarWidth: Double = 230
+
     var body: some View {
-        NavigationSplitView {
-            SidebarView()
-                .navigationSplitViewColumnWidth(min: 180, ideal: 220, max: 320)
-        } detail: {
-            if let slug = model.selection {
-                TaskDetailView(slug: slug)
-                    .environmentObject(model.session(slug))
-                    .id(slug)
-            } else {
-                EmptyStateView()
+        GeometryReader { geo in
+            let w = CGFloat(min(max(150, sidebarWidth), 420))
+            HStack(spacing: 0) {
+                SidebarView()
+                    .frame(width: w)
+                ColumnDividerHandle(width: $sidebarWidth, total: geo.size.width, sign: +1)
+                Group {
+                    if let slug = model.selection {
+                        TaskDetailView(slug: slug)
+                            .environmentObject(model.session(slug))
+                            .id(slug)
+                    } else {
+                        EmptyStateView()
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
         .frame(minWidth: 980, minHeight: 600)
-        .background(SplitViewAutosave(name: "TaskDeckMainSplit"))
         .glassWindow()
         .preferredColorScheme(.dark)
     }
