@@ -125,31 +125,38 @@ struct SidebarView: View {
     }
 
     private func row(_ t: TaskNote) -> some View {
-        HStack(spacing: 8) {
-            Circle()
-                .fill(model.taskHasLivePane(t.id) ? Color(hex: 0x8FCF7F) : Color.secondary.opacity(0.3))
-                .frame(width: 7, height: 7)
-            VStack(alignment: .leading, spacing: 1) {
-                Text(t.title)
-                    .font(.system(size: 12.5 * model.uiScale))
-                    .lineLimit(1)
-                if let created = t.created {
-                    Text(created)
-                        .font(.system(size: 9.5 * model.uiScale))
-                        .foregroundStyle(.tertiary)
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 8) {
+                Circle()
+                    .fill(model.taskHasLivePane(t.id) ? Color(hex: 0x8FCF7F) : Color.secondary.opacity(0.3))
+                    .frame(width: 7, height: 7)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(t.title)
+                        .font(.system(size: 12.5 * model.uiScale))
                         .lineLimit(1)
+                    if let created = t.created {
+                        Text(created)
+                            .font(.system(size: 9.5 * model.uiScale))
+                            .foregroundStyle(.tertiary)
+                            .lineLimit(1)
+                    }
+                }
+                Spacer(minLength: 4)
+                // AI state at a glance: 🟢 running, 🟡 waiting for the user,
+                // 🔴 blocked on a permission prompt (hook-fed, live panes only).
+                // Click = "已看過" — hides until the state changes again.
+                if let badge = model.aiBadge(t.id) {
+                    Button { model.ackAIStatus(t.id) } label: {
+                        Text(badge).font(.system(size: 9))
+                    }
+                    .buttonStyle(.plain)
+                    .help("點一下＝已看過（狀態再變會重新亮起）")
                 }
             }
-            Spacer(minLength: 4)
-            // AI state at a glance: 🟢 running, 🟡 waiting for the user,
-            // 🔴 blocked on a permission prompt (hook-fed, live panes only).
-            // Click = "已看過" — hides until the state changes again.
-            if let badge = model.aiBadge(t.id) {
-                Button { model.ackAIStatus(t.id) } label: {
-                    Text(badge).font(.system(size: 9))
-                }
-                .buttonStyle(.plain)
-                .help("點一下＝已看過（狀態再變會重新亮起）")
+            // 選中的任務在列上直接給狀態切換小按鈕（危險動作留右鍵）。
+            if model.selection == t.id, t.status == "active" {
+                LifecycleChips(task: t)
+                    .padding(.leading, 15)
             }
         }
         .padding(.vertical, 1)
@@ -227,7 +234,6 @@ struct TaskDetailView: View {
                         .background(Theme.accent.opacity(0.14), in: Capsule())
                 }
                 Spacer()
-                LifecycleButtons(slug: slug)
                 ResourceMenu()
                 NewPaneMenu(labelStyle: .toolbar)
                     .menuStyle(.borderlessButton)
@@ -239,7 +245,13 @@ struct TaskDetailView: View {
             Rectangle().fill(Theme.border).frame(height: 1)
 
             GeometryReader { geo in
-                let clamped = min(max(120, notesWidth), max(120, Double(geo.size.width) - 168))
+                // 視窗變窄時的擠壓優先序（James 260718）：先壓「筆記欄」到
+                // 下限，盡量保住主終端格的寬度——搬去小螢幕時終端優先。
+                let total = Double(geo.size.width)
+                let notesMin = 140.0
+                let terminalFloor = max(480.0, total * 0.45)
+                let maxNotes = max(notesMin, total - terminalFloor)
+                let clamped = min(max(notesMin, notesWidth), maxNotes)
                 HStack(spacing: 0) {
                     TerminalGridView()
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -289,24 +301,22 @@ struct ColumnDividerHandle: View {
     }
 }
 
-/// Quick lifecycle switches for the CURRENT task（常用的狀態切換提拔成
-/// 按鈕；收尾／徹底刪除等危險動作留在右鍵選單，避免誤觸）。
-struct LifecycleButtons: View {
+/// Quick lifecycle switches shown on the SELECTED sidebar row（常用的狀態
+/// 切換就在任務列上；收尾／徹底刪除等危險動作留在右鍵選單，避免誤觸）。
+struct LifecycleChips: View {
     @EnvironmentObject var model: AppModel
-    let slug: String
+    let task: TaskNote
 
     var body: some View {
-        if let t = model.tasks.first(where: { $0.id == slug }), t.status == "active" {
-            HStack(spacing: 2) {
-                if t.group != nil {
-                    chip("回進行中", "arrow.uturn.backward") { model.setGroupFlag(slug, nil) }
-                }
-                if t.group != "read" {
-                    chip("已讀", "eye") { model.setGroupFlag(slug, "read") }
-                }
-                if t.group != "waiting" {
-                    chip("等外部", "hourglass") { model.setGroupFlag(slug, "waiting") }
-                }
+        HStack(spacing: 3) {
+            if task.group != nil {
+                chip("回進行中", "arrow.uturn.backward") { model.setGroupFlag(task.id, nil) }
+            }
+            if task.group != "read" {
+                chip("已讀", "eye") { model.setGroupFlag(task.id, "read") }
+            }
+            if task.group != "waiting" {
+                chip("等外部", "hourglass") { model.setGroupFlag(task.id, "waiting") }
             }
         }
     }
@@ -315,13 +325,13 @@ struct LifecycleButtons: View {
                       action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Label(title, systemImage: icon)
-                .font(.system(size: 10.5))
-                .padding(.horizontal, 7)
-                .padding(.vertical, 3)
+                .font(.system(size: 9.5))
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
                 .background(Theme.paneHeaderBG, in: Capsule())
         }
         .buttonStyle(.plain)
-        .help("切換任務狀態（也在側邊欄右鍵選單）")
+        .help("切換任務狀態（也在右鍵選單）")
     }
 }
 
@@ -467,6 +477,9 @@ struct NotesColumn: View {
 struct QuotaFooterView: View {
     @EnvironmentObject var model: AppModel
     @AppStorage("quotaExpanded") private var expanded = true
+    /// 額度表的獨立縮放（疊在全局 uiScale 之上）：右欄變窄（小螢幕給主終端
+    /// 讓位）時，把表縮小到塞得下。
+    @AppStorage("quotaScale") private var quotaScale = 1.0
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -490,6 +503,16 @@ struct QuotaFooterView: View {
                         .help("上次更新失敗，顯示的是舊資料（stderr 在 /tmp/taskdeck-quota.err）")
                 }
                 Spacer()
+                Button { quotaScale = max(0.65, ((quotaScale - 0.05) * 100).rounded() / 100) } label: {
+                    Image(systemName: "textformat.size.smaller").font(.system(size: 9))
+                }
+                .buttonStyle(.plain)
+                .help("縮小額度表（獨立於全局縮放）")
+                Button { quotaScale = min(1.3, ((quotaScale + 0.05) * 100).rounded() / 100) } label: {
+                    Image(systemName: "textformat.size.larger").font(.system(size: 9))
+                }
+                .buttonStyle(.plain)
+                .help("放大額度表；目前 \(Int(quotaScale * 100))%")
                 if let t = model.quotaUpdatedAt {
                     Text(t, style: .time)
                         .font(.system(size: 10))
@@ -515,7 +538,7 @@ struct QuotaFooterView: View {
             if expanded {
                 ScrollView([.horizontal, .vertical], showsIndicators: false) {
                     Text(AnsiRenderer.render(model.quotaText.isEmpty ? "（讀取中…）" : model.quotaText,
-                                             size: 11 * model.uiScale))
+                                             size: 11 * model.uiScale * quotaScale))
                         .lineSpacing(2)
                         .fixedSize()
                         .padding(.horizontal, 12)
@@ -528,6 +551,6 @@ struct QuotaFooterView: View {
 
     private var quotaHeight: CGFloat {
         let lines = max(3, model.quotaText.split(separator: "\n", omittingEmptySubsequences: false).count)
-        return CGFloat(min(lines, 12)) * 17 * CGFloat(model.uiScale) + 16
+        return CGFloat(min(lines, 12)) * 17 * CGFloat(model.uiScale * quotaScale) + 16
     }
 }
