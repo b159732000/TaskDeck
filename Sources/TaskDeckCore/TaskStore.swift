@@ -8,6 +8,12 @@ public struct TaskNote: Identifiable, Equatable {
     public var status: String // "active" | "done"
     public var created: String?
     public var path: URL
+    /// Manual lifecycle group from frontmatter: nil = normal flow,
+    /// "waiting" = parked on external feedback (colleague / CI / review).
+    public var group: String?
+    /// When the task was moved into the waiting group (frontmatter,
+    /// "yyyy-MM-dd HH:mm") — drives the >72h auto-sink bucket.
+    public var waitingSince: String?
 }
 
 public struct PaneSpec: Codable, Identifiable, Equatable {
@@ -169,7 +175,9 @@ public final class TaskStore {
                                 title: Self.h1(text) ?? slug,
                                 status: fm["status"] ?? "active",
                                 created: fm["created"],
-                                path: url))
+                                path: url,
+                                group: fm["group"],
+                                waitingSince: fm["waiting_since"]))
         }
         out.sort { a, b in
             if a.status != b.status { return a.status == "active" }
@@ -267,6 +275,20 @@ public final class TaskStore {
             return String(line.dropFirst(2)).trimmingCharacters(in: .whitespaces)
         }
         return nil
+    }
+
+    /// Remove a frontmatter key (line) entirely. No-op when absent.
+    public static func removeFrontmatterKey(_ text: String, key: String) -> String {
+        guard text.hasPrefix("---\n") else { return text }
+        let pattern = "(?m)^\(NSRegularExpression.escapedPattern(for: key)): .*\n"
+        if let close = text.range(of: "\n---", range: text.index(text.startIndex, offsetBy: 4) ..< text.endIndex),
+           let line = text.range(of: pattern, options: .regularExpression,
+                                 range: text.startIndex ..< close.upperBound) {
+            var t = text
+            t.removeSubrange(line)
+            return t
+        }
+        return text
     }
 
     public static func setFrontmatterValue(_ text: String, key: String, value: String) -> String {

@@ -168,15 +168,6 @@ final class AppModel: ObservableObject {
         tasks = list
     }
 
-    func moveActiveTasks(from: IndexSet, to: Int) {
-        var active = tasks.filter { $0.status == "active" }.map(\.id)
-        let rest = tasks.filter { $0.status != "active" }.map(\.id)
-        active.move(fromOffsets: from, toOffset: to)
-        taskOrder = active + rest
-        saveOrder()
-        rescan()
-    }
-
     private func saveOrder() {
         try? (try? JSONEncoder().encode(taskOrder))?.write(to: Self.orderFile)
     }
@@ -297,6 +288,90 @@ final class AppModel: ObservableObject {
                 ackedAI[sid] = entry.ts
             }
         }
+    }
+
+    // MARK: - Sidebar grouping（等你 / 進行中 / 等待外部 / 沉底 / 已完成）
+
+    enum SidebarGroup { case needsYou, running, waitingExt, sunk, done }
+
+    /// Items parked on external feedback sink after 3 days of silence.
+    static let sinkAfter: TimeInterval = 72 * 3600
+
+    private static let fmDate: DateFormatter = {
+        let df = DateFormatter()
+        df.dateFormat = "yyyy-MM-dd HH:mm"
+        return df
+    }()
+
+    /// The strongest unacked "ball is in your court" signal for a task:
+    /// permission beats waiting; `since` = when the AI stopped (oldest such
+    /// signal, so the needs-you queue is FIFO by how long you've been owed).
+    func aiAttention(_ slug: String) -> (permission: Bool, since: Date)? {
+        let machine = sessions[slug]?.machine ?? store.machineState(slug)
+        var permission = false
+        var oldest: Date?
+        for pane in machine.panes where pane.kind == "ai" {
+            guard let sid = pane.sessionID,
+                  let entry = aiStatus[sid],
+                  entry.state == "waiting" || entry.state == "permission",
+                  paneRuntime[pane.id]?.running == true,
+                  Date().timeIntervalSince(entry.ts) < 24 * 3600,
+                  (ackedAI[sid] ?? .distantPast) < entry.ts else { continue }
+            if entry.state == "permission" { permission = true }
+            if oldest == nil || entry.ts < oldest! { oldest = entry.ts }
+        }
+        guard let oldest else { return nil }
+        return (permission, oldest)
+    }
+
+    /// Newest hook signal across the task's AI sessions (acked or not) —
+    /// "last activity" for the sink rule.
+    private func lastAIActivity(_ slug: String) -> Date? {
+        let machine = sessions[slug]?.machine ?? store.machineState(slug)
+        return machine.panes.compactMap { $0.sessionID.flatMap { aiStatus[$0]?.ts } }.max()
+    }
+
+    func sidebarGroup(_ t: TaskNote) -> SidebarGroup {
+        if t.status == "done" { return .done }
+        if t.group == "waiting" {
+            let since = t.waitingSince.flatMap { Self.fmDate.date(from: $0) } ?? Date()
+            let last = max(lastAIActivity(t.id) ?? .distantPast, since)
+            return Date().timeIntervalSince(last) > Self.sinkAfter ? .sunk : .waitingExt
+        }
+        return aiAttention(t.id) != nil ? .needsYou : .running
+    }
+
+    /// Toggle the manual "waiting on external feedback" park. Parked tasks
+    /// keep their badges but never jump groups on AI signals — only you
+    /// move them back.
+    func setWaiting(_ slug: String, _ waiting: Bool) {
+        func transform(_ text: String) -> String {
+            if waiting {
+                let stamped = TaskStore.setFrontmatterValue(text, key: "group", value: "waiting")
+                return TaskStore.setFrontmatterValue(stamped, key: "waiting_since",
+                                                     value: Self.fmDate.string(from: Date()))
+            }
+            let cleared = TaskStore.removeFrontmatterKey(text, key: "group")
+            return TaskStore.removeFrontmatterKey(cleared, key: "waiting_since")
+        }
+        if let s = sessions[slug] {
+            s.noteText = transform(s.noteText)
+            s.flushNote()
+        } else {
+            store.write(slug, transform(store.read(slug)))
+        }
+        rescan()
+    }
+
+    /// Reorder within the 進行中 group（drag）：the moved slice is written
+    /// back to the front of the global preference order; everything else
+    /// keeps its relative position.
+    func moveRunningTasks(_ running: [String], from: IndexSet, to: Int) {
+        var slugs = running
+        slugs.move(fromOffsets: from, toOffset: to)
+        taskOrder = slugs + taskOrder.filter { !slugs.contains($0) }
+        saveOrder()
+        rescan()
     }
 
     private func watchStatusDir() {

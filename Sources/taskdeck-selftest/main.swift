@@ -103,6 +103,24 @@ _ = ResourceOps.setChromeSnapshot("# t\n\n## Resources",
                                   entries: [(title: "x", url: "https://x.example.com")])
 check("edge: snapshot onto EOF heading survives", true)
 
+// MARK: frontmatter — waiting-group round trip
+
+let fmNote = "---\nstatus: active\ncreated: 2026-07-17 20:00\n---\n\n# t\n\n內文 group: waiting 這行不是 frontmatter"
+let parked = TaskStore.setFrontmatterValue(
+    TaskStore.setFrontmatterValue(fmNote, key: "group", value: "waiting"),
+    key: "waiting_since", value: "2026-07-17 21:00")
+check("fm: park sets group", TaskStore.frontmatter(parked)["group"] == "waiting")
+check("fm: park sets since", TaskStore.frontmatter(parked)["waiting_since"] == "2026-07-17 21:00")
+let unparked = TaskStore.removeFrontmatterKey(
+    TaskStore.removeFrontmatterKey(parked, key: "group"), key: "waiting_since")
+check("fm: unpark removes both",
+      TaskStore.frontmatter(unparked)["group"] == nil
+      && TaskStore.frontmatter(unparked)["waiting_since"] == nil)
+check("fm: body text untouched", unparked.contains("內文 group: waiting 這行不是 frontmatter"))
+check("fm: other keys survive", TaskStore.frontmatter(unparked)["created"] == "2026-07-17 20:00")
+check("fm: remove absent key is no-op",
+      TaskStore.removeFrontmatterKey(fmNote, key: "group") == fmNote)
+
 // MARK: slack deep links
 
 check("slack: permalink → deep link",

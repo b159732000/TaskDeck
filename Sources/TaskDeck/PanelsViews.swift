@@ -9,14 +9,49 @@ struct SidebarView: View {
     @State private var renameText = ""
     @State private var deletingSlug: String?
     @AppStorage("doneSectionExpanded") private var doneExpanded = true
+    @AppStorage("sunkSectionExpanded") private var sunkExpanded = false
 
     var body: some View {
+        // 由上而下：等你（自動佇列）→ 進行中 → 等待外部（手動）→ 沉底
+        //（>3 天沒動靜，預設折疊）→ 已完成（封存）。規則見 AppModel.sidebarGroup。
+        let groups = Dictionary(grouping: model.tasks, by: { model.sidebarGroup($0) })
+        let needsYou = (groups[.needsYou] ?? []).sorted { a, b in
+            let ia = model.aiAttention(a.id) ?? (false, .distantFuture)
+            let ib = model.aiAttention(b.id) ?? (false, .distantFuture)
+            if ia.permission != ib.permission { return ia.permission } // 🔴 first
+            return ia.since < ib.since // owed longest on top
+        }
+        let running = groups[.running] ?? []
+        let waiting = (groups[.waitingExt] ?? []).sorted {
+            ($0.waitingSince ?? "") > ($1.waitingSince ?? "")
+        }
+        let sunk = groups[.sunk] ?? []
+        let done = groups[.done] ?? []
+
         List(selection: $model.selection) {
-            Section("進行中") {
-                ForEach(model.tasks.filter { $0.status == "active" }) { row($0) }
-                    .onMove { from, to in model.moveActiveTasks(from: from, to: to) }
+            if !needsYou.isEmpty {
+                Section("等你（\(needsYou.count)）") {
+                    ForEach(needsYou) { row($0) }
+                }
             }
-            let done = model.tasks.filter { $0.status == "done" }
+            Section("進行中") {
+                ForEach(running) { row($0) }
+                    .onMove { from, to in
+                        model.moveRunningTasks(running.map(\.id), from: from, to: to)
+                    }
+            }
+            if !waiting.isEmpty {
+                Section("等待外部（\(waiting.count)）") {
+                    ForEach(waiting) { row($0) }
+                }
+            }
+            if !sunk.isEmpty {
+                Section(isExpanded: $sunkExpanded) {
+                    ForEach(sunk) { row($0) }
+                } header: {
+                    Text("沉底 >3 天（\(sunk.count)）")
+                }
+            }
             if !done.isEmpty {
                 Section(isExpanded: $doneExpanded) {
                     ForEach(done) { row($0) }
@@ -120,6 +155,11 @@ struct SidebarView: View {
             Button("在 Finder 顯示筆記") { model.revealNote(t.id) }
             Divider()
             if t.status == "active" {
+                if t.group == "waiting" {
+                    Button("移回進行中") { model.setWaiting(t.id, false) }
+                } else {
+                    Button("移到等待外部（同事 / review / CI）") { model.setWaiting(t.id, true) }
+                }
                 Button("收尾（關閉全部終端＋標記完成）", role: .destructive) { model.archiveTask(t.id) }
             } else {
                 Button("重新啟用") { model.unarchiveTask(t.id) }
