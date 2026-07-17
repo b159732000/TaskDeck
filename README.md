@@ -3,10 +3,10 @@
 Task-centric terminal + notes workspace for AI coding on macOS.
 
 One **task** = a set of terminals (your AI CLI session, dev servers, helper
-scripts) + one markdown note (topic, scratch memos, the next prompt you plan
-to send, AI session ids). TaskDeck keeps them paired — across app restarts,
-display unplugs and reboots — instead of scattering them over macOS Spaces
-and a notes app that can't talk to your terminals.
+scripts) + one markdown note (topic, scratch memos, AI session ids).
+TaskDeck keeps them paired — across app restarts, display unplugs and
+reboots — instead of scattering them over macOS Spaces and a notes app that
+can't talk to your terminals.
 
 繁中簡介：一個任務＝一組 terminal＋一篇 markdown 筆記，永遠配對。GUI 重開不影響
 terminal（PTY 由常駐 daemon 持有）；重開機後按宣告式設定隨點隨還原，AI 對話用
@@ -24,63 +24,144 @@ TaskDeck.app (SwiftUI)  ──unix socket──▶  taskdeckd (owns every PTY)
 
 - **taskdeckd** is spawned on demand and outlives the app. Rebuilding /
   relaunching the GUI never kills your terminals.
-- Terminal panes run interactive login zsh; declared commands (AI CLI,
-  `yarn dev`, …) are typed into them, so your aliases work.
-- AI panes (claude-family) pre-generate a session uuid, record it at the top
-  of the note (a small `- <team> <uuid>` list closed by a `---` rule; the
-  rest of the note is free-form), then start with `--session-id`. Restore =
-  `-r <uuid> || --session-id <uuid>` — the same line resumes or starts
-  fresh, never hand-copy session ids.
+- Panes run your **interactive login shell** (configurable, default
+  `/bin/zsh`), so your rc files and aliases load — that's what makes
+  alias-based multi-account setups work (see below).
+- AI panes (`kind: "claude"` teams) pre-generate a session uuid, record it
+  at the top of the note (a `- <team> <uuid>` list closed by a `---` rule;
+  everything below is free-form), then start with `--session-id`. Restore
+  runs `-r <uuid> || --session-id <uuid>` — the same line resumes or starts
+  fresh; you never hand-copy session ids.
 - After a reboot nothing mass-respawns: the task list is instant (plain
   files), terminals restore lazily per task, opt-in `autoStart` per pane.
-- Any pane can also be attached from a real terminal (`taskdeckctl attach`,
-  Ctrl-] detaches) — the "open in iTerm2" menu item uses this. Both views
-  mirror the same daemon-owned PTY.
-- A persistent quota bar at the bottom parses `quotaCommand --json`
-  (designed around [claude-quota]'s schema: accounts × buckets with
-  `percent` / `resets_at` / `detail`), refreshing every 5 minutes.
+- Any pane can be mirrored into a real terminal (`taskdeckctl attach`,
+  Ctrl-] detaches) — the "open in iTerm2" menu item is built on this.
 
 ## Build & run
 
-Requires macOS 14+ and Swift toolchain (Command Line Tools are enough).
+Requires macOS 14+ and a Swift toolchain (Command Line Tools are enough —
+no Xcode needed).
 
 ```sh
-Scripts/bundle.sh          # swift build + assemble dist/TaskDeck.app
-open dist/TaskDeck.app
-Scripts/dev.sh             # rebuild + relaunch GUI (daemon untouched)
+Scripts/bundle.sh    # swift build + assemble dist/TaskDeck.app
+Scripts/dev.sh       # bundle + install to /Applications + relaunch GUI
+                     # (the daemon and your sessions are never touched)
 ```
 
 Headless smoke test of the daemon:
 
 ```sh
-dist/TaskDeck.app/Contents/MacOS/taskdeckctl ping
-dist/TaskDeck.app/Contents/MacOS/taskdeckctl new demo --cmd 'echo hello'
-dist/TaskDeck.app/Contents/MacOS/taskdeckctl tail <paneID> 2
-dist/TaskDeck.app/Contents/MacOS/taskdeckctl attach <paneID>   # Ctrl-] detaches
+CTL="/Applications/TaskDeck.app/Contents/MacOS/taskdeckctl"
+"$CTL" ping
+"$CTL" new demo --cmd 'echo hello'
+"$CTL" tail <paneID> 2
+"$CTL" attach <paneID>    # interactive mirror; Ctrl-] detaches
 ```
 
-## Configuration
+## Configuration reference
 
-`~/Library/Application Support/TaskDeck/config.json`:
+Everything user-specific lives **outside the repo** in
+`~/Library/Application Support/TaskDeck/`:
+
+| File | Purpose |
+|---|---|
+| `config.json` | main config (created with defaults on first launch) |
+| `template.md` | optional template for new task notes (`{title}` / `{created}` placeholders) |
+| `tasks/<slug>.json` | per-machine pane specs & layout (managed by the app) |
+| `daemon.log` | daemon log |
+
+`config.json` fields:
+
+| Field | Default | Meaning |
+|---|---|---|
+| `tasksDir` | `~/Documents/TaskDeck/tasks` | where task notes (`<slug>.md`) live. Point it at a folder inside an Obsidian vault to get sync/backup/editing for free. |
+| `defaultCwd` | `~` | working directory for new panes |
+| `shell` | `/bin/zsh` | login shell for every pane (spawned `-il`); zsh/bash/fish all work |
+| `teams` | one `claude` entry | one entry per AI CLI account — see below |
+| `quotaCommand` | none | CLI printing the quota JSON for the bottom bar — see below |
+
+Each `teams[]` entry:
+
+| Field | Meaning |
+|---|---|
+| `id` | the command typed into the pane — a binary on PATH **or a shell alias/function** (panes are interactive shells, so aliases resolve) |
+| `label` | display name in the "new terminal" menu |
+| `kind` | `"claude"` = Claude Code CLI semantics (`--session-id` / `-r` bookkeeping, auto-recorded into the note). `"other"` = started as-is, no session bookkeeping. |
+| `args` | optional extra CLI args appended at session start, e.g. `"--dangerously-skip-permissions"`. Captured into the pane spec at creation, so restores start identically. |
+
+### Example: multiple accounts of the same CLI
+
+Run several Claude Code accounts side by side by giving each a config dir
+via a shell alias (in your `~/.zshrc`):
+
+```sh
+alias claude2='CLAUDE_CONFIG_DIR="$HOME/.claude-work" claude'
+```
 
 ```json
 {
-  "tasksDir": "~/path/to/your/notes/tasks",
-  "defaultCwd": "~/code",
   "teams": [
-    {"id": "claude", "label": "Claude", "kind": "claude"}
-  ],
-  "quotaCommand": "claude-quota"
+    { "id": "claude",  "label": "Claude (personal)", "kind": "claude" },
+    { "id": "claude2", "label": "Claude (work)",     "kind": "claude",
+      "args": "--dangerously-skip-permissions" }
+  ]
 }
 ```
 
-- `tasksDir` — where task notes live. Point it at an Obsidian vault folder to
-  get syncing/backup/editing for free.
-- `teams` — one entry per AI CLI account/alias. `kind: "claude"` enables
-  automatic session-id bookkeeping; anything else is started as-is.
-- `quotaCommand` — optional CLI whose output is shown in the quota popover.
-- Optional `template.md` next to the config: template for new task notes
-  (`{title}` / `{created}` placeholders).
+Each team gets its own session-id bookkeeping; when one account hits its
+quota, start a pane on another team in the same task and keep going.
+(Sessions don't transfer across accounts — the note carries the context.)
+
+### Quota bar contract
+
+`quotaCommand` can be any executable that prints this JSON shape (add
+`--json` handling yourself if you wrap an existing tool):
+
+```json
+{
+  "accounts": [
+    {
+      "alias": "claude",
+      "buckets": {
+        "5h session": { "percent": 50, "resets_at": "2026-07-17T12:39:59Z" },
+        "weekly all": { "percent": 32, "resets_at": null, "detail": "optional text" }
+      }
+    }
+  ]
+}
+```
+
+`percent` drives the mini bars (color-coded at 60/85), `resets_at`
+(ISO 8601) and `detail` show in tooltips and the ⓘ popover. The bar runs
+`<quotaCommand> --json` via your login shell every 5 minutes. Omit
+`quotaCommand` to hide the bar's content entirely.
+
+## Data & privacy
+
+- TaskDeck talks to nothing but your local daemon and the CLIs you
+  configure. No telemetry, no network calls of its own.
+- **No secrets belong in this repo** — credentials, tokens and personal
+  machine config stay in `~/Library/Application Support/TaskDeck/` and your
+  own shell environment. PRs adding keys or personal config will be
+  rejected.
+
+## Forking / hacking guide
+
+| Where | What |
+|---|---|
+| `Sources/TaskDeckCore/Wire.swift` | socket protocol (length-prefixed JSON frames). Keep changes additive; bump `Wire.version` on breaking changes — a daemon restart kills live sessions. |
+| `Sources/TaskDeckCore/TaskStore.swift` | notes scan/frontmatter, session manifest block, pane specs & layout tree |
+| `Sources/taskdeckd/` | the PTY daemon (forkpty, ring buffers, subscriptions) |
+| `Sources/taskdeckctl/` | headless client (`list/new/type/tail/attach/...`) — also the best way to test daemon changes |
+| `Sources/TaskDeck/` | SwiftUI app; design tokens in `Theme.swift` |
+
+Ground rules that keep the tool trustworthy (see `CLAUDE.md`, which AI
+coding agents pick up automatically):
+
+- Never kill `taskdeckd` casually — it holds the user's live terminals.
+  GUI relaunches are always safe; that separation is the core design.
+- Notes are the user's free-form documents: the only structure the app may
+  touch is the top session-manifest block.
 
 ## Status
 
@@ -88,6 +169,6 @@ Early v0.1 — built in the open, expect sharp edges.
 
 ## License
 
-[PolyForm Noncommercial 1.0.0](LICENSE.md) — free to use, fork and modify for
-noncommercial purposes. **Commercial use requires the author's permission**
-(open an issue to ask).
+[PolyForm Noncommercial 1.0.0](LICENSE.md) — free to use, fork and modify
+for noncommercial purposes. **Commercial use requires the author's
+permission** (open an issue to ask).

@@ -1,6 +1,7 @@
 .build/
 dist/
 Support/AppIcon.iconset/
+CLAUDE.local.md
 .DS_Store
 .swiftpm/
 *.xcodeproj
