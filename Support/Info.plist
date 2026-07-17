@@ -13,9 +13,9 @@
 	<key>CFBundleIconFile</key>
 	<string>AppIcon</string>
 	<key>CFBundleName</key>
-	<string>TaskDeck</string>
+	<string>JamesDesk</string>
 	<key>CFBundleDisplayName</key>
-	<string>TaskDeck</string>
+	<string>JamesDesk</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>

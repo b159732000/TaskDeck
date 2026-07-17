@@ -118,11 +118,16 @@ public struct TaskMachineState: Codable, Equatable {
     public var panes: [PaneSpec]
     public var layout: LayoutNode?
     public var primaryTeam: String?
+    /// CDP window id of the Chrome window TaskDeck opened for this task —
+    /// lets tab snapshots auto-target the right window. Best-effort: ids
+    /// don't survive a Chrome restart; snapshot falls back to a picker.
+    public var chromeWindowID: Int?
 
     public init() {
         panes = []
         layout = nil
         primaryTeam = nil
+        chromeWindowID = nil
     }
 }
 

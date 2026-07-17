@@ -20,6 +20,15 @@ public enum Paths {
     public static var templateFile: URL { appSupport.appendingPathComponent("template.md") }
     public static var daemonLog: URL { appSupport.appendingPathComponent("daemon.log") }
 
+    /// AI pane status files written by the Claude Code hook script
+    /// (`Scripts/taskdeck-ai-status.sh`): one `<session-id>.json` per AI
+    /// session, `{state: running|waiting|permission|ended, ts: epoch}`.
+    public static var statusDir: URL {
+        let d = appSupport.appendingPathComponent("status", isDirectory: true)
+        try? FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
+        return d
+    }
+
     public static func expand(_ path: String) -> String {
         (path as NSString).expandingTildeInPath
     }
@@ -58,10 +67,22 @@ public struct AppConfig: Codable, Equatable {
     /// back to the system monospaced font.
     public var terminalFont: String?
     public var terminalFontSize: Double?
+    /// Base command that launches the user's Chrome instance for task tabs
+    /// (TaskDeck appends `--new-window <urls>`). Lets a dedicated debug
+    /// profile (`--user-data-dir` + `--remote-debugging-port`) be the target.
+    /// Unset → plain `open -na "Google Chrome" --args`.
+    public var chromeCommand: String?
+    /// CDP port used to read tabs back for snapshots (default 9222).
+    public var chromeDebugPort: Int?
+    /// Slack workspace team id (T…): turns https permalinks into slack://
+    /// deep links so resources open in the app, not a browser tab.
+    public var slackTeamID: String?
 
     public init(tasksDir: String, defaultCwd: String, teams: [TeamDef],
                 quotaCommand: String?, shell: String = "/bin/zsh",
-                terminalFont: String? = nil, terminalFontSize: Double? = nil) {
+                terminalFont: String? = nil, terminalFontSize: Double? = nil,
+                chromeCommand: String? = nil, chromeDebugPort: Int? = nil,
+                slackTeamID: String? = nil) {
         self.tasksDir = tasksDir
         self.defaultCwd = defaultCwd
         self.teams = teams
@@ -69,6 +90,9 @@ public struct AppConfig: Codable, Equatable {
         self.shell = shell
         self.terminalFont = terminalFont
         self.terminalFontSize = terminalFontSize
+        self.chromeCommand = chromeCommand
+        self.chromeDebugPort = chromeDebugPort
+        self.slackTeamID = slackTeamID
     }
 
     public static let fallback = AppConfig(
@@ -80,6 +104,7 @@ public struct AppConfig: Codable, Equatable {
 
     enum CodingKeys: String, CodingKey {
         case tasksDir, defaultCwd, teams, quotaCommand, shell, terminalFont, terminalFontSize
+        case chromeCommand, chromeDebugPort, slackTeamID
     }
 
     public init(from decoder: Decoder) throws {
@@ -92,6 +117,9 @@ public struct AppConfig: Codable, Equatable {
         shell = try c.decodeIfPresent(String.self, forKey: .shell) ?? fb.shell
         terminalFont = try c.decodeIfPresent(String.self, forKey: .terminalFont)
         terminalFontSize = try c.decodeIfPresent(Double.self, forKey: .terminalFontSize)
+        chromeCommand = try c.decodeIfPresent(String.self, forKey: .chromeCommand)
+        chromeDebugPort = try c.decodeIfPresent(Int.self, forKey: .chromeDebugPort)
+        slackTeamID = try c.decodeIfPresent(String.self, forKey: .slackTeamID)
     }
 
     public static func load() -> AppConfig {

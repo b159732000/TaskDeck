@@ -40,10 +40,13 @@ unix socket ↔ `taskdeckd` (owns every PTY). Public, source-available repo
 - Code comments in English. Design tokens live in
   `Sources/TaskDeck/Theme.swift` (dark-first).
 - **Task notes are free-form user documents.** The only structure the app
-  (or you) may maintain is the top session-manifest block: a `- <team>
+  (or you) may maintain is (a) the top session-manifest block: a `- <team>
   <session-id>` list right after the H1, closed by a `---` rule
-  (`TaskStore.appendSessionLine`). Never add template sections or reformat
-  the rest of a note.
+  (`TaskStore.appendSessionLine`); and (b) the `## Resources` section — URL
+  bullets the "open resources" button launches (`ResourceOps.parse`), where
+  tab snapshots rewrite ONLY the `### Chrome` subsection
+  (`ResourceOps.setChromeSnapshot`). Never add other template sections or
+  reformat the rest of a note.
 - AI pane resume: uuid is written to the note first, then the session
   starts with `--session-id`; restart uses `-r <uuid> || --session-id
   <uuid>` (single line, resumes or creates). `TeamDef.args` are captured

@@ -28,9 +28,18 @@ struct TerminalHostView: NSViewRepresentable {
 
     func makeNSView(context: Context) -> TerminalView {
         let tv = GlassTerminalView(frame: CGRect(x: 0, y: 0, width: 600, height: 400))
-        // Keep SwiftTerm's stock ANSI palette: a custom one shipped briefly
-        // and made dim/dark-colored TUI text unreadable (invisible against
-        // the dark background). Revisit only with side-by-side visual review.
+        // ANSI palette: SwiftTerm's stock 16 colors, EXCEPT blue/brightBlue.
+        // Stock blue is a near-invisible navy (3,0,178) on our dark glass —
+        // Claude's progress bar renders in it. A fully custom palette shipped
+        // briefly and regressed dim TUI text (dark slots became invisible),
+        // so this is surgical: slots 4/12 remapped to the Theme blues, the
+        // other 14 — including the dim-critical 0/8 — stay byte-identical to
+        // SwiftTerm's `defaultInstalledColors`.
+        tv.installColors(Theme.terminalAnsi.map {
+            SwiftTerm.Color(red: UInt16($0.0) * 257,
+                            green: UInt16($0.1) * 257,
+                            blue: UInt16($0.2) * 257)
+        })
         tv.nativeBackgroundColor = Theme.terminalBGNS
         tv.nativeForegroundColor = Theme.terminalFGNS
         tv.font = font

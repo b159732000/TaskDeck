@@ -17,8 +17,11 @@ ditto dist/TaskDeck.app "$DEST"
 
 # Graceful quit first: it runs the app's exit flush (pending note edits),
 # unlike pkill's SIGTERM. Fall back to pkill only if the app hangs.
+# (AppleScript resolves by CFBundleName — "JamesDesk" since the display
+# rename; keep the old name as fallback for stale installs.)
 if pgrep -x TaskDeck > /dev/null; then
-  osascript -e 'tell application "TaskDeck" to quit' >/dev/null 2>&1 &
+  osascript -e 'tell application "JamesDesk" to quit' >/dev/null 2>&1 \
+    || osascript -e 'tell application "TaskDeck" to quit' >/dev/null 2>&1 &
   for _ in {1..10}; do
     pgrep -x TaskDeck > /dev/null || break
     sleep 0.2

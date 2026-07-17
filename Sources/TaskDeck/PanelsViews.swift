@@ -7,6 +7,8 @@ struct SidebarView: View {
     @Environment(\.openWindow) private var openWindow
     @State private var renamingSlug: String?
     @State private var renameText = ""
+    @State private var deletingSlug: String?
+    @AppStorage("doneSectionExpanded") private var doneExpanded = true
 
     var body: some View {
         List(selection: $model.selection) {
@@ -16,8 +18,10 @@ struct SidebarView: View {
             }
             let done = model.tasks.filter { $0.status == "done" }
             if !done.isEmpty {
-                Section("已完成") {
+                Section(isExpanded: $doneExpanded) {
                     ForEach(done) { row($0) }
+                } header: {
+                    Text("已完成（\(done.count)）")
                 }
             }
         }
@@ -55,6 +59,22 @@ struct SidebarView: View {
         } message: {
             Text("同步改筆記檔名與標題")
         }
+        .alert("徹底刪除任務", isPresented: Binding(
+            get: { deletingSlug != nil },
+            set: { if !$0 { deletingSlug = nil } }
+        )) {
+            Button("刪除", role: .destructive) {
+                if let slug = deletingSlug { model.deleteTask(slug) }
+                deletingSlug = nil
+            }
+            Button("取消", role: .cancel) { deletingSlug = nil }
+        } message: {
+            if let slug = deletingSlug {
+                let n = model.livePaneCount(slug)
+                Text((n > 0 ? "會關閉 \(n) 個運行中的終端。" : "")
+                    + "版面設定將被刪除，筆記會移到「垃圾桶」（可救回）。此動作不可從 App 內復原。")
+            }
+        }
     }
 
     private func row(_ t: TaskNote) -> some View {
@@ -73,6 +93,12 @@ struct SidebarView: View {
                         .lineLimit(1)
                 }
             }
+            Spacer(minLength: 4)
+            // AI state at a glance: 🟢 running, 🟡 waiting for the user,
+            // 🔴 blocked on a permission prompt (hook-fed, live panes only).
+            if let badge = model.aiBadge(t.id) {
+                Text(badge).font(.system(size: 9))
+            }
         }
         .padding(.vertical, 1)
         .tag(t.id)
@@ -90,6 +116,7 @@ struct SidebarView: View {
             } else {
                 Button("重新啟用") { model.unarchiveTask(t.id) }
             }
+            Button("徹底刪除…", role: .destructive) { deletingSlug = t.id }
         }
     }
 }
@@ -135,6 +162,7 @@ struct TaskDetailView: View {
                         .background(Theme.accent.opacity(0.14), in: Capsule())
                 }
                 Spacer()
+                ResourceButtons()
                 NewPaneMenu(labelStyle: .toolbar)
                     .menuStyle(.borderlessButton)
                     .fixedSize()

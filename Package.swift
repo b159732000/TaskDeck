@@ -18,5 +18,9 @@ let package = Package(
                 .product(name: "SwiftTerm", package: "SwiftTerm"),
             ]
         ),
+        // CLT toolchains ship neither XCTest nor swift-testing — self-checks
+        // are a plain executable: `swift run taskdeck-selftest` (exit ≠ 0 on
+        // failure).
+        .executableTarget(name: "taskdeck-selftest", dependencies: ["TaskDeckCore"]),
     ]
 )

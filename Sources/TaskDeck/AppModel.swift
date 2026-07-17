@@ -39,6 +39,13 @@ final class AppModel: ObservableObject {
     private var dirFD: Int32 = -1
     private var quotaTimer: Timer?
 
+    /// AI session states from the Claude Code hook script
+    /// (`Scripts/taskdeck-ai-status.sh` → `Paths.statusDir/<session>.json`):
+    /// sessionID → (running | waiting | permission | ended, written-at).
+    @Published var aiStatus: [String: (state: String, ts: Date)] = [:]
+    private var statusWatcher: DispatchSourceFileSystemObject?
+    private var statusFD: Int32 = -1
+
     init() {
         config = AppConfig.load()
         store = TaskStore(dir: config.tasksDirURL)
@@ -65,6 +72,8 @@ final class AppModel: ObservableObject {
         }
 
         watchTasksDir()
+        watchStatusDir()
+        reloadAIStatus()
 
         quotaTimer = Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.refreshQuota() }
@@ -204,8 +213,88 @@ final class AppModel: ObservableObject {
         rescan()
     }
 
+    /// Delete a task outright: close its terminals, drop the machine state,
+    /// move the note to the system Trash (recoverable — the note may live in
+    /// a synced vault). `done` stays the archive path; this is for tasks not
+    /// worth keeping at all.
+    func deleteTask(_ slug: String) {
+        sessions[slug]?.flushAll()
+        for info in paneRuntime.values where info.taskID == slug {
+            var k = WireMessage(type: "remove")
+            k.paneID = info.id
+            client.fire(k)
+        }
+        paneRuntime = paneRuntime.filter { $0.value.taskID != slug }
+        sessions.removeValue(forKey: slug)
+        try? FileManager.default.removeItem(
+            at: Paths.machineStateDir.appendingPathComponent(slug + ".json"))
+        let note = store.noteURL(slug)
+        do {
+            try FileManager.default.trashItem(at: note, resultingItemURL: nil)
+        } catch {
+            try? FileManager.default.removeItem(at: note)
+        }
+        taskOrder.removeAll { $0 == slug }
+        saveOrder()
+        rescan()
+        if selection == slug {
+            selection = tasks.first(where: { $0.status == "active" })?.id
+        }
+    }
+
     func taskHasLivePane(_ slug: String) -> Bool {
         paneRuntime.values.contains { $0.taskID == slug && $0.running }
+    }
+
+    /// How many live terminals the delete confirmation should warn about.
+    func livePaneCount(_ slug: String) -> Int {
+        paneRuntime.values.filter { $0.taskID == slug && $0.running }.count
+    }
+
+    // MARK: - AI status badges
+
+    /// Sidebar badge for a task's AI panes: 🔴 needs permission, 🟢 running,
+    /// 🟡 turn finished / waiting for the user. Only live panes count — a
+    /// stale file from an exited claude never shows (and entries expire).
+    func aiBadge(_ slug: String) -> String? {
+        let machine = sessions[slug]?.machine ?? store.machineState(slug)
+        var states: Set<String> = []
+        for pane in machine.panes where pane.kind == "ai" {
+            guard let sid = pane.sessionID,
+                  let entry = aiStatus[sid],
+                  entry.state != "ended",
+                  paneRuntime[pane.id]?.running == true,
+                  Date().timeIntervalSince(entry.ts) < 24 * 3600 else { continue }
+            states.insert(entry.state)
+        }
+        if states.contains("permission") { return "🔴" }
+        if states.contains("running") { return "🟢" }
+        if states.contains("waiting") { return "🟡" }
+        return nil
+    }
+
+    private func watchStatusDir() {
+        statusFD = open(Paths.statusDir.path, O_EVTONLY)
+        guard statusFD >= 0 else { return }
+        let src = DispatchSource.makeFileSystemObjectSource(
+            fileDescriptor: statusFD, eventMask: .write, queue: .main)
+        src.setEventHandler { [weak self] in self?.reloadAIStatus() }
+        src.activate()
+        statusWatcher = src
+    }
+
+    private func reloadAIStatus() {
+        var map: [String: (state: String, ts: Date)] = [:]
+        let files = (try? FileManager.default.contentsOfDirectory(
+            at: Paths.statusDir, includingPropertiesForKeys: nil)) ?? []
+        for f in files where f.pathExtension == "json" {
+            guard let d = try? Data(contentsOf: f),
+                  let obj = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
+                  let state = obj["state"] as? String else { continue }
+            let ts = (obj["ts"] as? Double).map { Date(timeIntervalSince1970: $0) } ?? .distantPast
+            map[f.deletingPathExtension().lastPathComponent] = (state, ts)
+        }
+        aiStatus = map
     }
 
     func openInObsidian(_ slug: String) {
