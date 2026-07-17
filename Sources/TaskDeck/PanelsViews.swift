@@ -155,6 +155,10 @@ struct SidebarView: View {
         .padding(.vertical, 1)
         .tag(t.id)
         .contextMenu {
+            Button("複製 ID") {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(t.id, forType: .string)
+            }
             Button("重新命名…") {
                 renameText = t.id
                 renamingSlug = t.id
@@ -223,6 +227,7 @@ struct TaskDetailView: View {
                         .background(Theme.accent.opacity(0.14), in: Capsule())
                 }
                 Spacer()
+                LifecycleButtons(slug: slug)
                 ResourceMenu()
                 NewPaneMenu(labelStyle: .toolbar)
                     .menuStyle(.borderlessButton)
@@ -281,6 +286,42 @@ struct ColumnDividerHandle: View {
                     }
                     .onEnded { _ in startWidth = nil }
             )
+    }
+}
+
+/// Quick lifecycle switches for the CURRENT task（常用的狀態切換提拔成
+/// 按鈕；收尾／徹底刪除等危險動作留在右鍵選單，避免誤觸）。
+struct LifecycleButtons: View {
+    @EnvironmentObject var model: AppModel
+    let slug: String
+
+    var body: some View {
+        if let t = model.tasks.first(where: { $0.id == slug }), t.status == "active" {
+            HStack(spacing: 2) {
+                if t.group != nil {
+                    chip("回進行中", "arrow.uturn.backward") { model.setGroupFlag(slug, nil) }
+                }
+                if t.group != "read" {
+                    chip("已讀", "eye") { model.setGroupFlag(slug, "read") }
+                }
+                if t.group != "waiting" {
+                    chip("等外部", "hourglass") { model.setGroupFlag(slug, "waiting") }
+                }
+            }
+        }
+    }
+
+    private func chip(_ title: String, _ icon: String,
+                      action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Label(title, systemImage: icon)
+                .font(.system(size: 10.5))
+                .padding(.horizontal, 7)
+                .padding(.vertical, 3)
+                .background(Theme.paneHeaderBG, in: Capsule())
+        }
+        .buttonStyle(.plain)
+        .help("切換任務狀態（也在側邊欄右鍵選單）")
     }
 }
 

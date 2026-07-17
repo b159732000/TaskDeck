@@ -45,12 +45,19 @@ public struct TeamDef: Codable, Identifiable, Equatable {
     /// "--dangerously-skip-permissions". Captured into the pane spec at
     /// creation time so restores behave identically.
     public var args: String?
+    /// The CLAUDE_CONFIG_DIR this team's alias points at (e.g.
+    /// "~/.claude-team3"). Lets the GUI infer AI state from the session
+    /// file's mtime when hook signals are absent (sessions started before
+    /// the hooks were installed).
+    public var configDir: String?
 
-    public init(id: String, label: String, kind: String, args: String? = nil) {
+    public init(id: String, label: String, kind: String, args: String? = nil,
+                configDir: String? = nil) {
         self.id = id
         self.label = label
         self.kind = kind
         self.args = args
+        self.configDir = configDir
     }
 }
 

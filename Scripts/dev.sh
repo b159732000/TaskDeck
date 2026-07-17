@@ -7,13 +7,13 @@ cd "$(dirname "$0")/.."
 
 Scripts/bundle.sh "${1:-debug}"
 
-DEST="/Applications/TaskDeck.app"
+DEST="/Applications/JamesDesk.app"
 if [[ ! -w "/Applications" ]]; then
   mkdir -p "$HOME/Applications"
-  DEST="$HOME/Applications/TaskDeck.app"
+  DEST="$HOME/Applications/JamesDesk.app"
 fi
 rm -rf "$DEST"
-ditto dist/TaskDeck.app "$DEST"
+ditto dist/JamesDesk.app "$DEST"
 
 # Graceful quit first: it runs the app's exit flush (pending note edits),
 # unlike pkill's SIGTERM. Fall back to pkill only if the app hangs.

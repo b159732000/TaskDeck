@@ -268,10 +268,9 @@ final class AppModel: ObservableObject {
         var states: Set<String> = []
         for pane in machine.panes where pane.kind == "ai" {
             guard let sid = pane.sessionID,
-                  let entry = aiStatus[sid],
+                  let entry = statusEntry(for: pane),
                   entry.state != "ended",
                   paneRuntime[pane.id]?.running == true,
-                  Date().timeIntervalSince(entry.ts) < 24 * 3600,
                   (ackedAI[sid] ?? .distantPast) < entry.ts else { continue }
             states.insert(entry.state)
         }
@@ -279,6 +278,18 @@ final class AppModel: ObservableObject {
         if states.contains("running") { return "🟢" }
         if states.contains("waiting") { return "🟡" }
         return nil
+    }
+
+    // MARK: - Accent theme
+
+    /// Selected accent preset (hex); Theme.accent reads it through here so a
+    /// change re-renders every observer.
+    @Published var accentHex: Int = UserDefaults.standard.object(forKey: "accentHex") as? Int
+        ?? 0x5B9DFF {
+        didSet {
+            UserDefaults.standard.set(accentHex, forKey: "accentHex")
+            Theme.accentHexCurrent = UInt32(accentHex)
+        }
     }
 
     /// Badge clicked: mark the task's CURRENT AI states as seen.
@@ -308,6 +319,30 @@ final class AppModel: ObservableObject {
         return df
     }()
 
+    /// Effective AI state for a pane: hook signal first; when a session
+    /// predates the hooks (no status file), fall back to the conversation
+    /// file's mtime — writes stop when the AI stops, so quiet ≥10 min ⇒
+    /// "waiting", fresher ⇒ "running". Hook entries expire after a day;
+    /// the mtime fallback gets a week (its whole point is rescuing zombies).
+    private func statusEntry(for pane: PaneSpec) -> (state: String, ts: Date)? {
+        guard pane.kind == "ai", let sid = pane.sessionID else { return nil }
+        if let entry = aiStatus[sid] {
+            return Date().timeIntervalSince(entry.ts) < 24 * 3600 ? entry : nil
+        }
+        guard let team = pane.team,
+              let dir = config.teams.first(where: { $0.id == team })?.configDir else { return nil }
+        let cwd = Paths.expand(pane.cwd ?? config.defaultCwd)
+        let projectSlug = cwd.replacingOccurrences(of: "/", with: "-")
+            .replacingOccurrences(of: ".", with: "-")
+        let file = URL(fileURLWithPath: Paths.expand(dir))
+            .appendingPathComponent("projects/\(projectSlug)/\(sid).jsonl")
+        guard let mtime = (try? FileManager.default.attributesOfItem(atPath: file.path))?[.modificationDate] as? Date,
+              Date().timeIntervalSince(mtime) < 7 * 24 * 3600 else { return nil }
+        return Date().timeIntervalSince(mtime) < 600
+            ? ("running", mtime)
+            : ("waiting", mtime)
+    }
+
     /// The strongest unacked "ball is in your court" signal for a task:
     /// permission beats waiting; `since` = when the AI stopped (oldest such
     /// signal, so the needs-you queue is FIFO by how long you've been owed).
@@ -317,10 +352,9 @@ final class AppModel: ObservableObject {
         var oldest: Date?
         for pane in machine.panes where pane.kind == "ai" {
             guard let sid = pane.sessionID,
-                  let entry = aiStatus[sid],
+                  let entry = statusEntry(for: pane),
                   entry.state == "waiting" || entry.state == "permission",
                   paneRuntime[pane.id]?.running == true,
-                  Date().timeIntervalSince(entry.ts) < 24 * 3600,
                   (ackedAI[sid] ?? .distantPast) < entry.ts else { continue }
             if entry.state == "permission" { permission = true }
             if oldest == nil || entry.ts < oldest! { oldest = entry.ts }
@@ -329,11 +363,11 @@ final class AppModel: ObservableObject {
         return (permission, oldest)
     }
 
-    /// Newest hook signal across the task's AI sessions (acked or not) —
+    /// Newest signal across the task's AI sessions (acked or not) —
     /// "last activity" for the sink rule.
     private func lastAIActivity(_ slug: String) -> Date? {
         let machine = sessions[slug]?.machine ?? store.machineState(slug)
-        return machine.panes.compactMap { $0.sessionID.flatMap { aiStatus[$0]?.ts } }.max()
+        return machine.panes.compactMap { statusEntry(for: $0)?.ts }.max()
     }
 
     /// Does the task have an AI stop signal the user already acknowledged
@@ -341,8 +375,8 @@ final class AppModel: ObservableObject {
     private func hasAckedStop(_ slug: String) -> Bool {
         let machine = sessions[slug]?.machine ?? store.machineState(slug)
         return machine.panes.contains { pane in
-            guard pane.kind == "ai", let sid = pane.sessionID,
-                  let entry = aiStatus[sid],
+            guard let sid = pane.sessionID,
+                  let entry = statusEntry(for: pane),
                   entry.state == "waiting" || entry.state == "permission" else { return false }
             return (ackedAI[sid] ?? .distantPast) >= entry.ts
         }

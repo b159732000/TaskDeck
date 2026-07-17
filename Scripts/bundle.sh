@@ -7,7 +7,7 @@ CONFIG="${1:-debug}"
 swift build -c "$CONFIG"
 
 BIN=".build/$CONFIG"
-APP="dist/TaskDeck.app"
+APP="dist/JamesDesk.app"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp Support/Info.plist "$APP/Contents/Info.plist"

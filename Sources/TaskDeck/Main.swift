@@ -35,6 +35,13 @@ struct TaskDeckApp: App {
                     .keyboardShortcut("-", modifiers: .command)
                 Button("實際大小") { model.zoomReset() }
                     .keyboardShortcut("0", modifiers: .command)
+                Menu("主題色") {
+                    ForEach(Theme.accentPresets, id: \.hex) { preset in
+                        Button((UInt32(model.accentHex) == preset.hex ? "✓ " : "") + preset.name) {
+                            model.accentHex = Int(preset.hex)
+                        }
+                    }
+                }
             }
         }
 

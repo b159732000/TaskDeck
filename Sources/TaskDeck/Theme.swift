@@ -10,7 +10,15 @@ enum Theme {
     static let paneHeaderBG = Color(hex: 0x1A202A).opacity(0.33)
     static let terminalBG = Color(hex: 0x14181F).opacity(0.37)
     static let border = Color(hex: 0x2A3341)
-    static let accent = Color(hex: 0x5B9DFF)
+
+    /// Accent presets（選單「主題色」切換；AppModel.accentHex 持久化）。
+    static let accentPresets: [(name: String, hex: UInt32)] = [
+        ("藍（預設）", 0x5B9DFF), ("紫", 0xB18CFF), ("綠", 0x7FCF8F),
+        ("橘", 0xF0A35E), ("粉", 0xEF8FB9),
+    ]
+    static var accentHexCurrent: UInt32 =
+        UserDefaults.standard.object(forKey: "accentHex") as? UInt32 ?? 0x5B9DFF
+    static var accent: Color { Color(hex: accentHexCurrent) }
 
     /// SwiftTerm paints its own background over ours — keep it clear and let
     /// the translucent SwiftUI layer underneath provide the tint.
