@@ -116,18 +116,15 @@ struct TaskDetailView: View {
     @AppStorage("notesColumnWidth") private var notesWidth: Double = 380
 
     var body: some View {
-        VStack(spacing: 0) {
-            GeometryReader { geo in
-                let clamped = min(max(120, notesWidth), max(120, Double(geo.size.width) - 168))
-                HStack(spacing: 0) {
-                    TerminalGridView()
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    ColumnDividerHandle(width: $notesWidth, total: geo.size.width)
-                    NotesColumn()
-                        .frame(width: CGFloat(clamped))
-                }
+        GeometryReader { geo in
+            let clamped = min(max(120, notesWidth), max(120, Double(geo.size.width) - 168))
+            HStack(spacing: 0) {
+                TerminalGridView()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                ColumnDividerHandle(width: $notesWidth, total: geo.size.width)
+                NotesColumn()
+                    .frame(width: CGFloat(clamped))
             }
-            QuotaBarView()
         }
         .background(Theme.windowBG)
         .toolbar {
@@ -303,6 +300,11 @@ struct NotesColumn: View {
             .scrollContentBackground(.hidden)
             .padding(.horizontal, 8)
             .padding(.vertical, 6)
+
+            if model.config.quotaCommand != nil {
+                Rectangle().fill(Theme.border).frame(height: 1)
+                QuotaFooterView()
+            }
         }
         .background(Theme.panelBG)
         .clipShape(RoundedRectangle(cornerRadius: 8))
@@ -313,174 +315,54 @@ struct NotesColumn: View {
     }
 }
 
-// MARK: - Quota bar
-
-struct QuotaBarView: View {
+/// Bottom of the notes column: the quota CLI's own table output, rendered
+/// verbatim (ANSI colors and all). One shared fetcher app-wide — the tool
+/// rate-limits, so tasks/windows must not fetch independently.
+struct QuotaFooterView: View {
     @EnvironmentObject var model: AppModel
-    @State private var showDetail = false
 
     var body: some View {
-        HStack(spacing: 16) {
-            if let q = model.quota {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 18) {
-                        ForEach(q.accounts, id: \.alias) { acc in
-                            QuotaChipView(account: acc)
-                        }
-                    }
-                }
-            } else {
-                Text(model.quotaError ?? (model.quotaBusy ? "讀取額度中…" : "額度尚未讀取"))
-                    .font(.system(size: 11))
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 8) {
+                Text("AI 額度")
+                    .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(.secondary)
-            }
-            Spacer(minLength: 8)
-            if let t = model.quotaUpdatedAt {
-                Text(t, style: .time)
-                    .font(.system(size: 10))
-                    .foregroundStyle(.tertiary)
-            }
-            Button {
-                model.refreshQuota()
-            } label: {
-                if model.quotaBusy {
-                    ProgressView().controlSize(.mini)
-                } else {
-                    Image(systemName: "arrow.clockwise")
+                Spacer()
+                if let t = model.quotaUpdatedAt {
+                    Text(t, style: .time)
                         .font(.system(size: 10))
-                }
-            }
-            .buttonStyle(.borderless)
-            .help("重新讀取（每 5 分鐘也會自動更新）")
-            Button {
-                showDetail.toggle()
-            } label: {
-                Image(systemName: "info.circle")
-                    .font(.system(size: 10))
-            }
-            .buttonStyle(.borderless)
-            .popover(isPresented: $showDetail, arrowEdge: .top) {
-                QuotaDetailView()
-            }
-        }
-        .padding(.horizontal, 12)
-        .frame(height: 30)
-        .background(Theme.panelBG)
-        .overlay(alignment: .top) {
-            Rectangle().fill(Theme.border).frame(height: 1)
-        }
-    }
-}
-
-struct QuotaChipView: View {
-    let account: QuotaAccount
-
-    var body: some View {
-        HStack(spacing: 8) {
-            Text(account.alias)
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(.secondary)
-            ForEach(QuotaSnapshot.orderedBuckets(account), id: \.0) { key, bucket in
-                HStack(spacing: 3) {
-                    Text(QuotaSnapshot.bucketShortLabel[key] ?? key)
-                        .font(.system(size: 9))
                         .foregroundStyle(.tertiary)
-                    MiniBarView(percent: bucket.percent)
-                    Text(bucket.percent.map { "\(Int($0))%" } ?? "–")
-                        .font(.system(size: 10, weight: .medium, design: .monospaced))
-                        .foregroundStyle(Theme.quotaColor(bucket.percent))
                 }
-                .help(Self.tooltip(key: key, bucket: bucket))
-            }
-        }
-    }
-
-    static func tooltip(key: String, bucket: QuotaBucket) -> String {
-        var parts = [key]
-        if let p = bucket.percent { parts.append("\(Int(p))% 已用") }
-        if let d = bucket.detail { parts.append(d) }
-        if let r = bucket.resets_at, let local = Self.localTime(r) { parts.append("重置 \(local)") }
-        return parts.joined(separator: " · ")
-    }
-
-    static func localTime(_ iso: String) -> String? {
-        let f = ISO8601DateFormatter()
-        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        let date = f.date(from: iso) ?? {
-            f.formatOptions = [.withInternetDateTime]
-            return f.date(from: iso)
-        }()
-        guard let date else { return nil }
-        let out = DateFormatter()
-        out.dateFormat = "M/d HH:mm"
-        return out.string(from: date)
-    }
-}
-
-struct MiniBarView: View {
-    let percent: Double?
-
-    var body: some View {
-        ZStack(alignment: .leading) {
-            Capsule().fill(Color.white.opacity(0.08))
-            if let p = percent {
-                Capsule()
-                    .fill(Theme.quotaColor(p))
-                    .frame(width: max(2, 26 * min(1, p / 100)))
-            }
-        }
-        .frame(width: 26, height: 4)
-    }
-}
-
-struct QuotaDetailView: View {
-    @EnvironmentObject var model: AppModel
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("AI 額度").font(.headline)
-            if let q = model.quota {
-                Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 6) {
-                    ForEach(q.accounts, id: \.alias) { acc in
-                        GridRow {
-                            Text(acc.alias)
-                                .font(.system(size: 12, weight: .semibold))
-                                .gridColumnAlignment(.leading)
-                            VStack(alignment: .leading, spacing: 3) {
-                                ForEach(QuotaSnapshot.orderedBuckets(acc), id: \.0) { key, b in
-                                    HStack(spacing: 6) {
-                                        Text(key)
-                                            .font(.system(size: 11))
-                                            .foregroundStyle(.secondary)
-                                            .frame(width: 90, alignment: .leading)
-                                        MiniBarView(percent: b.percent)
-                                            .frame(width: 60)
-                                        Text(b.percent.map { "\(Int($0))%" } ?? "–")
-                                            .font(.system(size: 11, design: .monospaced))
-                                            .foregroundStyle(Theme.quotaColor(b.percent))
-                                            .frame(width: 38, alignment: .trailing)
-                                        if let d = b.detail {
-                                            Text(d).font(.system(size: 10)).foregroundStyle(.tertiary)
-                                        }
-                                        if let r = b.resets_at, let local = QuotaChipView.localTime(r) {
-                                            Text("→ \(local)").font(.system(size: 10)).foregroundStyle(.tertiary)
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        if acc.alias != q.accounts.last?.alias {
-                            Divider()
-                        }
+                Button {
+                    model.refreshQuota()
+                } label: {
+                    if model.quotaBusy {
+                        ProgressView().controlSize(.mini)
+                    } else {
+                        Image(systemName: "arrow.clockwise")
+                            .font(.system(size: 10))
                     }
                 }
-            } else {
-                Text(model.quotaError ?? "尚未讀取")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
+                .buttonStyle(.borderless)
+                .help("重新讀取（每 5 分鐘自動更新，全 app 共用一份）")
             }
+            .padding(.horizontal, 12)
+            .frame(height: 28)
+            .background(Theme.paneHeaderBG)
+
+            ScrollView([.horizontal, .vertical], showsIndicators: false) {
+                Text(AnsiRenderer.render(model.quotaText.isEmpty ? "（讀取中…）" : model.quotaText))
+                    .lineSpacing(2)
+                    .fixedSize()
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+            }
+            .frame(height: quotaHeight)
         }
-        .padding(14)
-        .frame(minWidth: 380)
+    }
+
+    private var quotaHeight: CGFloat {
+        let lines = max(3, model.quotaText.split(separator: "\n", omittingEmptySubsequences: false).count)
+        return CGFloat(min(lines, 12)) * 17 + 16
     }
 }

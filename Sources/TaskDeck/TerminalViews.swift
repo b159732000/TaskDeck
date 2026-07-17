@@ -12,12 +12,12 @@ struct TerminalHostView: NSViewRepresentable {
 
     func makeNSView(context: Context) -> TerminalView {
         let tv = TerminalView(frame: CGRect(x: 0, y: 0, width: 600, height: 400))
+        // Keep SwiftTerm's stock ANSI palette: a custom one shipped briefly
+        // and made dim/dark-colored TUI text unreadable (invisible against
+        // the dark background). Revisit only with side-by-side visual review.
         tv.nativeBackgroundColor = Theme.terminalBGNS
         tv.nativeForegroundColor = Theme.terminalFGNS
         tv.font = NSFont.monospacedSystemFont(ofSize: 12.5, weight: .regular)
-        tv.installColors(Theme.ansi.map {
-            SwiftTerm.Color(red: UInt16($0.0) * 257, green: UInt16($0.1) * 257, blue: UInt16($0.2) * 257)
-        })
         tv.terminalDelegate = context.coordinator
         context.coordinator.attach(tv: tv, client: client, paneID: paneID)
         return tv

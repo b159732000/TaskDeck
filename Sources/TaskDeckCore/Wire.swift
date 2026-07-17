@@ -51,6 +51,7 @@ public struct WireMessage: Codable {
     public var title: String?
     public var cwd: String?
     public var command: String?
+    public var shell: String?
     public var env: [String: String]?
     public var data: String?
     public var cols: Int?

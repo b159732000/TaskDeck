@@ -27,6 +27,7 @@ final class Pane {
     let specID: String
     var title: String
     let cwd: String
+    let shell: String
     var cols: Int
     var rows: Int
     var pid: pid_t = -1
@@ -40,11 +41,13 @@ final class Pane {
 
     static let ringCap = 512 * 1024
 
-    init(taskID: String, specID: String, title: String, cwd: String, cols: Int, rows: Int, server: Server) {
+    init(taskID: String, specID: String, title: String, cwd: String, shell: String,
+         cols: Int, rows: Int, server: Server) {
         self.taskID = taskID
         self.specID = specID
         self.title = title
         self.cwd = cwd
+        self.shell = shell
         self.cols = cols
         self.rows = rows
         self.server = server
@@ -66,7 +69,7 @@ final class Pane {
         for (k, v) in extraEnv { env[k] = v }
 
         // Everything the child touches must be prepared before fork.
-        let argStrings: [String] = ["/bin/zsh", "-il"]
+        let argStrings: [String] = [shell, "-il"]
         var cArgs: [UnsafeMutablePointer<CChar>?] = argStrings.map { strdup($0) }
         cArgs.append(nil)
         var cEnv: [UnsafeMutablePointer<CChar>?] = env.map { strdup("\($0.key)=\($0.value)") }
@@ -86,7 +89,7 @@ final class Pane {
         }
         if child == 0 {
             if let c = cCwd, chdir(c) != 0 { _ = chdir("/") }
-            execve("/bin/zsh", cArgs, cEnv)
+            execve(cArgs[0], cArgs, cEnv)
             _exit(127)
         }
 
@@ -318,6 +321,7 @@ final class Server {
         case "newPane":
             let pane = Pane(taskID: m.taskID ?? "", specID: m.specID ?? UUID().uuidString,
                             title: m.title ?? "terminal", cwd: m.cwd ?? NSHomeDirectory(),
+                            shell: m.shell ?? "/bin/zsh",
                             cols: m.cols ?? 100, rows: m.rows ?? 28, server: self)
             do {
                 try pane.spawn(extraEnv: m.env ?? [:])

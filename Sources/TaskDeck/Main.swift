@@ -58,6 +58,7 @@ struct ContentView: View {
         }
         .frame(minWidth: 980, minHeight: 600)
         .background(SplitViewAutosave(name: "TaskDeckMainSplit"))
+        .glassWindow()
         .preferredColorScheme(.dark)
     }
 }
@@ -71,6 +72,7 @@ struct PopoutRoot: View {
             .environmentObject(model.session(slug))
             .navigationTitle(slug)
             .frame(minWidth: 800, minHeight: 480)
+            .glassWindow()
             .preferredColorScheme(.dark)
     }
 }

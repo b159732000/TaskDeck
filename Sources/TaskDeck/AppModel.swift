@@ -3,42 +3,6 @@ import Foundation
 import SwiftUI
 import TaskDeckCore
 
-struct QuotaBucket: Codable {
-    var percent: Double?
-    var resets_at: String?
-    var detail: String?
-}
-
-struct QuotaAccount: Codable {
-    var alias: String
-    var buckets: [String: QuotaBucket]
-}
-
-struct QuotaSnapshot: Codable {
-    var fetched_at: String?
-    var accounts: [QuotaAccount]
-
-    /// Preferred display order for buckets inside a chip.
-    static let bucketOrder = ["5h session", "weekly all", "weekly Fable", "credits"]
-    static let bucketShortLabel: [String: String] = [
-        "5h session": "5h",
-        "weekly all": "週",
-        "weekly Fable": "F",
-        "credits": "$",
-    ]
-
-    static func orderedBuckets(_ account: QuotaAccount) -> [(String, QuotaBucket)] {
-        var out: [(String, QuotaBucket)] = []
-        for key in bucketOrder {
-            if let b = account.buckets[key] { out.append((key, b)) }
-        }
-        for (key, b) in account.buckets.sorted(by: { $0.key < $1.key }) where !bucketOrder.contains(key) {
-            out.append((key, b))
-        }
-        return out
-    }
-}
-
 @MainActor
 final class AppModel: ObservableObject {
     @Published var tasks: [TaskNote] = []
@@ -46,8 +10,10 @@ final class AppModel: ObservableObject {
     /// specID → live pane info (across all tasks).
     @Published var paneRuntime: [String: PaneInfo] = [:]
     @Published var daemonOK = false
-    @Published var quota: QuotaSnapshot?
-    @Published var quotaError: String?
+    /// Raw CLI table output (ANSI codes included) from `quotaCommand`.
+    /// One shared fetcher for the whole app — the quota tool rate-limits,
+    /// so per-task/per-window fetching would be wrong.
+    @Published var quotaText = ""
     @Published var quotaUpdatedAt: Date?
     @Published var quotaBusy = false
 
@@ -229,25 +195,23 @@ final class AppModel: ObservableObject {
         Task.detached(priority: .utility) {
             let p = Process()
             p.executableURL = URL(fileURLWithPath: "/bin/zsh")
-            p.arguments = ["-lc", cmd + " --json 2>/dev/null"]
+            p.arguments = ["-lc", cmd + " 2>/dev/null"]
             let pipe = Pipe()
             p.standardOutput = pipe
             p.standardError = FileHandle.nullDevice
-            var snapshot: QuotaSnapshot?
-            var errText: String?
+            var out = ""
             do {
                 try p.run()
                 let data = pipe.fileHandleForReading.readDataToEndOfFile()
                 p.waitUntilExit()
-                snapshot = try JSONDecoder().decode(QuotaSnapshot.self, from: data)
+                out = String(data: data, encoding: .utf8) ?? ""
             } catch {
-                errText = "額度讀取失敗（\(cmd) --json）"
+                out = ""
             }
-            let s = snapshot
-            let e = errText
+            let text = out.trimmingCharacters(in: .whitespacesAndNewlines)
             await MainActor.run { [weak self] in
                 guard let self else { return }
-                if let s { self.quota = s; self.quotaError = nil } else { self.quotaError = e }
+                self.quotaText = text.isEmpty ? "額度讀取失敗（\(cmd)）" : text
                 self.quotaUpdatedAt = Date()
                 self.quotaBusy = false
             }
@@ -389,6 +353,7 @@ final class TaskSession: ObservableObject {
         m.specID = spec.id
         m.title = spec.title
         m.cwd = Paths.expand(spec.cwd ?? app.config.defaultCwd)
+        m.shell = app.config.shell
         m.cols = 100
         m.rows = 28
         m.command = spec.startCommand

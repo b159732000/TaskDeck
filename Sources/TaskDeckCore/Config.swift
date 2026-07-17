@@ -50,12 +50,17 @@ public struct AppConfig: Codable, Equatable {
     public var defaultCwd: String
     public var teams: [TeamDef]
     public var quotaCommand: String?
+    /// Login shell spawned in every pane (interactive, so user aliases and
+    /// rc files load). Anything with `-il` semantics works: zsh/bash/fish.
+    public var shell: String
 
-    public init(tasksDir: String, defaultCwd: String, teams: [TeamDef], quotaCommand: String?) {
+    public init(tasksDir: String, defaultCwd: String, teams: [TeamDef],
+                quotaCommand: String?, shell: String = "/bin/zsh") {
         self.tasksDir = tasksDir
         self.defaultCwd = defaultCwd
         self.teams = teams
         self.quotaCommand = quotaCommand
+        self.shell = shell
     }
 
     public static let fallback = AppConfig(
@@ -66,7 +71,7 @@ public struct AppConfig: Codable, Equatable {
     )
 
     enum CodingKeys: String, CodingKey {
-        case tasksDir, defaultCwd, teams, quotaCommand
+        case tasksDir, defaultCwd, teams, quotaCommand, shell
     }
 
     public init(from decoder: Decoder) throws {
@@ -76,6 +81,7 @@ public struct AppConfig: Codable, Equatable {
         defaultCwd = try c.decodeIfPresent(String.self, forKey: .defaultCwd) ?? fb.defaultCwd
         teams = try c.decodeIfPresent([TeamDef].self, forKey: .teams) ?? fb.teams
         quotaCommand = try c.decodeIfPresent(String.self, forKey: .quotaCommand)
+        shell = try c.decodeIfPresent(String.self, forKey: .shell) ?? fb.shell
     }
 
     public static func load() -> AppConfig {

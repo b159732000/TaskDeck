@@ -1,17 +1,18 @@
 import AppKit
 import SwiftUI
 
-/// Central design tokens. The app is dark-first so the chrome blends with
-/// the terminals instead of framing them in bright bezels.
+/// Central design tokens. Dark-first, and translucent: every background
+/// carries alpha so the behind-window blur (iTerm2-style glass) shows
+/// through. The terminal keeps the highest opacity for readability.
 enum Theme {
-    static let windowBG = Color(hex: 0x0E1116)
-    static let panelBG = Color(hex: 0x131820)
-    static let paneHeaderBG = Color(hex: 0x1A202A)
-    static let terminalBG = Color(hex: 0x14181F)
+    static let windowBG = Color(hex: 0x0E1116).opacity(0.45)
+    static let panelBG = Color(hex: 0x131820).opacity(0.52)
+    static let paneHeaderBG = Color(hex: 0x1A202A).opacity(0.66)
+    static let terminalBG = Color(hex: 0x14181F).opacity(0.74)
     static let border = Color(hex: 0x2A3341)
     static let accent = Color(hex: 0x5B9DFF)
 
-    static let terminalBGNS = NSColor(hex: 0x14181F)
+    static let terminalBGNS = NSColor(hex: 0x14181F).withAlphaComponent(0.74)
     static let terminalFGNS = NSColor(hex: 0xC9CFD8)
 
     /// One-Dark-flavored 16-color ANSI palette (8-bit components).
@@ -22,12 +23,6 @@ enum Theme {
         (0x72, 0xC0, 0xFF), (0xD7, 0x89, 0xEE), (0x67, 0xC7, 0xD3), (0xFF, 0xFF, 0xFF),
     ]
 
-    static func quotaColor(_ percent: Double?) -> Color {
-        guard let p = percent else { return .secondary }
-        if p >= 85 { return Color(hex: 0xE8646E) }
-        if p >= 60 { return Color(hex: 0xE2AB77) }
-        return Color(hex: 0x8FCF7F)
-    }
 }
 
 extension Color {
