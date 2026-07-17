@@ -15,7 +15,16 @@ fi
 rm -rf "$DEST"
 ditto dist/TaskDeck.app "$DEST"
 
-pkill -x TaskDeck 2>/dev/null || true
-sleep 0.3
+# Graceful quit first: it runs the app's exit flush (pending note edits),
+# unlike pkill's SIGTERM. Fall back to pkill only if the app hangs.
+if pgrep -x TaskDeck > /dev/null; then
+  osascript -e 'tell application "TaskDeck" to quit' >/dev/null 2>&1 &
+  for _ in {1..10}; do
+    pgrep -x TaskDeck > /dev/null || break
+    sleep 0.2
+  done
+  pkill -x TaskDeck 2>/dev/null || true
+fi
+sleep 0.2
 open "$DEST"
 echo "Relaunched $DEST"
