@@ -4,9 +4,18 @@ import SwiftUI
 import TaskDeckCore
 
 /// TerminalView that composites with alpha so the glass background shows
-/// through (stock SwiftTerm reports opaque).
+/// through. Stock SwiftTerm reports opaque AND paints its CALayer's
+/// backgroundColor once at init (setupOptions) — setting
+/// `nativeBackgroundColor` later never refreshes the layer, so we force it
+/// clear ourselves. Default-background cells are already drawn transparent
+/// upstream; only cells with explicit ANSI backgrounds stay solid.
 final class GlassTerminalView: TerminalView {
     override var isOpaque: Bool { false }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        layer?.backgroundColor = NSColor.clear.cgColor
+    }
 }
 
 /// SwiftTerm view attached to a daemon-owned pane over the socket.
@@ -25,6 +34,7 @@ struct TerminalHostView: NSViewRepresentable {
         tv.nativeBackgroundColor = Theme.terminalBGNS
         tv.nativeForegroundColor = Theme.terminalFGNS
         tv.font = font
+        tv.layer?.backgroundColor = NSColor.clear.cgColor
         tv.terminalDelegate = context.coordinator
         context.coordinator.attach(tv: tv, client: client, paneID: paneID)
         return tv

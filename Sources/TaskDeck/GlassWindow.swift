@@ -27,6 +27,10 @@ struct TransparentWindow: NSViewRepresentable {
             w.isOpaque = false
             w.backgroundColor = .clear
             w.titlebarAppearsTransparent = true
+            // Extend content (and the blur layer) under the titlebar —
+            // otherwise the title strip has nothing translucent behind it.
+            w.styleMask.insert(.fullSizeContentView)
+            w.titleVisibility = .hidden
         }
     }
 }
