@@ -155,15 +155,17 @@ struct SidebarView: View {
         }
         .padding(.vertical, 1)
         // (d) hover 才浮出狀態切換：以 overlay 疊在列的右端——不進版面流，
-        // 列高列寬零變化，滑走即消失；材質背板確保壓在文字上仍可讀。
+        // 列高列寬零變化；淡入＋微縮放的過渡（瞬間出現體感差）。
         .overlay(alignment: .trailing) {
             if hoveredSlug == t.id, t.status == "active" {
                 LifecycleChips(task: t)
                     .padding(.horizontal, 5)
                     .padding(.vertical, 3)
                     .background(.regularMaterial, in: Capsule())
+                    .transition(.opacity.combined(with: .scale(scale: 0.9, anchor: .trailing)))
             }
         }
+        .animation(.easeOut(duration: 0.13), value: hoveredSlug)
         .onHover { inside in
             if inside {
                 hoveredSlug = t.id
@@ -171,6 +173,17 @@ struct SidebarView: View {
                 hoveredSlug = nil
             }
         }
+        // 高亮不看焦點：系統的選取高亮只在側邊欄有鍵盤焦點時飽和，焦點
+        // 移去終端就變灰——自畫一層常駐選取底色（hover 給更淡的一階）。
+        .listRowBackground(
+            RoundedRectangle(cornerRadius: 6)
+                .fill(model.selection == t.id
+                    ? Theme.accent.opacity(0.16)
+                    : (hoveredSlug == t.id ? Color.white.opacity(0.05) : .clear))
+                .padding(.horizontal, 4)
+                .animation(.easeOut(duration: 0.13), value: hoveredSlug)
+                .animation(.easeOut(duration: 0.13), value: model.selection)
+        )
         .tag(t.id)
         .contextMenu {
             Button("複製 ID") {
