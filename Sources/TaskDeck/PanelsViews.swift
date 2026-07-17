@@ -111,15 +111,21 @@ struct TaskDetailView: View {
     @EnvironmentObject var model: AppModel
     @EnvironmentObject var session: TaskSession
     let slug: String
+    /// Global, persisted, shared by every task and window: the notes column
+    /// keeps its width across task switches, app relaunches and new tasks.
+    @AppStorage("notesColumnWidth") private var notesWidth: Double = 380
 
     var body: some View {
         VStack(spacing: 0) {
-            HSplitView {
-                TerminalGridView()
-                    .frame(minWidth: 160, maxWidth: .infinity, maxHeight: .infinity)
-                    .layoutPriority(1)
-                NotesColumn()
-                    .frame(minWidth: 160, idealWidth: 380, maxWidth: .infinity, maxHeight: .infinity)
+            GeometryReader { geo in
+                let clamped = min(max(120, notesWidth), max(120, Double(geo.size.width) - 168))
+                HStack(spacing: 0) {
+                    TerminalGridView()
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    ColumnDividerHandle(width: $notesWidth, total: geo.size.width)
+                    NotesColumn()
+                        .frame(width: CGFloat(clamped))
+                }
             }
             QuotaBarView()
         }
@@ -131,6 +137,77 @@ struct TaskDetailView: View {
         }
         .navigationTitle(slug)
         .navigationSubtitle(session.machine.primaryTeam.map { "主力：\($0)" } ?? "")
+    }
+}
+
+/// Draggable divider for the terminal ↔ notes columns (notes width is the
+/// persisted value; dragging left widens the notes side).
+struct ColumnDividerHandle: View {
+    @Binding var width: Double
+    let total: CGFloat
+    @State private var startWidth: Double?
+    @State private var hovering = false
+
+    var body: some View {
+        Rectangle()
+            .fill(Color.clear)
+            .overlay(
+                RoundedRectangle(cornerRadius: 1)
+                    .fill(hovering || startWidth != nil ? Theme.accent.opacity(0.7) : Color.clear)
+                    .frame(width: 2)
+            )
+            .frame(width: 8)
+            .contentShape(Rectangle())
+            .onHover { h in
+                hovering = h
+                if h { NSCursor.resizeLeftRight.push() } else { NSCursor.pop() }
+            }
+            .gesture(
+                DragGesture(minimumDistance: 1)
+                    .onChanged { v in
+                        if startWidth == nil { startWidth = width }
+                        let next = (startWidth ?? width) - Double(v.translation.width)
+                        width = min(max(120, next), max(120, Double(total) - 168))
+                    }
+                    .onEnded { _ in startWidth = nil }
+            )
+    }
+}
+
+/// NavigationSplitView doesn't expose its divider position, so we reach for
+/// the backing NSSplitView and give it an AppKit autosave name — sidebar
+/// width then persists across launches for free.
+struct SplitViewAutosave: NSViewRepresentable {
+    let name: String
+
+    func makeNSView(context: Context) -> NSView {
+        let v = ProbeView()
+        v.desiredName = name
+        return v
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {}
+
+    final class ProbeView: NSView {
+        var desiredName = ""
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            let name = desiredName
+            DispatchQueue.main.async { [weak self] in
+                guard let root = self?.window?.contentView, !name.isEmpty else { return }
+                for sv in Self.splitViews(in: root) where (sv.autosaveName ?? "").isEmpty {
+                    sv.autosaveName = name
+                }
+            }
+        }
+
+        static func splitViews(in view: NSView) -> [NSSplitView] {
+            var out: [NSSplitView] = []
+            if let sv = view as? NSSplitView { out.append(sv) }
+            for sub in view.subviews { out.append(contentsOf: splitViews(in: sub)) }
+            return out
+        }
     }
 }
 

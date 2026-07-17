@@ -57,6 +57,7 @@ struct ContentView: View {
             }
         }
         .frame(minWidth: 980, minHeight: 600)
+        .background(SplitViewAutosave(name: "TaskDeckMainSplit"))
         .preferredColorScheme(.dark)
     }
 }
