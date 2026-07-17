@@ -9,7 +9,7 @@ import TaskDeckCore
 struct VisualEffectBackground: NSViewRepresentable {
     func makeNSView(context: Context) -> NSVisualEffectView {
         let v = NSVisualEffectView()
-        v.material = .underWindowBackground
+        v.material = Theme.blurMaterial
         v.blendingMode = .behindWindow
         v.state = .active
         return v
@@ -17,6 +17,10 @@ struct VisualEffectBackground: NSViewRepresentable {
 
     func updateNSView(_ nsView: NSVisualEffectView, context: Context) {
         nsView.state = .active
+        // 模糊風格（外觀設定的三檔）：re-render 時同步 material。
+        if nsView.material != Theme.blurMaterial {
+            nsView.material = Theme.blurMaterial
+        }
     }
 }
 
@@ -88,14 +92,19 @@ struct TransparentWindow: NSViewRepresentable {
         }
 
         /// The titlebar container can carry its own NSVisualEffectView
-        /// (solid when inactive); hide it — traffic lights are separate.
+        /// (solid when inactive) AND — on macOS 26 — a
+        /// `_NSTitlebarDecorationView` drawing the Liquid-Glass chrome that
+        /// reads as a solid strip over our tinted glass. Hide both; the
+        /// traffic-light buttons live in separate widget views and are
+        /// untouched.
         private func hideTitlebarMaterial(_ w: NSWindow) {
             guard let frameView = w.contentView?.superview else { return }
             for view in frameView.subviews
             where String(describing: type(of: view)).contains("NSTitlebar") {
                 for sub in Self.allSubviews(of: view) {
-                    if let effect = sub as? NSVisualEffectView {
-                        effect.isHidden = true
+                    let cls = String(describing: type(of: sub))
+                    if sub is NSVisualEffectView || cls.contains("Decoration") {
+                        sub.isHidden = true
                     }
                 }
             }

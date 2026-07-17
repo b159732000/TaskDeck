@@ -31,10 +31,24 @@ enum Theme {
     // values; UserDefaults seeds the first read so launch is correct).
     static var bgPresetIndex: Int =
         UserDefaults.standard.object(forKey: "bgPresetIndex") as? Int ?? 0
+    /// -1…+1，0＝出廠玻璃感（中性）。負向把四層 alpha 等比往 0 收（更透、
+    /// 桌布更明顯），正向往 1 內插（更實心）。
     static var bgOpacityBoost: Double =
         UserDefaults.standard.object(forKey: "bgOpacityBoost") as? Double ?? 0
     static var bgBrightness: Double =
         UserDefaults.standard.object(forKey: "bgBrightness") as? Double ?? 0
+    /// 模糊風格（NSVisualEffectView 的 material；macOS 不開放連續調半徑，
+    /// 以三檔近似）。
+    static var blurStyleIndex: Int =
+        UserDefaults.standard.object(forKey: "blurStyleIndex") as? Int ?? 0
+    static let blurStyles: [(name: String, material: NSVisualEffectView.Material)] = [
+        ("標準（預設）", .underWindowBackground),
+        ("柔和", .hudWindow),
+        ("強", .fullScreenUI),
+    ]
+    static var blurMaterial: NSVisualEffectView.Material {
+        blurStyles[min(max(0, blurStyleIndex), blurStyles.count - 1)].material
+    }
 
     private static var preset: BGPreset {
         bgPresets[min(max(0, bgPresetIndex), bgPresets.count - 1)]
@@ -42,7 +56,10 @@ enum Theme {
 
     private static func bg(_ hex: UInt32, _ baseAlpha: Double) -> Color {
         let f = 1.0 + bgBrightness
-        let a = baseAlpha + (1 - baseAlpha) * bgOpacityBoost
+        let boost = min(1, max(-1, bgOpacityBoost))
+        let a = boost >= 0
+            ? baseAlpha + (1 - baseAlpha) * boost // 中性 → 實心
+            : baseAlpha * (1 + boost) // 中性 → 全透（只剩 blur）
         return Color(.sRGB,
                      red: min(1, Double((hex >> 16) & 0xFF) / 255 * f),
                      green: min(1, Double((hex >> 8) & 0xFF) / 255 * f),

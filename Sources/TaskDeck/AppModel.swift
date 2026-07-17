@@ -316,6 +316,13 @@ final class AppModel: ObservableObject {
         }
     }
 
+    @Published var blurStyleIndex: Int = UserDefaults.standard.object(forKey: "blurStyleIndex") as? Int ?? 0 {
+        didSet {
+            UserDefaults.standard.set(blurStyleIndex, forKey: "blurStyleIndex")
+            Theme.blurStyleIndex = blurStyleIndex
+        }
+    }
+
     /// Badge clicked: mark the task's CURRENT AI states as seen.
     func ackAIStatus(_ slug: String) {
         let machine = sessions[slug]?.machine ?? store.machineState(slug)

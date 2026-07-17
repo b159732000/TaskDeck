@@ -474,6 +474,32 @@ struct NotesColumn: View {
 /// Bottom of the notes column: the quota CLI's own table output, rendered
 /// verbatim (ANSI colors and all). One shared fetcher app-wide — the tool
 /// rate-limits, so tasks/windows must not fetch independently.
+/// A±：夠大的點擊面積＋常駐細框＋hover 填色——之前 9pt 裸 icon 太難點。
+struct QuotaZoomButton: View {
+    let icon: String
+    let help: String
+    let action: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: icon)
+                .font(.system(size: 11, weight: .medium))
+                .frame(width: 24, height: 18)
+                .background(hovering ? AnyShapeStyle(Theme.paneHeaderBG) : AnyShapeStyle(.clear),
+                            in: RoundedRectangle(cornerRadius: 5))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 5)
+                        .stroke(Theme.border, lineWidth: hovering ? 1 : 0.5)
+                )
+                .contentShape(RoundedRectangle(cornerRadius: 5))
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .help(help)
+    }
+}
+
 struct QuotaFooterView: View {
     @EnvironmentObject var model: AppModel
     @AppStorage("quotaExpanded") private var expanded = true
@@ -503,16 +529,14 @@ struct QuotaFooterView: View {
                         .help("上次更新失敗，顯示的是舊資料（stderr 在 /tmp/taskdeck-quota.err）")
                 }
                 Spacer()
-                Button { quotaScale = max(0.65, ((quotaScale - 0.05) * 100).rounded() / 100) } label: {
-                    Image(systemName: "textformat.size.smaller").font(.system(size: 9))
+                QuotaZoomButton(icon: "textformat.size.smaller",
+                                help: "縮小額度表（獨立於全局縮放）") {
+                    quotaScale = max(0.65, ((quotaScale - 0.05) * 100).rounded() / 100)
                 }
-                .buttonStyle(.plain)
-                .help("縮小額度表（獨立於全局縮放）")
-                Button { quotaScale = min(1.3, ((quotaScale + 0.05) * 100).rounded() / 100) } label: {
-                    Image(systemName: "textformat.size.larger").font(.system(size: 9))
+                QuotaZoomButton(icon: "textformat.size.larger",
+                                help: "放大額度表；目前 \(Int(quotaScale * 100))%") {
+                    quotaScale = min(1.3, ((quotaScale + 0.05) * 100).rounded() / 100)
                 }
-                .buttonStyle(.plain)
-                .help("放大額度表；目前 \(Int(quotaScale * 100))%")
                 if let t = model.quotaUpdatedAt {
                     Text(t, style: .time)
                         .font(.system(size: 10))

@@ -85,24 +85,26 @@ struct AppearanceSettingsView: View {
                 }
             }
 
-            VStack(alignment: .leading, spacing: 2) {
-                Slider(value: $model.bgOpacityBoost, in: 0 ... 1) {
-                    Text("不透明度")
+            Picker("模糊風格", selection: $model.blurStyleIndex) {
+                ForEach(Array(Theme.blurStyles.enumerated()), id: \.offset) { i, style in
+                    Text(style.name).tag(i)
                 }
-                Text(model.bgOpacityBoost < 0.02
-                    ? "玻璃感（預設）——桌布透進來"
-                    : "\(Int(model.bgOpacityBoost * 100))%（越高越實心）")
-                    .font(.system(size: 10))
-                    .foregroundStyle(.secondary)
+            }
+            Text("macOS 不開放連續調整模糊半徑，以系統材質分三檔近似。")
+                .font(.system(size: 10))
+                .foregroundStyle(.secondary)
+
+            sliderRow(title: "透明 ↔ 實心", value: $model.bgOpacityBoost,
+                      range: -1 ... 1, defaultValue: 0) {
+                if abs(model.bgOpacityBoost) < 0.02 { return "中性（出廠玻璃感）" }
+                return model.bgOpacityBoost > 0
+                    ? "+\(Int(model.bgOpacityBoost * 100))% 實心"
+                    : "\(Int(model.bgOpacityBoost * 100))% 更透（桌布更明顯）"
             }
 
-            VStack(alignment: .leading, spacing: 2) {
-                Slider(value: $model.bgBrightness, in: -0.25 ... 0.25) {
-                    Text("明暗")
-                }
-                Text(String(format: "%+.0f%%", model.bgBrightness * 100))
-                    .font(.system(size: 10))
-                    .foregroundStyle(.secondary)
+            sliderRow(title: "明暗", value: $model.bgBrightness,
+                      range: -0.25 ... 0.25, defaultValue: 0) {
+                String(format: "%+.0f%%", model.bgBrightness * 100)
             }
 
             LabeledContent("強調色") {
@@ -128,6 +130,29 @@ struct AppearanceSettingsView: View {
         }
         .padding(20)
         .frame(width: 400)
+    }
+
+    /// Slider + 「回預設」：精準對回中點的手感很差，一顆 ↺ 解決。
+    private func sliderRow(title: String, value: Binding<Double>,
+                           range: ClosedRange<Double>, defaultValue: Double,
+                           caption: @escaping () -> String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 6) {
+                Slider(value: value, in: range) { Text(title) }
+                Button {
+                    value.wrappedValue = defaultValue
+                } label: {
+                    Image(systemName: "arrow.uturn.backward.circle")
+                        .font(.system(size: 12))
+                }
+                .buttonStyle(.plain)
+                .disabled(abs(value.wrappedValue - defaultValue) < 0.001)
+                .help("回預設")
+            }
+            Text(caption())
+                .font(.system(size: 10))
+                .foregroundStyle(.secondary)
+        }
     }
 }
 
