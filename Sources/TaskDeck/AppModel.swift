@@ -166,6 +166,7 @@ final class AppModel: ObservableObject {
         let index = Dictionary(uniqueKeysWithValues: taskOrder.enumerated().map { ($1, $0) })
         list.sort { (index[$0.id] ?? .max) < (index[$1.id] ?? .max) }
         tasks = list
+        autoArchiveSweep()
     }
 
     private func saveOrder() {
@@ -290,12 +291,16 @@ final class AppModel: ObservableObject {
         }
     }
 
-    // MARK: - Sidebar grouping（等你 / 進行中 / 等待外部 / 沉底 / 已完成）
+    // MARK: - Sidebar grouping
+    //（等你 / 進行中 / 已讀 / 等待外部 / 半封存 / 已完成）
 
-    enum SidebarGroup { case needsYou, running, waitingExt, sunk, done }
+    enum SidebarGroup { case needsYou, running, read, waitingExt, semiArchived, done }
 
-    /// Items parked on external feedback sink after 3 days of silence.
+    /// 已讀 / 等待外部 items with 3 days of silence sink into 半封存
+    /// (folded); a month of silence there auto-archives into 已完成 with an
+    /// annotation (`autoArchiveSweep`).
     static let sinkAfter: TimeInterval = 72 * 3600
+    static let autoDoneAfter: TimeInterval = 30 * 24 * 3600
 
     private static let fmDate: DateFormatter = {
         let df = DateFormatter()
@@ -331,27 +336,57 @@ final class AppModel: ObservableObject {
         return machine.panes.compactMap { $0.sessionID.flatMap { aiStatus[$0]?.ts } }.max()
     }
 
-    func sidebarGroup(_ t: TaskNote) -> SidebarGroup {
-        if t.status == "done" { return .done }
-        if t.group == "waiting" {
-            let since = t.waitingSince.flatMap { Self.fmDate.date(from: $0) } ?? Date()
-            let last = max(lastAIActivity(t.id) ?? .distantPast, since)
-            return Date().timeIntervalSince(last) > Self.sinkAfter ? .sunk : .waitingExt
+    /// Does the task have an AI stop signal the user already acknowledged
+    /// (= "已讀"：看過了、還沒給下一步)?
+    private func hasAckedStop(_ slug: String) -> Bool {
+        let machine = sessions[slug]?.machine ?? store.machineState(slug)
+        return machine.panes.contains { pane in
+            guard pane.kind == "ai", let sid = pane.sessionID,
+                  let entry = aiStatus[sid],
+                  entry.state == "waiting" || entry.state == "permission" else { return false }
+            return (ackedAI[sid] ?? .distantPast) >= entry.ts
         }
-        return aiAttention(t.id) != nil ? .needsYou : .running
     }
 
-    /// Toggle the manual "waiting on external feedback" park. Parked tasks
-    /// keep their badges but never jump groups on AI signals — only you
-    /// move them back.
-    func setWaiting(_ slug: String, _ waiting: Bool) {
+    /// Seconds since the task last showed any sign of life（hook 訊號 or
+    /// entering its manual group）。nil = can't tell (treat as fresh).
+    func silence(_ t: TaskNote) -> TimeInterval? {
+        var candidates: [Date] = []
+        if let ai = lastAIActivity(t.id) { candidates.append(ai) }
+        if let s = t.groupSince.flatMap({ Self.fmDate.date(from: $0) }) { candidates.append(s) }
+        guard let last = candidates.max() else { return nil }
+        return Date().timeIntervalSince(last)
+    }
+
+    func sidebarGroup(_ t: TaskNote) -> SidebarGroup {
+        if t.status == "done" { return .done }
+        let quiet = silence(t) ?? 0
+        if t.group == "waiting" {
+            return quiet > Self.sinkAfter ? .semiArchived : .waitingExt
+        }
+        if t.group == "read" {
+            return quiet > Self.sinkAfter ? .semiArchived : .read
+        }
+        if aiAttention(t.id) != nil { return .needsYou }
+        if hasAckedStop(t.id) {
+            return quiet > Self.sinkAfter ? .semiArchived : .read
+        }
+        return .running
+    }
+
+    /// Set / clear the manual lifecycle flag ("waiting" 等待外部、"read"
+    /// 已讀、nil 移回進行中). Flagged tasks keep their badges but never jump
+    /// groups on AI signals — except 已讀 tasks, which a NEW unacked stop
+    /// signal naturally pulls back into 等你 (via the ack mechanism).
+    func setGroupFlag(_ slug: String, _ flag: String?) {
         func transform(_ text: String) -> String {
-            if waiting {
-                let stamped = TaskStore.setFrontmatterValue(text, key: "group", value: "waiting")
-                return TaskStore.setFrontmatterValue(stamped, key: "waiting_since",
+            if let flag {
+                let stamped = TaskStore.setFrontmatterValue(text, key: "group", value: flag)
+                return TaskStore.setFrontmatterValue(stamped, key: "group_since",
                                                      value: Self.fmDate.string(from: Date()))
             }
-            let cleared = TaskStore.removeFrontmatterKey(text, key: "group")
+            var cleared = TaskStore.removeFrontmatterKey(text, key: "group")
+            cleared = TaskStore.removeFrontmatterKey(cleared, key: "group_since")
             return TaskStore.removeFrontmatterKey(cleared, key: "waiting_since")
         }
         if let s = sessions[slug] {
@@ -361,6 +396,31 @@ final class AppModel: ObservableObject {
             store.write(slug, transform(store.read(slug)))
         }
         rescan()
+    }
+
+    /// 半封存超過一個月 → 自動歸入已完成，並在筆記留下可追溯的備註。
+    /// Runs on every rescan; idempotent (done tasks are skipped, the
+    /// annotation is stamped once via the auto_archived frontmatter key).
+    private func autoArchiveSweep() {
+        let df = DateFormatter()
+        df.dateFormat = "yyyy-MM-dd HH:mm"
+        for t in tasks where t.status == "active" {
+            guard sidebarGroup(t) == .semiArchived,
+                  let quiet = silence(t), quiet > Self.autoDoneAfter else { continue }
+            var text = sessions[t.id]?.noteText ?? store.read(t.id)
+            guard TaskStore.frontmatter(text)["auto_archived"] == nil else { continue }
+            let stamp = df.string(from: Date())
+            text = TaskStore.setFrontmatterValue(text, key: "status", value: "done")
+            text = TaskStore.setFrontmatterValue(text, key: "auto_archived", value: stamp)
+            if !text.hasSuffix("\n") { text += "\n" }
+            text += "\n> 🗄 \(stamp) 系統自動封存：半封存超過 30 天無動靜，自動歸入「已完成」。\n"
+            if let s = sessions[t.id] {
+                s.noteText = text
+                s.flushNote()
+            } else {
+                store.write(t.id, text)
+            }
+        }
     }
 
     /// Reorder within the 進行中 group（drag）：the moved slice is written
@@ -450,7 +510,12 @@ final class AppModel: ObservableObject {
             let errPath = "/tmp/taskdeck-quota.err"
             let p = Process()
             p.executableURL = URL(fileURLWithPath: "/bin/zsh")
-            p.arguments = ["-lc", cmd + " 2>\(errPath)"]
+            // GUI apps get launchd's minimal PATH (no ~/.local/bin, no
+            // /opt/homebrew/bin — where user CLIs like claude-quota live);
+            // `-l` alone doesn't help when PATH is set up in .zshrc.
+            p.arguments = ["-lc",
+                           "export PATH=\"$HOME/.local/bin:/opt/homebrew/bin:$PATH\"; "
+                               + cmd + " 2>\(errPath)"]
             let pipe = Pipe()
             p.standardOutput = pipe
             var out = ""
@@ -541,8 +606,14 @@ final class TaskSession: ObservableObject {
     func flushNote() {
         noteTimer?.invalidate()
         noteTimer = nil
-        if app.store.read(slug) != noteText {
-            app.store.write(slug, noteText)
+        let disk = app.store.read(slug)
+        // Never let a stale in-memory copy destroy session ids that are
+        // already on disk (vault sync / second instance / crash races) —
+        // James lost a claude-eng id to exactly this class of race.
+        let merged = TaskStore.mergeManifestLines(disk: disk, into: noteText)
+        if merged != noteText { noteText = merged }
+        if disk != merged {
+            app.store.write(slug, merged)
         }
     }
 

@@ -121,6 +121,22 @@ check("fm: other keys survive", TaskStore.frontmatter(unparked)["created"] == "2
 check("fm: remove absent key is no-op",
       TaskStore.removeFrontmatterKey(fmNote, key: "group") == fmNote)
 
+// MARK: manifest merge-guard — stale flush must not drop session ids
+
+let diskNote = "---\nstatus: active\n---\n\n# t\n\n- claude-eng old-123\n- claude3 keep-456\n\n---\n\n內文"
+let staleMemory = "---\nstatus: active\n---\n\n# t\n\n- claude3 keep-456\n- claude-eng new-789\n\n---\n\n內文（多打了幾個字）"
+let mergedNote = TaskStore.mergeManifestLines(disk: diskNote, into: staleMemory)
+check("merge: rescued line restored w/ marker",
+      mergedNote.contains("- claude-eng old-123 ←自動保留"))
+check("merge: memory's new line kept", mergedNote.contains("- claude-eng new-789"))
+check("merge: shared line not duplicated",
+      mergedNote.components(separatedBy: "keep-456").count == 2)
+check("merge: body edits preserved", mergedNote.contains("內文（多打了幾個字）"))
+check("merge: idempotent",
+      TaskStore.mergeManifestLines(disk: diskNote, into: mergedNote) == mergedNote)
+check("merge: no manifest on disk is a no-op",
+      TaskStore.mergeManifestLines(disk: "# t\n\n無 manifest", into: staleMemory) == staleMemory)
+
 // MARK: slack deep links
 
 check("slack: permalink → deep link",

@@ -12,8 +12,9 @@ struct SidebarView: View {
     @AppStorage("sunkSectionExpanded") private var sunkExpanded = false
 
     var body: some View {
-        // 由上而下：等你（自動佇列）→ 進行中 → 等待外部（手動）→ 沉底
-        //（>3 天沒動靜，預設折疊）→ 已完成（封存）。規則見 AppModel.sidebarGroup。
+        // 由上而下：等你（自動佇列）→ 進行中 → 已讀（看過待回）→ 等待外部
+        //（手動）→ 半封存（>3 天沒動靜，預設折疊；滿 30 天自動歸入已完成）
+        // → 已完成（封存）。規則見 AppModel.sidebarGroup / autoArchiveSweep。
         let groups = Dictionary(grouping: model.tasks, by: { model.sidebarGroup($0) })
         let needsYou = (groups[.needsYou] ?? []).sorted { a, b in
             let ia = model.aiAttention(a.id) ?? (false, .distantFuture)
@@ -22,10 +23,13 @@ struct SidebarView: View {
             return ia.since < ib.since // owed longest on top
         }
         let running = groups[.running] ?? []
-        let waiting = (groups[.waitingExt] ?? []).sorted {
-            ($0.waitingSince ?? "") > ($1.waitingSince ?? "")
+        let read = (groups[.read] ?? []).sorted {
+            (model.silence($0) ?? 0) < (model.silence($1) ?? 0) // 最近動的在上
         }
-        let sunk = groups[.sunk] ?? []
+        let waiting = (groups[.waitingExt] ?? []).sorted {
+            ($0.groupSince ?? "") > ($1.groupSince ?? "")
+        }
+        let semi = groups[.semiArchived] ?? []
         let done = groups[.done] ?? []
 
         List(selection: $model.selection) {
@@ -40,16 +44,21 @@ struct SidebarView: View {
                         model.moveRunningTasks(running.map(\.id), from: from, to: to)
                     }
             }
+            if !read.isEmpty {
+                Section("已讀（看過待回，\(read.count)）") {
+                    ForEach(read) { row($0) }
+                }
+            }
             if !waiting.isEmpty {
                 Section("等待外部（\(waiting.count)）") {
                     ForEach(waiting) { row($0) }
                 }
             }
-            if !sunk.isEmpty {
+            if !semi.isEmpty {
                 Section(isExpanded: $sunkExpanded) {
-                    ForEach(sunk) { row($0) }
+                    ForEach(semi) { row($0) }
                 } header: {
-                    Text("沉底 >3 天（\(sunk.count)）")
+                    Text("半封存 >3 天（\(semi.count)）")
                 }
             }
             if !done.isEmpty {
@@ -155,10 +164,14 @@ struct SidebarView: View {
             Button("在 Finder 顯示筆記") { model.revealNote(t.id) }
             Divider()
             if t.status == "active" {
-                if t.group == "waiting" {
-                    Button("移回進行中") { model.setWaiting(t.id, false) }
-                } else {
-                    Button("移到等待外部（同事 / review / CI）") { model.setWaiting(t.id, true) }
+                if t.group != nil {
+                    Button("移回進行中") { model.setGroupFlag(t.id, nil) }
+                }
+                if t.group != "read" {
+                    Button("標記已讀（看過，先不回）") { model.setGroupFlag(t.id, "read") }
+                }
+                if t.group != "waiting" {
+                    Button("移到等待外部（同事 / review / CI）") { model.setGroupFlag(t.id, "waiting") }
                 }
                 Button("收尾（關閉全部終端＋標記完成）", role: .destructive) { model.archiveTask(t.id) }
             } else {

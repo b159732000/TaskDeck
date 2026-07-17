@@ -9,11 +9,13 @@ public struct TaskNote: Identifiable, Equatable {
     public var created: String?
     public var path: URL
     /// Manual lifecycle group from frontmatter: nil = normal flow,
-    /// "waiting" = parked on external feedback (colleague / CI / review).
+    /// "waiting" = parked on external feedback (colleague / CI / review),
+    /// "read" = seen, no reply needed yet.
     public var group: String?
-    /// When the task was moved into the waiting group (frontmatter,
-    /// "yyyy-MM-dd HH:mm") — drives the >72h auto-sink bucket.
-    public var waitingSince: String?
+    /// When the task entered its manual group (frontmatter `group_since`,
+    /// "yyyy-MM-dd HH:mm"; legacy key `waiting_since` still read) — drives
+    /// the >72h semi-archive and >30d auto-done buckets.
+    public var groupSince: String?
 }
 
 public struct PaneSpec: Codable, Identifiable, Equatable {
@@ -177,7 +179,7 @@ public final class TaskStore {
                                 created: fm["created"],
                                 path: url,
                                 group: fm["group"],
-                                waitingSince: fm["waiting_since"]))
+                                groupSince: fm["group_since"] ?? fm["waiting_since"]))
         }
         out.sort { a, b in
             if a.status != b.status { return a.status == "active" }
@@ -338,6 +340,43 @@ public final class TaskStore {
         }
         t.insert(contentsOf: "\n\n\(line)\n\n---\n", at: anchor)
         return t
+    }
+
+    /// The `- …` lines of the top session-manifest block (empty when the
+    /// note has no block).
+    public static func manifestLines(_ text: String) -> [String] {
+        let anchor: String.Index
+        if let h1 = text.range(of: "(?m)^# .*$", options: .regularExpression) {
+            anchor = h1.upperBound
+        } else if text.hasPrefix("---\n"), let close = text.range(of: "\n---\n") {
+            anchor = close.upperBound
+        } else {
+            anchor = text.startIndex
+        }
+        guard let divider = text.range(of: "(?m)^---[ \\t]*$", options: .regularExpression,
+                                       range: anchor ..< text.endIndex) else { return [] }
+        return text[anchor ..< divider.lowerBound]
+            .split(separator: "\n")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { $0.hasPrefix("- ") }
+    }
+
+    /// Session-id loss guard: before the in-memory note overwrites disk,
+    /// re-append any manifest line that exists on disk but is missing from
+    /// memory (stale-cache overwrite, vault sync race, another instance…).
+    /// Restored lines carry a "←自動保留" marker so the human can see what
+    /// was rescued. Idempotent.
+    public static func mergeManifestLines(disk: String, into memory: String) -> String {
+        func normalize(_ s: String) -> String {
+            s.replacingOccurrences(of: " ←自動保留", with: "")
+                .trimmingCharacters(in: .whitespaces)
+        }
+        let have = Set(manifestLines(memory).map(normalize))
+        var out = memory
+        for line in manifestLines(disk) where !have.contains(normalize(line)) {
+            out = appendSessionLine(out, line: normalize(line) + " ←自動保留")
+        }
+        return out
     }
 
     // MARK: - Machine state

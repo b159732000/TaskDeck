@@ -2,6 +2,26 @@ import AppKit
 import SwiftUI
 import TaskDeckCore
 
+// MARK: - Feature-usage tally（James 想觀察哪些功能真的有在用）
+
+/// Appends {action: {count, last}} to App Support/usage.json. Read it later
+/// to decide whether a feature (e.g. 關閉資源視窗) earns its keep.
+enum UsageLog {
+    static func bump(_ action: String) {
+        let url = Paths.appSupport.appendingPathComponent("usage.json")
+        var dict = (try? JSONSerialization.jsonObject(with: Data(contentsOf: url)))
+            as? [String: [String: Double]] ?? [:]
+        var entry = dict[action] ?? [:]
+        entry["count"] = (entry["count"] ?? 0) + 1
+        entry["last"] = Date().timeIntervalSince1970
+        dict[action] = entry
+        if let data = try? JSONSerialization.data(withJSONObject: dict,
+                                                  options: [.prettyPrinted, .sortedKeys]) {
+            try? data.write(to: url)
+        }
+    }
+}
+
 // MARK: - Safari (AppleScript, read-only)
 
 /// Safari windows/tabs via AppleScript — Slack has no such surface, so Slack
@@ -154,6 +174,15 @@ extension TaskSession {
         var note: String?
         do {
             chrome = try await ChromeCDP.windows(port: port)
+            // Opportunistic hygiene: drop remembered window ids that no
+            // longer exist（手關視窗、Chrome 重啟）——「關閉資源視窗」的
+            // enabled 狀態與現實保持一致。
+            let live = Set(chrome.map(\.id))
+            let remembered = machine.rememberedChromeWindows.filter(live.contains)
+            if remembered != machine.rememberedChromeWindows {
+                machine.chromeWindowIDs = remembered
+                machine.chromeWindowID = nil
+            }
         } catch {
             note = "Chrome 偵錯埠沒回應（debug Chrome 沒開？）——只能快照 Safari"
         }
@@ -213,10 +242,12 @@ struct ResourceMenu: View {
         let count = session.resources.count
         Menu {
             Button("開啟全部資源（\(count) 條連結）") {
+                UsageLog.bump("resources.open")
                 Task { message = await session.openResources() }
             }
             .disabled(count == 0)
             Button("快照分頁到筆記…") {
+                UsageLog.bump("resources.snapshot")
                 Task {
                     let t = await session.snapshotTargets()
                     if t.chrome.isEmpty && t.safari.isEmpty {
@@ -228,6 +259,7 @@ struct ResourceMenu: View {
             }
             Divider()
             Button("關閉 Chrome 資源視窗", role: .destructive) {
+                UsageLog.bump("resources.closeWindows")
                 Task { message = await session.closeChromeResources() }
             }
             .disabled(session.machine.rememberedChromeWindows.isEmpty)
