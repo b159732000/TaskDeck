@@ -21,10 +21,14 @@ public struct PaneSpec: Codable, Identifiable, Equatable {
     public var autoStart: Bool
     /// Extra CLI args for AI sessions (copied from TeamDef at creation).
     public var extraArgs: String?
+    /// nil = main terminal grid; "side" = small pane stacked in the notes
+    /// column (kept out of the grid's split layout entirely).
+    public var location: String?
 
     public init(id: String = UUID().uuidString, title: String, kind: String,
                 team: String? = nil, sessionID: String? = nil, command: String? = nil,
-                cwd: String? = nil, autoStart: Bool = false, extraArgs: String? = nil) {
+                cwd: String? = nil, autoStart: Bool = false, extraArgs: String? = nil,
+                location: String? = nil) {
         self.id = id
         self.title = title
         self.kind = kind
@@ -34,6 +38,7 @@ public struct PaneSpec: Codable, Identifiable, Equatable {
         self.cwd = cwd
         self.autoStart = autoStart
         self.extraArgs = extraArgs
+        self.location = location
     }
 
     /// The command typed into a fresh interactive zsh for this pane.
@@ -118,16 +123,25 @@ public struct TaskMachineState: Codable, Equatable {
     public var panes: [PaneSpec]
     public var layout: LayoutNode?
     public var primaryTeam: String?
-    /// CDP window id of the Chrome window TaskDeck opened for this task —
-    /// lets tab snapshots auto-target the right window. Best-effort: ids
-    /// don't survive a Chrome restart; snapshot falls back to a picker.
+    /// CDP window ids of the Chrome windows tied to this task (opened by
+    /// "open resources" or picked at snapshot time) — snapshots preselect
+    /// them and "close resource windows" targets exactly these. Best-effort:
+    /// ids don't survive a Chrome restart; the picker is the fallback.
+    /// (`chromeWindowID` is the pre-multi-select spelling, kept for decode
+    /// compatibility.)
     public var chromeWindowID: Int?
+    public var chromeWindowIDs: [Int]?
+
+    public var rememberedChromeWindows: [Int] {
+        chromeWindowIDs ?? chromeWindowID.map { [$0] } ?? []
+    }
 
     public init() {
         panes = []
         layout = nil
         primaryTeam = nil
         chromeWindowID = nil
+        chromeWindowIDs = nil
     }
 }
 

@@ -109,14 +109,14 @@ public enum ResourceOps {
         return .chrome
     }
 
-    // MARK: - Chrome snapshot subsection
+    // MARK: - Snapshot subsections
 
-    /// Replace the bullet list under `### Chrome` inside `## Resources`
-    /// with `entries` (title, url). Creates the section / subsection when
-    /// missing (appended at the end of the note). Hand-written lines outside
-    /// that subsection are never touched.
-    public static func setChromeSnapshot(_ text: String,
-                                         entries: [(title: String, url: String)]) -> String {
+    /// Replace the bullet list under `### <subsection>` (e.g. Chrome,
+    /// Safari) inside `## Resources` with `entries` (title, url). Creates
+    /// the section / subsection when missing (appended at the end of the
+    /// note). Hand-written lines outside that subsection are never touched.
+    public static func setSnapshot(_ text: String, subsection: String,
+                                   entries: [(title: String, url: String)]) -> String {
         var t = text
         let bullets = entries
             .map { "- [\(sanitizeTitle($0.title))](\($0.url))" }
@@ -124,14 +124,15 @@ public enum ResourceOps {
 
         if sectionBodyRange(t) == nil {
             if !t.hasSuffix("\n") { t += "\n" }
-            t += "\n## Resources\n\n### Chrome\n\n\(bullets)\n"
+            t += "\n## Resources\n\n### \(subsection)\n\n\(bullets)\n"
             return t
         }
         guard let body = sectionBodyRange(t) else { return t }
 
-        // Find `### Chrome` inside the section body.
-        if let sub = t.range(of: "(?mi)^###[ \\t]+chrome[ \\t]*$",
-                             options: .regularExpression, range: body) {
+        // Find `### <subsection>` inside the section body.
+        let pattern = "(?mi)^###[ \\t]+"
+            + NSRegularExpression.escapedPattern(for: subsection) + "[ \\t]*$"
+        if let sub = t.range(of: pattern, options: .regularExpression, range: body) {
             // Replace from after the subsection heading to the next heading
             // (### or ##) or the section end.
             let tail = sub.upperBound ..< body.upperBound
@@ -143,8 +144,13 @@ public enum ResourceOps {
 
         // Section exists, subsection doesn't: append at the section end.
         t.replaceSubrange(body.upperBound ..< body.upperBound,
-                          with: "\n### Chrome\n\n\(bullets)\n\n")
+                          with: "\n### \(subsection)\n\n\(bullets)\n\n")
         return t
+    }
+
+    public static func setChromeSnapshot(_ text: String,
+                                         entries: [(title: String, url: String)]) -> String {
+        setSnapshot(text, subsection: "Chrome", entries: entries)
     }
 
     private static func sanitizeTitle(_ s: String) -> String {

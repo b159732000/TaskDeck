@@ -2,7 +2,65 @@ import AppKit
 import SwiftUI
 import TaskDeckCore
 
-// MARK: - Open / snapshot actions (per task)
+// MARK: - Safari (AppleScript, read-only)
+
+/// Safari windows/tabs via AppleScript — Slack has no such surface, so Slack
+/// resources stay hand-written permalinks (opened as deep links). First use
+/// triggers macOS's "control Safari" automation prompt.
+enum SafariScript {
+    struct Window: Identifiable, Equatable {
+        let id: Int
+        var tabs: [(title: String, url: String)]
+
+        static func == (a: Window, b: Window) -> Bool {
+            a.id == b.id && a.tabs.map(\.url) == b.tabs.map(\.url)
+        }
+    }
+
+    static func windows() -> [Window] {
+        // `tell app "Safari"` would LAUNCH Safari when it isn't running.
+        let running = NSRunningApplication.runningApplications(
+            withBundleIdentifier: "com.apple.Safari")
+        guard !running.isEmpty else { return [] }
+
+        let script = """
+        set out to ""
+        tell application "Safari"
+            repeat with w in windows
+                set out to out & "WINDOW " & (id of w) & linefeed
+                repeat with t in tabs of w
+                    set out to out & (URL of t) & tab & (name of t) & linefeed
+                end repeat
+            end repeat
+        end tell
+        return out
+        """
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        p.arguments = ["-e", script]
+        let pipe = Pipe()
+        p.standardOutput = pipe
+        p.standardError = FileHandle.nullDevice
+        guard (try? p.run()) != nil else { return [] }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        p.waitUntilExit()
+
+        var out: [Window] = []
+        for line in (String(data: data, encoding: .utf8) ?? "").components(separatedBy: "\n") {
+            if line.hasPrefix("WINDOW ") {
+                out.append(Window(id: Int(line.dropFirst(7)) ?? (out.count + 1), tabs: []))
+            } else if !out.isEmpty, let tab = line.firstIndex(of: "\t") {
+                let url = String(line[..<tab]).trimmingCharacters(in: .whitespaces)
+                guard url.contains("://") else { continue }
+                out[out.count - 1].tabs.append(
+                    (title: String(line[line.index(after: tab)...]), url: url))
+            }
+        }
+        return out.filter { !$0.tabs.isEmpty }
+    }
+}
+
+// MARK: - Open / snapshot / close actions (per task)
 
 extension TaskSession {
     var resources: [TaskResource] { ResourceOps.parse(noteText) }
@@ -29,14 +87,16 @@ extension TaskSession {
             let port = app.config.chromeDebugPort ?? 9222
             let before = await ChromeCDP.windowIDs(port: port)
             openInChrome(chromeURLs)
-            // Best-effort: remember the freshly created window for snapshots.
-            // (Ids don't survive a Chrome restart; snapshot falls back to a
-            // picker when this one is gone.)
+            // Best-effort: remember the freshly created window so snapshots
+            // preselect it and "close resource windows" can target it.
             for _ in 0 ..< 5 {
                 try? await Task.sleep(nanoseconds: 600_000_000)
                 let now = await ChromeCDP.windowIDs(port: port)
                 if let fresh = now.subtracting(before).first {
-                    machine.chromeWindowID = fresh
+                    var ids = machine.rememberedChromeWindows
+                    ids.removeAll { !now.contains($0) } // drop dead ids
+                    ids.append(fresh)
+                    machine.chromeWindowIDs = ids
                     break
                 }
             }
@@ -78,88 +138,122 @@ extension TaskSession {
         try? p.run()
     }
 
-    // MARK: Snapshot
+    // MARK: Snapshot (multi-window, Chrome + Safari)
 
-    enum SnapshotOutcome {
-        case written(Int)
-        case pick([ChromeCDP.Window])
-        case failed(String)
+    struct SnapshotTargets {
+        var chrome: [ChromeCDP.Window]
+        var safari: [SafariScript.Window]
+        var note: String?
     }
 
-    /// Read the debug Chrome's windows; auto-snapshot the task's remembered
-    /// window, else hand back the window list for the picker sheet.
-    func snapshotChrome() async -> SnapshotOutcome {
+    /// Everything the snapshot picker can offer. Chrome unreachable is not
+    /// fatal (Safari may still be snapshotted) — it degrades to a note.
+    func snapshotTargets() async -> SnapshotTargets {
+        let port = app.config.chromeDebugPort ?? 9222
+        var chrome: [ChromeCDP.Window] = []
+        var note: String?
+        do {
+            chrome = try await ChromeCDP.windows(port: port)
+        } catch {
+            note = "Chrome 偵錯埠沒回應（debug Chrome 沒開？）——只能快照 Safari"
+        }
+        let safari = await Task.detached { SafariScript.windows() }.value
+        return SnapshotTargets(chrome: chrome, safari: safari, note: note)
+    }
+
+    /// Write the picked windows into the note: Chrome selections into
+    /// `### Chrome`, Safari selections into `### Safari`. A kind with no
+    /// selection keeps its existing bullets untouched. Chrome picks are
+    /// remembered for next time (and for "close resource windows").
+    @discardableResult
+    func applySnapshot(chrome: [ChromeCDP.Window], safari: [SafariScript.Window]) -> Int {
+        var wrote = 0
+        if !chrome.isEmpty {
+            let entries = chrome.flatMap { $0.tabs.map { (title: $0.title, url: $0.url) } }
+            noteText = ResourceOps.setSnapshot(noteText, subsection: "Chrome", entries: entries)
+            machine.chromeWindowIDs = chrome.map(\.id)
+            wrote += entries.count
+        }
+        if !safari.isEmpty {
+            let entries = safari.flatMap(\.tabs)
+            noteText = ResourceOps.setSnapshot(noteText, subsection: "Safari", entries: entries)
+            wrote += entries.count
+        }
+        return wrote
+    }
+
+    /// Close the Chrome windows this task remembered (opened via "open
+    /// resources" or picked at snapshot). Tracked windows only — never a
+    /// guess. Safari windows aren't tracked; closing them stays manual.
+    func closeChromeResources() async -> String {
+        let ids = Set(machine.rememberedChromeWindows)
+        guard !ids.isEmpty else { return "這個任務沒有記住的 Chrome 資源視窗" }
         let port = app.config.chromeDebugPort ?? 9222
         do {
-            let windows = try await ChromeCDP.windows(port: port)
-            guard !windows.isEmpty else { return .failed("debug Chrome 沒有開著的視窗") }
-            if let known = machine.chromeWindowID,
-               let win = windows.first(where: { $0.id == known }) {
-                return .written(applySnapshot(win))
-            }
-            if windows.count == 1 { return .written(applySnapshot(windows[0])) }
-            return .pick(windows)
+            let n = try await ChromeCDP.closeWindows(port: port, windowIDs: ids)
+            machine.chromeWindowIDs = []
+            machine.chromeWindowID = nil
+            return n > 0 ? "已關閉 \(n) 個分頁（任務的 Chrome 資源視窗）"
+                : "記住的視窗已不存在（可能 Chrome 重啟過）——記錄已清除"
         } catch {
-            return .failed((error as? LocalizedError)?.errorDescription ?? "讀取分頁失敗")
+            return (error as? LocalizedError)?.errorDescription ?? "關閉失敗"
         }
-    }
-
-    @discardableResult
-    func applySnapshot(_ window: ChromeCDP.Window) -> Int {
-        let entries = window.tabs.map { (title: $0.title, url: $0.url) }
-        noteText = ResourceOps.setChromeSnapshot(noteText, entries: entries)
-        machine.chromeWindowID = window.id
-        return entries.count
     }
 }
 
-// MARK: - Header buttons + picker sheet
+// MARK: - The single "資源" menu (open / snapshot / close in one group)
 
-struct ResourceButtons: View {
+struct ResourceMenu: View {
     @EnvironmentObject var model: AppModel
     @EnvironmentObject var session: TaskSession
-    @State private var pickerWindows: [ChromeCDP.Window]?
+    @State private var picker: TaskSession.SnapshotTargets?
     @State private var message: String?
 
     var body: some View {
         let count = session.resources.count
-        HStack(spacing: 2) {
-            Button {
+        Menu {
+            Button("開啟全部資源（\(count) 條連結）") {
                 Task { message = await session.openResources() }
-            } label: {
-                Label(count > 0 ? "開資源 \(count)" : "開資源",
-                      systemImage: "rectangle.stack.badge.play")
-                    .font(.system(size: 11))
             }
-            .buttonStyle(.borderless)
             .disabled(count == 0)
-            .help("開啟筆記 ## Resources 的連結：Chrome（debug profile 新視窗）、Safari、Slack")
-
-            Button {
+            Button("快照分頁到筆記…") {
                 Task {
-                    switch await session.snapshotChrome() {
-                    case .written(let n): message = "已快照 \(n) 個分頁進筆記"
-                    case .pick(let wins): pickerWindows = wins
-                    case .failed(let why): message = why
+                    let t = await session.snapshotTargets()
+                    if t.chrome.isEmpty && t.safari.isEmpty {
+                        message = t.note ?? "沒有可快照的視窗"
+                    } else {
+                        picker = t
                     }
                 }
-            } label: {
-                Image(systemName: "camera.viewfinder")
-                    .font(.system(size: 11))
             }
-            .buttonStyle(.borderless)
-            .help("把這個任務的 Chrome 視窗分頁快照回筆記（## Resources → ### Chrome）")
+            Divider()
+            Button("關閉 Chrome 資源視窗", role: .destructive) {
+                Task { message = await session.closeChromeResources() }
+            }
+            .disabled(session.machine.rememberedChromeWindows.isEmpty)
+        } label: {
+            Label(count > 0 ? "資源 \(count)" : "資源",
+                  systemImage: "rectangle.stack")
+                .font(.system(size: 11))
         }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .help("任務資源：開啟（Chrome/Safari/Slack）、快照分頁回筆記、關閉任務的 Chrome 視窗")
         .sheet(isPresented: Binding(
-            get: { pickerWindows != nil },
-            set: { if !$0 { pickerWindows = nil } }
+            get: { picker != nil },
+            set: { if !$0 { picker = nil } }
         )) {
-            SnapshotPickerSheet(windows: pickerWindows ?? []) { win in
-                if let win {
-                    let n = session.applySnapshot(win)
-                    message = "已快照 \(n) 個分頁進筆記"
+            if let t = picker {
+                SnapshotPickerSheet(
+                    targets: t,
+                    preselectedChrome: Set(session.machine.rememberedChromeWindows)
+                ) { chrome, safari in
+                    if !chrome.isEmpty || !safari.isEmpty {
+                        let n = session.applySnapshot(chrome: chrome, safari: safari)
+                        message = "已快照 \(n) 個分頁進筆記"
+                    }
+                    picker = nil
                 }
-                pickerWindows = nil
             }
         }
         .alert("資源", isPresented: Binding(
@@ -173,42 +267,105 @@ struct ResourceButtons: View {
     }
 }
 
-/// Multiple debug-Chrome windows and none is remembered for this task:
-/// the user points at the right one (previewed by its first tab titles).
+/// Multi-select window picker: check the windows (Chrome and/or Safari)
+/// that belong to this task; their tabs land in the note's ### Chrome /
+/// ### Safari subsections. Unchecked kinds keep their existing bullets.
 struct SnapshotPickerSheet: View {
-    let windows: [ChromeCDP.Window]
-    let done: (ChromeCDP.Window?) -> Void
+    let targets: TaskSession.SnapshotTargets
+    let preselectedChrome: Set<Int>
+    let done: (_ chrome: [ChromeCDP.Window], _ safari: [SafariScript.Window]) -> Void
+
+    @State private var chromeOn: Set<Int> = []
+    @State private var safariOn: Set<Int> = []
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("要快照哪個 Chrome 視窗？").font(.headline)
-            Text("多個 debug Chrome 視窗同時開著（多任務並行）；選這個任務的那一個。")
+        VStack(alignment: .leading, spacing: 10) {
+            Text("快照哪些視窗？").font(.headline)
+            Text("勾選屬於這個任務的視窗（可多選）；沒勾的種類不會動到筆記裡既有的清單。")
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
-            ForEach(windows) { win in
-                Button {
-                    done(win)
-                } label: {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("視窗 \(win.id) — \(win.tabs.count) 個分頁")
-                            .font(.system(size: 12, weight: .medium))
-                        Text(win.tabs.prefix(3).map(\.title).joined(separator: " · "))
-                            .font(.system(size: 10.5))
-                            .foregroundStyle(.secondary)
-                            .lineLimit(2)
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(8)
-                    .background(Theme.paneHeaderBG, in: RoundedRectangle(cornerRadius: 6))
-                }
-                .buttonStyle(.plain)
+            if let note = targets.note {
+                Text(note).font(.system(size: 11)).foregroundStyle(.orange)
             }
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 6) {
+                    if !targets.chrome.isEmpty {
+                        Text("CHROME（debug profile）")
+                            .font(.system(size: 9.5, weight: .semibold))
+                            .foregroundStyle(.tertiary)
+                        ForEach(targets.chrome) { win in
+                            windowRow(on: chromeOn.contains(win.id),
+                                      title: "視窗 \(win.id) — \(win.tabs.count) 個分頁",
+                                      preview: win.tabs.prefix(3).map(\.title)
+                                          .joined(separator: " · ")) {
+                                toggle(&chromeOn, win.id)
+                            }
+                        }
+                    }
+                    if !targets.safari.isEmpty {
+                        Text("SAFARI")
+                            .font(.system(size: 9.5, weight: .semibold))
+                            .foregroundStyle(.tertiary)
+                            .padding(.top, targets.chrome.isEmpty ? 0 : 6)
+                        ForEach(targets.safari) { win in
+                            windowRow(on: safariOn.contains(win.id),
+                                      title: "視窗 — \(win.tabs.count) 個分頁",
+                                      preview: win.tabs.prefix(3).map(\.title)
+                                          .joined(separator: " · ")) {
+                                toggle(&safariOn, win.id)
+                            }
+                        }
+                    }
+                }
+            }
+            .frame(maxHeight: 320)
+
             HStack {
                 Spacer()
-                Button("取消") { done(nil) }
+                Button("取消") { done([], []) }
+                Button("快照勾選的視窗") {
+                    done(targets.chrome.filter { chromeOn.contains($0.id) },
+                         targets.safari.filter { safariOn.contains($0.id) })
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(chromeOn.isEmpty && safariOn.isEmpty)
             }
         }
         .padding(20)
-        .frame(width: 460)
+        .frame(width: 480)
+        .onAppear {
+            chromeOn = preselectedChrome
+                .intersection(Set(targets.chrome.map(\.id)))
+            if chromeOn.isEmpty, targets.chrome.count == 1 {
+                chromeOn = [targets.chrome[0].id]
+            }
+        }
+    }
+
+    private func toggle(_ set: inout Set<Int>, _ id: Int) {
+        if set.contains(id) { set.remove(id) } else { set.insert(id) }
+    }
+
+    private func windowRow(on: Bool, title: String, preview: String,
+                           tap: @escaping () -> Void) -> some View {
+        Button(action: tap) {
+            HStack(alignment: .top, spacing: 8) {
+                Image(systemName: on ? "checkmark.square.fill" : "square")
+                    .foregroundStyle(on ? Theme.accent : .secondary)
+                    .padding(.top, 1)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title).font(.system(size: 12, weight: .medium))
+                    Text(preview)
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
+                Spacer()
+            }
+            .padding(8)
+            .background(Theme.paneHeaderBG, in: RoundedRectangle(cornerRadius: 6))
+        }
+        .buttonStyle(.plain)
     }
 }

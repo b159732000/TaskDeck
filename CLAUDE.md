@@ -44,8 +44,8 @@ unix socket ↔ `taskdeckd` (owns every PTY). Public, source-available repo
   <session-id>` list right after the H1, closed by a `---` rule
   (`TaskStore.appendSessionLine`); and (b) the `## Resources` section — URL
   bullets the "open resources" button launches (`ResourceOps.parse`), where
-  tab snapshots rewrite ONLY the `### Chrome` subsection
-  (`ResourceOps.setChromeSnapshot`). Never add other template sections or
+  tab snapshots rewrite ONLY the `### Chrome` / `### Safari` subsections
+  (`ResourceOps.setSnapshot`). Never add other template sections or
   reformat the rest of a note.
 - AI pane resume: uuid is written to the note first, then the session
   starts with `--session-id`; restart uses `-r <uuid> || --session-id

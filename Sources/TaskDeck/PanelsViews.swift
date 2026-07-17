@@ -42,9 +42,12 @@ struct SidebarView: View {
             .padding(.horizontal, 10)
             .padding(.vertical, 8)
         }
-        .background(Theme.panelBG)
+        // Tint + border run under the titlebar so the strip above the
+        // sidebar matches the sidebar (see ContentView's root tint note).
+        .background(Theme.panelBG.ignoresSafeArea(edges: .top))
         .overlay(alignment: .trailing) {
             Rectangle().fill(Theme.border).frame(width: 1)
+                .ignoresSafeArea(edges: .top)
         }
         .alert("重新命名任務", isPresented: Binding(
             get: { renamingSlug != nil },
@@ -96,8 +99,13 @@ struct SidebarView: View {
             Spacer(minLength: 4)
             // AI state at a glance: 🟢 running, 🟡 waiting for the user,
             // 🔴 blocked on a permission prompt (hook-fed, live panes only).
+            // Click = "已看過" — hides until the state changes again.
             if let badge = model.aiBadge(t.id) {
-                Text(badge).font(.system(size: 9))
+                Button { model.ackAIStatus(t.id) } label: {
+                    Text(badge).font(.system(size: 9))
+                }
+                .buttonStyle(.plain)
+                .help("點一下＝已看過（狀態再變會重新亮起）")
             }
         }
         .padding(.vertical, 1)
@@ -162,7 +170,7 @@ struct TaskDetailView: View {
                         .background(Theme.accent.opacity(0.14), in: Capsule())
                 }
                 Spacer()
-                ResourceButtons()
+                ResourceMenu()
                 NewPaneMenu(labelStyle: .toolbar)
                     .menuStyle(.borderlessButton)
                     .fixedSize()
@@ -183,7 +191,7 @@ struct TaskDetailView: View {
                 }
             }
         }
-        .background(Theme.windowBG)
+        .background(Theme.windowBG.ignoresSafeArea(edges: .top)) // titlebar seam
     }
 }
 
@@ -229,16 +237,19 @@ struct NewPaneMenu: View {
     @EnvironmentObject var model: AppModel
     @EnvironmentObject var session: TaskSession
     var labelStyle: NewPaneMenuStyle = .toolbar
+    /// true = the pane lives in the notes column (small side terminal)
+    /// instead of the main grid.
+    var side = false
     @State private var showCommandSheet = false
     @State private var cmdTitle = ""
     @State private var cmdText = ""
 
     var body: some View {
         Menu {
-            Button("Shell") { session.addShellPane() }
+            Button("Shell") { session.addShellPane(side: side) }
             Divider()
             ForEach(model.config.teams) { team in
-                Button("AI · \(team.label)") { session.addAIPane(team: team) }
+                Button("AI · \(team.label)") { session.addAIPane(team: team, side: side) }
             }
             Divider()
             Button("指令（server / 腳本）…") { showCommandSheet = true }
@@ -263,7 +274,7 @@ struct NewPaneMenu: View {
                     Spacer()
                     Button("取消") { showCommandSheet = false }
                     Button("建立") {
-                        session.addCommandPane(title: cmdTitle, command: cmdText)
+                        session.addCommandPane(title: cmdTitle, command: cmdText, side: side)
                         cmdTitle = ""
                         cmdText = ""
                         showCommandSheet = false
@@ -289,11 +300,11 @@ struct NotesColumn: View {
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(.secondary)
                 Spacer()
-                NewPaneMenu(labelStyle: .icon)
+                NewPaneMenu(labelStyle: .icon, side: true)
                     .menuStyle(.borderlessButton)
                     .menuIndicator(.hidden)
                     .frame(width: 26)
-                    .help("新終端（Shell／AI／指令）")
+                    .help("在右欄開小終端（不佔主終端格的空間）")
                 Button {
                     model.openInObsidian(session.slug)
                 } label: {
@@ -325,6 +336,23 @@ struct NotesColumn: View {
             .padding(.horizontal, 8)
             .padding(.vertical, 6)
 
+            // Small side terminals: stacked under the notes, out of the main
+            // grid so they never steal split space from the big panes.
+            let sideIDs = session.sidePaneIDs
+            if !sideIDs.isEmpty {
+                Rectangle().fill(Theme.border).frame(height: 1)
+                ScrollView {
+                    VStack(spacing: 6) {
+                        ForEach(sideIDs, id: \.self) { id in
+                            PaneContainerView(specID: id)
+                                .frame(height: 220)
+                        }
+                    }
+                    .padding(6)
+                }
+                .frame(maxHeight: sideIDs.count == 1 ? 232 : 458)
+            }
+
             if model.config.quotaCommand != nil {
                 Rectangle().fill(Theme.border).frame(height: 1)
                 QuotaFooterView()
@@ -344,10 +372,20 @@ struct NotesColumn: View {
 /// rate-limits, so tasks/windows must not fetch independently.
 struct QuotaFooterView: View {
     @EnvironmentObject var model: AppModel
+    @AppStorage("quotaExpanded") private var expanded = true
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 8) {
+                Button {
+                    expanded.toggle()
+                } label: {
+                    Image(systemName: expanded ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help(expanded ? "收合額度表" : "展開額度表")
                 Text("AI 額度")
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(.secondary)
@@ -380,15 +418,17 @@ struct QuotaFooterView: View {
             .frame(height: 28)
             .background(Theme.paneHeaderBG)
 
-            ScrollView([.horizontal, .vertical], showsIndicators: false) {
-                Text(AnsiRenderer.render(model.quotaText.isEmpty ? "（讀取中…）" : model.quotaText,
-                                         size: 11 * model.uiScale))
-                    .lineSpacing(2)
-                    .fixedSize()
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
+            if expanded {
+                ScrollView([.horizontal, .vertical], showsIndicators: false) {
+                    Text(AnsiRenderer.render(model.quotaText.isEmpty ? "（讀取中…）" : model.quotaText,
+                                             size: 11 * model.uiScale))
+                        .lineSpacing(2)
+                        .fixedSize()
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                }
+                .frame(height: quotaHeight)
             }
-            .frame(height: quotaHeight)
         }
     }
 

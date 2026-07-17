@@ -43,6 +43,16 @@ final class AppModel: ObservableObject {
     /// (`Scripts/taskdeck-ai-status.sh` → `Paths.statusDir/<session>.json`):
     /// sessionID → (running | waiting | permission | ended, written-at).
     @Published var aiStatus: [String: (state: String, ts: Date)] = [:]
+    /// "已看過"：sessionID → the status timestamp the user acknowledged by
+    /// clicking the badge. Entries at or before this ts stop showing; the
+    /// next state change (newer ts) lights the badge again.
+    @Published var ackedAI: [String: Date] = [:] {
+        didSet {
+            let raw = ackedAI.mapValues { $0.timeIntervalSince1970 }
+            UserDefaults.standard.set(raw, forKey: "ackedAI")
+        }
+    }
+
     private var statusWatcher: DispatchSourceFileSystemObject?
     private var statusFD: Int32 = -1
 
@@ -53,6 +63,9 @@ final class AppModel: ObservableObject {
         uiScale = storedScale == 0 ? 1.0 : min(1.6, max(0.7, storedScale))
         taskOrder = (try? JSONDecoder().decode([String].self,
                                                from: Data(contentsOf: Self.orderFile))) ?? []
+        if let raw = UserDefaults.standard.dictionary(forKey: "ackedAI") as? [String: Double] {
+            ackedAI = raw.mapValues { Date(timeIntervalSince1970: $0) }
+        }
         rescan()
 
         client.onEvent = { [weak self] m in
@@ -256,6 +269,8 @@ final class AppModel: ObservableObject {
     /// Sidebar badge for a task's AI panes: 🔴 needs permission, 🟢 running,
     /// 🟡 turn finished / waiting for the user. Only live panes count — a
     /// stale file from an exited claude never shows (and entries expire).
+    /// Acknowledged entries (badge clicked) stay hidden until the state
+    /// changes again.
     func aiBadge(_ slug: String) -> String? {
         let machine = sessions[slug]?.machine ?? store.machineState(slug)
         var states: Set<String> = []
@@ -264,13 +279,24 @@ final class AppModel: ObservableObject {
                   let entry = aiStatus[sid],
                   entry.state != "ended",
                   paneRuntime[pane.id]?.running == true,
-                  Date().timeIntervalSince(entry.ts) < 24 * 3600 else { continue }
+                  Date().timeIntervalSince(entry.ts) < 24 * 3600,
+                  (ackedAI[sid] ?? .distantPast) < entry.ts else { continue }
             states.insert(entry.state)
         }
         if states.contains("permission") { return "🔴" }
         if states.contains("running") { return "🟢" }
         if states.contains("waiting") { return "🟡" }
         return nil
+    }
+
+    /// Badge clicked: mark the task's CURRENT AI states as seen.
+    func ackAIStatus(_ slug: String) {
+        let machine = sessions[slug]?.machine ?? store.machineState(slug)
+        for pane in machine.panes where pane.kind == "ai" {
+            if let sid = pane.sessionID, let entry = aiStatus[sid] {
+                ackedAI[sid] = entry.ts
+            }
+        }
     }
 
     private func watchStatusDir() {
@@ -469,11 +495,16 @@ final class TaskSession: ObservableObject {
         machine.panes.first { $0.id == id }
     }
 
-    func addShellPane() {
-        add(PaneSpec(title: "shell", kind: "shell"))
+    /// Small terminals living in the notes column (out of the grid layout).
+    var sidePaneIDs: [String] {
+        machine.panes.filter { $0.location == "side" }.map(\.id)
     }
 
-    func addAIPane(team: TeamDef) {
+    func addShellPane(side: Bool = false) {
+        add(PaneSpec(title: "shell", kind: "shell"), side: side)
+    }
+
+    func addAIPane(team: TeamDef, side: Bool = false) {
         var spec = PaneSpec(title: team.id, kind: "ai", team: team.id, extraArgs: team.args)
         if team.kind == "claude" {
             let sid = UUID().uuidString.lowercased()
@@ -481,23 +512,29 @@ final class TaskSession: ObservableObject {
             noteText = TaskStore.appendSessionLine(noteText, line: "- \(team.id) \(sid)")
         }
         if machine.primaryTeam == nil { machine.primaryTeam = team.id }
-        add(spec)
+        add(spec, side: side)
     }
 
-    func addCommandPane(title: String, command: String) {
-        add(PaneSpec(title: title.isEmpty ? command : title, kind: "command", command: command))
+    func addCommandPane(title: String, command: String, side: Bool = false) {
+        add(PaneSpec(title: title.isEmpty ? command : title, kind: "command", command: command),
+            side: side)
     }
 
-    private func add(_ spec: PaneSpec) {
+    private func add(_ spec: PaneSpec, side: Bool = false) {
+        var spec = spec
+        if side { spec.location = "side" }
         machine.panes.append(spec)
-        if let layout = machine.layout {
-            if let f = focusedSpecID, LayoutOps.contains(layout, f) {
-                machine.layout = LayoutOps.insertSplit(layout, target: f, axis: "h", newPane: spec.id)
+        if !side {
+            // Side panes never enter the grid's split tree.
+            if let layout = machine.layout {
+                if let f = focusedSpecID, LayoutOps.contains(layout, f) {
+                    machine.layout = LayoutOps.insertSplit(layout, target: f, axis: "h", newPane: spec.id)
+                } else {
+                    machine.layout = .split(axis: "h", ratio: 0.5, a: layout, b: .pane(spec.id))
+                }
             } else {
-                machine.layout = .split(axis: "h", ratio: 0.5, a: layout, b: .pane(spec.id))
+                machine.layout = .pane(spec.id)
             }
-        } else {
-            machine.layout = .pane(spec.id)
         }
         focusedSpecID = spec.id
         startPane(spec)

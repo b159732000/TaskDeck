@@ -65,6 +65,29 @@ enum ChromeCDP {
         (try? await windows(port: port).map(\.id)).map(Set.init) ?? []
     }
 
+    /// Close every tab of the given windows (closing all tabs closes the
+    /// window). The ONLY write this client performs — scoped to windows the
+    /// task explicitly remembered, so "close resource windows" can't touch
+    /// anything else. Returns the number of tabs closed.
+    static func closeWindows(port: Int, windowIDs: Set<Int>) async throws -> Int {
+        guard !windowIDs.isEmpty else { return 0 }
+        let wsURL = try await browserSocketURL(port: port)
+        let session = URLSession(configuration: .ephemeral)
+        let ws = session.webSocketTask(with: wsURL)
+        ws.resume()
+        defer { ws.cancel(with: .normalClosure, reason: nil) }
+
+        var closed = 0
+        for window in try await windows(port: port) where windowIDs.contains(window.id) {
+            for tab in window.tabs {
+                _ = try await call(ws, method: "Target.closeTarget",
+                                   params: ["targetId": tab.targetID])
+                closed += 1
+            }
+        }
+        return closed
+    }
+
     // MARK: - Plumbing
 
     private static func browserSocketURL(port: Int) async throws -> URL {

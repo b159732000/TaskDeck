@@ -73,6 +73,22 @@ let again = ResourceOps.setChromeSnapshot(out, entries: [(title: "c", url: "http
 check("snapshot: idempotent — one ### Chrome", again.components(separatedBy: "### Chrome").count == 2)
 check("snapshot: re-snapshot replaces", !again.contains("a.example.com") && again.contains("c.example.com"))
 
+// MARK: snapshot — Safari subsection is independent of Chrome's
+
+let withSafari = ResourceOps.setSnapshot(again, subsection: "Safari", entries: [
+    (title: "Linear", url: "https://linear.app/x"),
+])
+check("safari: own subsection", withSafari.contains("### Safari")
+      && withSafari.contains("(https://linear.app/x)"))
+check("safari: chrome bullets untouched", withSafari.contains("c.example.com"))
+let safariAgain = ResourceOps.setSnapshot(withSafari, subsection: "Safari",
+                                          entries: [(title: "y", url: "https://y.example.com")])
+check("safari: re-snapshot replaces only safari",
+      !safariAgain.contains("linear.app/x") && safariAgain.contains("c.example.com")
+      && safariAgain.components(separatedBy: "### Safari").count == 2)
+check("safari: parsed with safari kind",
+      ResourceOps.parse(safariAgain).contains { $0.kind == .safari && $0.url == "https://y.example.com" })
+
 // MARK: snapshot — creates section when missing
 
 let bare = ResourceOps.setChromeSnapshot("# t\n\n就一行",

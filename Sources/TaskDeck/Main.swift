@@ -73,6 +73,12 @@ struct ContentView: View {
             }
         }
         .frame(minWidth: 980, minHeight: 600)
+        // Root tint must reach the very top of the window: SwiftUI keeps
+        // per-view backgrounds inside the safe area, so without this the
+        // titlebar strip is bare behind-window blur — a black-looking band
+        // over a dark desktop (the "opaque titlebar" that survived every
+        // titlebar-view sweep).
+        .background(Theme.windowBG.ignoresSafeArea())
         .glassWindow()
         .preferredColorScheme(.dark)
     }
@@ -87,6 +93,7 @@ struct PopoutRoot: View {
             .environmentObject(model.session(slug))
             .navigationTitle(slug)
             .frame(minWidth: 800, minHeight: 480)
+            .background(Theme.windowBG.ignoresSafeArea()) // see ContentView
             .glassWindow()
             .preferredColorScheme(.dark)
     }
