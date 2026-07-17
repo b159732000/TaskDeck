@@ -155,17 +155,21 @@ struct SidebarView: View {
         }
         .padding(.vertical, 1)
         // (d) hover 才浮出狀態切換：以 overlay 疊在列的右端——不進版面流，
-        // 列高列寬零變化；淡入＋微縮放的過渡（瞬間出現體感差）。
+        // 列高列寬零變化。chips 常駐掛載、以 opacity/scale 做進出漸變：
+        // 比 if 插入/移除的 transition 可靠（List 列裡移除過渡常直接跳失）。
         .overlay(alignment: .trailing) {
-            if hoveredSlug == t.id, t.status == "active" {
+            if t.status == "active" {
+                let hovered = hoveredSlug == t.id
                 LifecycleChips(task: t)
                     .padding(.horizontal, 5)
                     .padding(.vertical, 3)
                     .background(.regularMaterial, in: Capsule())
-                    .transition(.opacity.combined(with: .scale(scale: 0.9, anchor: .trailing)))
+                    .opacity(hovered ? 1 : 0)
+                    .scaleEffect(hovered ? 1 : 0.92, anchor: .trailing)
+                    .allowsHitTesting(hovered)
+                    .animation(.easeInOut(duration: 0.17), value: hovered)
             }
         }
-        .animation(.easeOut(duration: 0.13), value: hoveredSlug)
         .onHover { inside in
             if inside {
                 hoveredSlug = t.id
@@ -181,8 +185,8 @@ struct SidebarView: View {
                     ? Theme.accent.opacity(0.16)
                     : (hoveredSlug == t.id ? Color.white.opacity(0.05) : .clear))
                 .padding(.horizontal, 4)
-                .animation(.easeOut(duration: 0.13), value: hoveredSlug)
-                .animation(.easeOut(duration: 0.13), value: model.selection)
+                .animation(.easeInOut(duration: 0.17), value: hoveredSlug)
+                .animation(.easeInOut(duration: 0.17), value: model.selection)
         )
         .tag(t.id)
         .contextMenu {
@@ -437,6 +441,7 @@ struct NewPaneMenu: View {
 struct NotesColumn: View {
     @EnvironmentObject var model: AppModel
     @EnvironmentObject var session: TaskSession
+    @FocusState private var noteFocused: Bool
 
     var body: some View {
         VStack(spacing: 0) {
@@ -470,6 +475,12 @@ struct NotesColumn: View {
             .scrollContentBackground(.hidden)
             .padding(.horizontal, 8)
             .padding(.vertical, 6)
+            // TextEditor（NSTextView）會吞掉點擊，tap gesture 收不到——用
+            // 「編輯器取得鍵盤焦點」當「筆記成為焦點區」的訊號最可靠。
+            .focused($noteFocused)
+            .onChange(of: noteFocused) { _, isFocused in
+                if isFocused { session.focusZone = .notes }
+            }
 
             // Small side terminals: stacked under the notes, out of the main
             // grid so they never steal split space from the big panes.
@@ -501,11 +512,12 @@ struct NotesColumn: View {
                 .stroke(session.focusZone == .notes ? Theme.accent.opacity(0.65) : Theme.border,
                         lineWidth: session.focusZone == .notes ? 1.5 : 1)
         )
-        // simultaneousGesture：TextEditor 會吃掉點擊，普通 onTap 到不了。
+        // 標頭等非編輯器區域的點擊仍走手勢補位。
         .simultaneousGesture(TapGesture().onEnded { session.focusZone = .notes })
         .padding(.vertical, 8)
         .padding(.trailing, 8)
-        .background(Theme.windowBG)
+        // 不再自帶 windowBG：TaskDetailView 根部已鋪同款底——雙層疊加會讓
+        // 筆記卡外圈比終端區外圈更深一階（James 抓到的色差）。
     }
 }
 
