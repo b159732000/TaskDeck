@@ -33,7 +33,10 @@ struct SidebarView: View {
         let semi = groups[.semiArchived] ?? []
         let done = groups[.done] ?? []
 
-        List(selection: $model.selection) {
+        // 不用 List 的 selection 系統：它的選取膠囊跟自畫常駐底是兩個
+        // 形狀不同的圖層，焦點在側邊欄時必然疊成兩層色。選取全自管——
+        // 點列設 model.selection，唯一的高亮圖層就是 listRowBackground。
+        List {
             if !needsYou.isEmpty {
                 Section("等你（\(needsYou.count)）") {
                     ForEach(needsYou) { row($0) }
@@ -188,7 +191,8 @@ struct SidebarView: View {
                 .animation(.easeInOut(duration: 0.17), value: hoveredSlug)
                 .animation(.easeInOut(duration: 0.17), value: model.selection)
         )
-        .tag(t.id)
+        .contentShape(Rectangle())
+        .onTapGesture { model.selection = t.id }
         .contextMenu {
             Button("複製 ID") {
                 NSPasteboard.general.clearContents()
