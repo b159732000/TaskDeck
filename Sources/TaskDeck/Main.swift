@@ -23,6 +23,11 @@ struct TaskDeckApp: App {
                 .environmentObject(model)
                 .onAppear { AppDelegate.model = model }
         }
+        // macOS 26 regression（FB20341654）：某些內容配置下系統會無視
+        // titlebarAppearsTransparent 硬畫標題列。正解＝在場景層宣告
+        // hiddenTitleBar，讓視窗建立時就無標題列；GlassWindow 的 AppKit
+        // sweep 保留當第二道防線。
+        .windowStyle(.hiddenTitleBar)
         .commands {
             CommandGroup(after: .newItem) {
                 Button("新任務") { model.newTask() }
@@ -63,6 +68,7 @@ struct TaskDeckApp: App {
                     .onAppear { AppDelegate.model = model }
             }
         }
+        .windowStyle(.hiddenTitleBar) // 同上：macOS 26 標題列回歸的正解
 
         Settings {
             AppearanceSettingsView()
@@ -167,7 +173,9 @@ struct ContentView: View {
             HStack(spacing: 0) {
                 SidebarView()
                     .frame(width: w)
-                ColumnDividerHandle(width: $sidebarWidth, total: geo.size.width, sign: +1)
+                // 邊界＝顯示 clamp（150…420），拖曳跟手。
+                ColumnDividerHandle(width: $sidebarWidth, total: geo.size.width,
+                                    sign: +1, minW: 150, maxW: 420)
                 Group {
                     if let slug = model.selection {
                         TaskDetailView(slug: slug)

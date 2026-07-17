@@ -8,6 +8,7 @@ struct SidebarView: View {
     @State private var renamingSlug: String?
     @State private var renameText = ""
     @State private var deletingSlug: String?
+    @State private var hoveredSlug: String?
     @AppStorage("doneSectionExpanded") private var doneExpanded = true
     @AppStorage("sunkSectionExpanded") private var sunkExpanded = false
 
@@ -141,11 +142,6 @@ struct SidebarView: View {
                 }
             }
             Spacer(minLength: 4)
-            // 選中的任務：狀態切換小 icon 直接內嵌在同一行（不改列高，
-            // 連續點擊不會因版面跳動誤點；危險動作留右鍵）。
-            if model.selection == t.id, t.status == "active" {
-                LifecycleChips(task: t)
-            }
             // AI state at a glance: 🟢 running, 🟡 waiting for the user,
             // 🔴 blocked on a permission prompt (hook-fed, live panes only).
             // Click = "已看過" — hides until the state changes again.
@@ -158,6 +154,23 @@ struct SidebarView: View {
             }
         }
         .padding(.vertical, 1)
+        // (d) hover 才浮出狀態切換：以 overlay 疊在列的右端——不進版面流，
+        // 列高列寬零變化，滑走即消失；材質背板確保壓在文字上仍可讀。
+        .overlay(alignment: .trailing) {
+            if hoveredSlug == t.id, t.status == "active" {
+                LifecycleChips(task: t)
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 3)
+                    .background(.regularMaterial, in: Capsule())
+            }
+        }
+        .onHover { inside in
+            if inside {
+                hoveredSlug = t.id
+            } else if hoveredSlug == t.id {
+                hoveredSlug = nil
+            }
+        }
         .tag(t.id)
         .contextMenu {
             Button("複製 ID") {
@@ -253,7 +266,9 @@ struct TaskDetailView: View {
                 HStack(spacing: 0) {
                     TerminalGridView()
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    ColumnDividerHandle(width: $notesWidth, total: geo.size.width)
+                    // 邊界與顯示 clamp 同一組，拖曳才會跟手（見 handle 註解）。
+                    ColumnDividerHandle(width: $notesWidth, total: geo.size.width,
+                                        minW: notesMin, maxW: maxNotes)
                     NotesColumn()
                         .frame(width: CGFloat(clamped))
                 }
@@ -266,10 +281,15 @@ struct TaskDetailView: View {
 /// Draggable divider between columns. `sign` says which side of the handle
 /// the bound width belongs to: +1 = panel on the left grows when dragging
 /// right (sidebar); -1 = panel on the right grows when dragging left (notes).
+/// `minW`/`maxW` MUST match the display clamp of the panel being resized —
+/// mismatched bounds let the stored value drift past the visible clamp and
+/// the divider stops tracking the cursor (grows a gap the further you drag).
 struct ColumnDividerHandle: View {
     @Binding var width: Double
     let total: CGFloat
     var sign: Double = -1
+    var minW: Double = 120
+    var maxW: Double? = nil
     @State private var startWidth: Double?
     @State private var hovering = false
 
@@ -292,7 +312,8 @@ struct ColumnDividerHandle: View {
                     .onChanged { v in
                         if startWidth == nil { startWidth = width }
                         let next = (startWidth ?? width) + sign * Double(v.translation.width)
-                        width = min(max(120, next), max(120, Double(total) - 168))
+                        let upper = max(minW, maxW ?? (Double(total) - 168))
+                        width = min(max(minW, next), upper)
                     }
                     .onEnded { _ in startWidth = nil }
             )
@@ -365,7 +386,12 @@ struct NewPaneMenu: View {
                 Label("加一個終端", systemImage: "plus")
             case .icon:
                 Image(systemName: "plus.rectangle.on.rectangle")
-                    .font(.system(size: 11))
+                    .font(.system(size: 11, weight: .medium))
+                    .frame(width: 24, height: 18)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 5)
+                            .stroke(Theme.border, lineWidth: 0.5)
+                    )
             }
         }
         .sheet(isPresented: $showCommandSheet) {
@@ -404,27 +430,17 @@ struct NotesColumn: View {
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(.secondary)
                 Spacer()
+                // 筆記欄標頭統一用 HeaderIconButton 尺寸；「在 Finder 顯示」
+                // 使用頻率低、撤出標頭（側邊欄右鍵選單仍有）。
                 NewPaneMenu(labelStyle: .icon, side: true)
                     .menuStyle(.borderlessButton)
                     .menuIndicator(.hidden)
-                    .frame(width: 26)
+                    .frame(width: 24, height: 18)
                     .help("在右欄開小終端（不佔主終端格的空間）")
-                Button {
+                HeaderIconButton(icon: "arrow.up.forward.app",
+                                 help: "在 Obsidian 開啟") {
                     model.openInObsidian(session.slug)
-                } label: {
-                    Image(systemName: "arrow.up.forward.app")
-                        .font(.system(size: 11))
                 }
-                .buttonStyle(.borderless)
-                .help("在 Obsidian 開啟")
-                Button {
-                    model.revealNote(session.slug)
-                } label: {
-                    Image(systemName: "folder")
-                        .font(.system(size: 11))
-                }
-                .buttonStyle(.borderless)
-                .help("在 Finder 顯示")
             }
             .padding(.horizontal, 12)
             .frame(height: 30)
@@ -474,8 +490,9 @@ struct NotesColumn: View {
 /// Bottom of the notes column: the quota CLI's own table output, rendered
 /// verbatim (ANSI colors and all). One shared fetcher app-wide — the tool
 /// rate-limits, so tasks/windows must not fetch independently.
-/// A±：夠大的點擊面積＋常駐細框＋hover 填色——之前 9pt 裸 icon 太難點。
-struct QuotaZoomButton: View {
+/// 統一的小標頭 icon 鈕：24×18 點擊面積＋常駐細框＋hover 填色。
+/// 額度列（折疊/A±/重整）與筆記欄標頭共用，尺寸間距才會一致。
+struct HeaderIconButton: View {
     let icon: String
     let help: String
     let action: () -> Void
@@ -509,16 +526,11 @@ struct QuotaFooterView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 8) {
-                Button {
+            HStack(spacing: 5) {
+                HeaderIconButton(icon: expanded ? "chevron.down" : "chevron.right",
+                                 help: expanded ? "收合額度表" : "展開額度表") {
                     expanded.toggle()
-                } label: {
-                    Image(systemName: expanded ? "chevron.down" : "chevron.right")
-                        .font(.system(size: 9, weight: .semibold))
-                        .foregroundStyle(.secondary)
                 }
-                .buttonStyle(.plain)
-                .help(expanded ? "收合額度表" : "展開額度表")
                 Text("AI 額度")
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(.secondary)
@@ -529,31 +541,29 @@ struct QuotaFooterView: View {
                         .help("上次更新失敗，顯示的是舊資料（stderr 在 /tmp/taskdeck-quota.err）")
                 }
                 Spacer()
-                QuotaZoomButton(icon: "textformat.size.smaller",
-                                help: "縮小額度表（獨立於全局縮放）") {
-                    quotaScale = max(0.65, ((quotaScale - 0.05) * 100).rounded() / 100)
-                }
-                QuotaZoomButton(icon: "textformat.size.larger",
-                                help: "放大額度表；目前 \(Int(quotaScale * 100))%") {
-                    quotaScale = min(1.3, ((quotaScale + 0.05) * 100).rounded() / 100)
-                }
                 if let t = model.quotaUpdatedAt {
                     Text(t, style: .time)
                         .font(.system(size: 10))
                         .foregroundStyle(.tertiary)
+                        .padding(.trailing, 3)
                 }
-                Button {
-                    model.refreshQuota()
-                } label: {
-                    if model.quotaBusy {
-                        ProgressView().controlSize(.mini)
-                    } else {
-                        Image(systemName: "arrow.clockwise")
-                            .font(.system(size: 10))
+                HeaderIconButton(icon: "textformat.size.smaller",
+                                 help: "縮小額度表（獨立於全局縮放）") {
+                    quotaScale = max(0.65, ((quotaScale - 0.05) * 100).rounded() / 100)
+                }
+                HeaderIconButton(icon: "textformat.size.larger",
+                                 help: "放大額度表；目前 \(Int(quotaScale * 100))%") {
+                    quotaScale = min(1.3, ((quotaScale + 0.05) * 100).rounded() / 100)
+                }
+                if model.quotaBusy {
+                    ProgressView().controlSize(.mini)
+                        .frame(width: 24, height: 18)
+                } else {
+                    HeaderIconButton(icon: "arrow.clockwise",
+                                     help: "重新讀取（每 5 分鐘自動更新，全 app 共用一份）") {
+                        model.refreshQuota()
                     }
                 }
-                .buttonStyle(.borderless)
-                .help("重新讀取（每 5 分鐘自動更新，全 app 共用一份）")
             }
             .padding(.horizontal, 12)
             .frame(height: 28)
