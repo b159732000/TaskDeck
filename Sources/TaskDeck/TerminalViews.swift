@@ -77,6 +77,8 @@ struct TerminalHostView: NSViewRepresentable {
         func detach() {
             if let token, let client { client.unsubscribe(paneID: paneID, token: token) }
             token = nil
+            resizeTimer?.invalidate()
+            resizeTimer = nil
         }
 
         // MARK: TerminalViewDelegate
@@ -88,13 +90,27 @@ struct TerminalHostView: NSViewRepresentable {
             client?.fire(m)
         }
 
+        private var resizeTimer: Timer?
+        private var pendingSize: (cols: Int, rows: Int)?
+
+        /// Debounced: live-resizing a split fires this per FRAME; forwarding
+        /// each one SIGWINCHes the shell dozens of times and zsh/p10k
+        /// redraws its prompt on every hit — the stacked duplicate prompt
+        /// lines after a drag. Tell the PTY only the FINAL size (0.15s
+        /// after the drag settles); the local view still reflows live.
         func sizeChanged(source: TerminalView, newCols: Int, newRows: Int) {
             guard newCols > 1, newRows > 1 else { return }
-            var m = WireMessage(type: "resize")
-            m.paneID = paneID
-            m.cols = newCols
-            m.rows = newRows
-            client?.fire(m)
+            pendingSize = (newCols, newRows)
+            resizeTimer?.invalidate()
+            resizeTimer = Timer.scheduledTimer(withTimeInterval: 0.15, repeats: false) { [weak self] _ in
+                guard let self, let size = self.pendingSize else { return }
+                self.pendingSize = nil
+                var m = WireMessage(type: "resize")
+                m.paneID = self.paneID
+                m.cols = size.cols
+                m.rows = size.rows
+                self.client?.fire(m)
+            }
         }
 
         func setTerminalTitle(source: TerminalView, title: String) {}
