@@ -19,10 +19,12 @@ public struct PaneSpec: Codable, Identifiable, Equatable {
     public var command: String?
     public var cwd: String?
     public var autoStart: Bool
+    /// Extra CLI args for AI sessions (copied from TeamDef at creation).
+    public var extraArgs: String?
 
     public init(id: String = UUID().uuidString, title: String, kind: String,
                 team: String? = nil, sessionID: String? = nil, command: String? = nil,
-                cwd: String? = nil, autoStart: Bool = false) {
+                cwd: String? = nil, autoStart: Bool = false, extraArgs: String? = nil) {
         self.id = id
         self.title = title
         self.kind = kind
@@ -31,6 +33,7 @@ public struct PaneSpec: Codable, Identifiable, Equatable {
         self.command = command
         self.cwd = cwd
         self.autoStart = autoStart
+        self.extraArgs = extraArgs
     }
 
     /// The command typed into a fresh interactive zsh for this pane.
@@ -41,10 +44,11 @@ public struct PaneSpec: Codable, Identifiable, Equatable {
         switch kind {
         case "ai":
             guard let team else { return nil }
+            let base = [team, extraArgs].compactMap { $0 }.joined(separator: " ")
             if let sid = sessionID {
-                return "\(team) -r \(sid) || \(team) --session-id \(sid)"
+                return "\(base) -r \(sid) || \(base) --session-id \(sid)"
             }
-            return team
+            return base
         case "command":
             return command
         default:

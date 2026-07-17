@@ -32,11 +32,16 @@ public struct TeamDef: Codable, Identifiable, Equatable {
     /// "claude": supports `--session-id <uuid>` / `-r <uuid>` resume.
     /// "other": started as-is, no automatic session bookkeeping.
     public var kind: String
+    /// Extra CLI args appended at session start, e.g.
+    /// "--dangerously-skip-permissions". Captured into the pane spec at
+    /// creation time so restores behave identically.
+    public var args: String?
 
-    public init(id: String, label: String, kind: String) {
+    public init(id: String, label: String, kind: String, args: String? = nil) {
         self.id = id
         self.label = label
         self.kind = kind
+        self.args = args
     }
 }
 

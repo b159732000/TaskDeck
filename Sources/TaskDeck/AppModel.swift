@@ -341,7 +341,7 @@ final class TaskSession: ObservableObject {
     }
 
     func addAIPane(team: TeamDef) {
-        var spec = PaneSpec(title: team.id, kind: "ai", team: team.id)
+        var spec = PaneSpec(title: team.id, kind: "ai", team: team.id, extraArgs: team.args)
         if team.kind == "claude" {
             let sid = UUID().uuidString.lowercased()
             spec.sessionID = sid

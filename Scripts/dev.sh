@@ -1,12 +1,21 @@
 #!/bin/zsh
-# Dev loop: rebuild + relaunch the GUI only.
+# Dev loop: rebuild + reinstall + relaunch the GUI only.
 # taskdeckd (and every live terminal session) is untouched — restarting the
 # GUI is always safe.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 Scripts/bundle.sh "${1:-debug}"
+
+DEST="/Applications/TaskDeck.app"
+if [[ ! -w "/Applications" ]]; then
+  mkdir -p "$HOME/Applications"
+  DEST="$HOME/Applications/TaskDeck.app"
+fi
+rm -rf "$DEST"
+ditto dist/TaskDeck.app "$DEST"
+
 pkill -x TaskDeck 2>/dev/null || true
 sleep 0.3
-open dist/TaskDeck.app
-echo "Relaunched TaskDeck"
+open "$DEST"
+echo "Relaunched $DEST"
