@@ -321,7 +321,9 @@ struct ColumnDividerHandle: View {
                 if h { NSCursor.resizeLeftRight.push() } else { NSCursor.pop() }
             }
             .gesture(
-                DragGesture(minimumDistance: 1)
+                // .global 座標是關鍵：手勢若用把手的區域座標，把手隨拖動
+                // 位移、translation 原點跟著跑 → 左右震盪、游標越拉越偏。
+                DragGesture(minimumDistance: 1, coordinateSpace: .global)
                     .onChanged { v in
                         if startWidth == nil { startWidth = width }
                         let next = (startWidth ?? width) + sign * Double(v.translation.width)
@@ -493,7 +495,14 @@ struct NotesColumn: View {
         }
         .background(Theme.panelBG)
         .clipShape(RoundedRectangle(cornerRadius: 8))
-        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.border, lineWidth: 1))
+        // 筆記為焦點區時整欄外框高亮（與 terminal pane 的高亮互斥）。
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(session.focusZone == .notes ? Theme.accent.opacity(0.65) : Theme.border,
+                        lineWidth: session.focusZone == .notes ? 1.5 : 1)
+        )
+        // simultaneousGesture：TextEditor 會吃掉點擊，普通 onTap 到不了。
+        .simultaneousGesture(TapGesture().onEnded { session.focusZone = .notes })
         .padding(.vertical, 8)
         .padding(.trailing, 8)
         .background(Theme.windowBG)

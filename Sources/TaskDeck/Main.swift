@@ -189,6 +189,9 @@ struct ContentView: View {
             }
         }
         .frame(minWidth: 980, minHeight: 600)
+        // 全域控制項色（含 List 系統選取膠囊）跟隨主題強調色——否則側邊欄
+        // 有焦點時，系統藍膠囊會和我們的主題色底同框打架。
+        .tint(Theme.accent)
         // Root tint must reach the very top of the window: SwiftUI keeps
         // per-view backgrounds inside the safe area, so without this the
         // titlebar strip is bare behind-window blur — a black-looking band
@@ -209,6 +212,7 @@ struct PopoutRoot: View {
             .environmentObject(model.session(slug))
             .navigationTitle(slug)
             .frame(minWidth: 800, minHeight: 480)
+            .tint(Theme.accent) // see ContentView
             .background(Theme.windowBG.ignoresSafeArea()) // see ContentView
             .glassWindow()
             .preferredColorScheme(.dark)

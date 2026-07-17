@@ -208,7 +208,9 @@ private struct DividerHandle: View {
                 }
             }
             .gesture(
-                DragGesture(minimumDistance: 1)
+                // .global：同 ColumnDividerHandle——把手隨拖動位移時，區域
+                // 座標的 translation 會震盪，分隔線跳動且不跟手。
+                DragGesture(minimumDistance: 1, coordinateSpace: .global)
                     .onChanged { v in
                         if startRatio == nil { startRatio = session.ratio(at: path) }
                         guard total > 0 else { return }
@@ -228,7 +230,10 @@ struct PaneContainerView: View {
 
     private var spec: PaneSpec? { session.spec(specID) }
     private var info: PaneInfo? { model.paneRuntime[specID] }
-    private var focused: Bool { session.focusedSpecID == specID }
+    /// 邊框高亮只屬於當前焦點區：點了筆記，terminal 的高亮就讓位。
+    private var focused: Bool {
+        session.focusedSpecID == specID && session.focusZone == .terminal
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -256,7 +261,10 @@ struct PaneContainerView: View {
         )
         .padding(1)
         .contentShape(Rectangle())
-        .onTapGesture { session.focusedSpecID = specID }
+        .onTapGesture {
+            session.focusedSpecID = specID
+            session.focusZone = .terminal
+        }
     }
 
     private var header: some View {

@@ -636,6 +636,11 @@ final class TaskSession: ObservableObject {
 
     @Published var focusedSpecID: String?
 
+    /// Which zone owns the "active" border: a terminal pane or the notes
+    /// column（側邊欄永遠不高亮、也不改變此狀態）。
+    enum FocusZone { case terminal, notes }
+    @Published var focusZone: FocusZone = .terminal
+
     private var noteTimer: Timer?
     private var machineTimer: Timer?
 
