@@ -323,6 +323,12 @@ struct QuotaFooterView: View {
                 Text("AI 額度")
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(.secondary)
+                if model.quotaStale {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 9))
+                        .foregroundStyle(.orange)
+                        .help("上次更新失敗，顯示的是舊資料（stderr 在 /tmp/taskdeck-quota.err）")
+                }
                 Spacer()
                 if let t = model.quotaUpdatedAt {
                     Text(t, style: .time)

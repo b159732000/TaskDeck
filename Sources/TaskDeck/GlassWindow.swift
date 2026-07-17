@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import TaskDeckCore
 
 /// Behind-window blur layer (iTerm2-style glass). Pair with
 /// `TransparentWindow` so the NSWindow lets the desktop show through.
@@ -48,6 +49,13 @@ struct TransparentWindow: NSViewRepresentable {
                     self?.applyGlass()
                 })
             }
+            // Scroll-edge backdrops get (re)created as content scrolls under
+            // the titlebar — sweep on every window update (cheap, guarded).
+            tokens.append(NotificationCenter.default.addObserver(
+                forName: NSWindow.didUpdateNotification, object: w, queue: .main
+            ) { [weak self] _ in
+                self?.hideScrollEdgeBackdrops()
+            })
         }
 
         deinit {
@@ -63,6 +71,20 @@ struct TransparentWindow: NSViewRepresentable {
             w.isOpaque = false
             w.backgroundColor = .clear
             hideTitlebarMaterial(w)
+            hideScrollEdgeBackdrops()
+            dumpFrameIfRequested(w)
+        }
+
+        /// macOS 26 adds opaque "BackdropView" scroll-edge layers where list
+        /// content scrolls under the titlebar — the last opaque strip over
+        /// the traffic-light row. Our chrome provides its own backgrounds,
+        /// so hide them wherever they appear.
+        private func hideScrollEdgeBackdrops() {
+            guard let content = window?.contentView else { return }
+            for v in Self.allSubviews(of: content)
+            where !v.isHidden && String(describing: type(of: v)).contains("BackdropView") {
+                v.isHidden = true
+            }
         }
 
         /// The titlebar container can carry its own NSVisualEffectView
@@ -81,6 +103,33 @@ struct TransparentWindow: NSViewRepresentable {
 
         private static func allSubviews(of view: NSView) -> [NSView] {
             view.subviews + view.subviews.flatMap { allSubviews(of: $0) }
+        }
+
+        /// Debug aid: `defaults write app.taskdeck.TaskDeck dumpFrame -bool true`
+        /// then relaunch — writes the theme-frame view tree to
+        /// App Support/framedump.txt so opaque titlebar layers can be found.
+        func dumpFrameIfRequested(_ w: NSWindow) {
+            guard UserDefaults.standard.bool(forKey: "dumpFrame"),
+                  let frameView = w.contentView?.superview else { return }
+            var lines: [String] = []
+            func walk(_ v: NSView, _ depth: Int) {
+                let cls = String(describing: type(of: v))
+                var extra = " hidden=\(v.isHidden)"
+                if let layer = v.layer {
+                    extra += " layerBG=\(layer.backgroundColor == nil ? "nil" : "SET") layerOpaque=\(layer.isOpaque)"
+                }
+                if let effect = v as? NSVisualEffectView {
+                    extra += " material=\(effect.material.rawValue) state=\(effect.state.rawValue)"
+                }
+                lines.append(String(repeating: "  ", count: depth)
+                    + "\(cls) \(Int(v.frame.origin.x)),\(Int(v.frame.origin.y)) \(Int(v.frame.width))x\(Int(v.frame.height))"
+                    + extra)
+                v.subviews.forEach { walk($0, depth + 1) }
+            }
+            walk(frameView, 0)
+            try? lines.joined(separator: "\n")
+                .write(to: Paths.appSupport.appendingPathComponent("framedump.txt"),
+                       atomically: true, encoding: .utf8)
         }
     }
 }

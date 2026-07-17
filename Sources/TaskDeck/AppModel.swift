@@ -16,6 +16,8 @@ final class AppModel: ObservableObject {
     @Published var quotaText = ""
     @Published var quotaUpdatedAt: Date?
     @Published var quotaBusy = false
+    /// Last refresh failed; `quotaText` still shows the previous good table.
+    @Published var quotaStale = false
 
     let config: AppConfig
     let store: TaskStore
@@ -255,25 +257,41 @@ final class AppModel: ObservableObject {
         guard let cmd = config.quotaCommand, !cmd.isEmpty, !quotaBusy else { return }
         quotaBusy = true
         Task.detached(priority: .utility) {
+            let errPath = "/tmp/taskdeck-quota.err"
             let p = Process()
             p.executableURL = URL(fileURLWithPath: "/bin/zsh")
-            p.arguments = ["-lc", cmd + " 2>/dev/null"]
+            p.arguments = ["-lc", cmd + " 2>\(errPath)"]
             let pipe = Pipe()
             p.standardOutput = pipe
-            p.standardError = FileHandle.nullDevice
             var out = ""
+            var status: Int32 = -1
             do {
                 try p.run()
                 let data = pipe.fileHandleForReading.readDataToEndOfFile()
                 p.waitUntilExit()
+                status = p.terminationStatus
                 out = String(data: data, encoding: .utf8) ?? ""
             } catch {
                 out = ""
             }
             let text = out.trimmingCharacters(in: .whitespacesAndNewlines)
+            let finalStatus = status
             await MainActor.run { [weak self] in
                 guard let self else { return }
-                self.quotaText = text.isEmpty ? "額度讀取失敗（\(cmd)）" : text
+                if text.isEmpty {
+                    // Keep the last good table; only explain when we never had one.
+                    self.quotaStale = true
+                    if self.quotaText.isEmpty {
+                        let err = (try? String(contentsOfFile: errPath, encoding: .utf8))?
+                            .trimmingCharacters(in: .whitespacesAndNewlines)
+                            .suffix(300)
+                        self.quotaText = "額度讀取失敗（exit \(finalStatus)）"
+                            + (err.map { "\n\(String($0))" } ?? "")
+                    }
+                } else {
+                    self.quotaText = text
+                    self.quotaStale = false
+                }
                 self.quotaUpdatedAt = Date()
                 self.quotaBusy = false
             }

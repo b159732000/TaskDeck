@@ -117,8 +117,11 @@ struct TerminalGridView: View {
     var body: some View {
         Group {
             if let layout = session.machine.layout {
+                // Trailing gutter comes from the 8pt divider handle, so the
+                // grid↔notes gap matches every other 8pt margin.
                 LayoutNodeView(node: layout, path: [])
-                    .padding(8)
+                    .padding(.leading, 8)
+                    .padding(.vertical, 8)
             } else {
                 VStack(spacing: 16) {
                     Image(systemName: "terminal")
