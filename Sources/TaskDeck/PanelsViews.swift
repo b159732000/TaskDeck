@@ -27,12 +27,14 @@ struct SidebarView: View {
                     model.newTask()
                 } label: {
                     Label("新任務", systemImage: "plus")
+                        .font(.system(size: 12, weight: .medium))
                 }
                 .buttonStyle(.borderless)
                 Spacer()
                 DaemonStatusView()
             }
-            .padding(8)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
             .background(.bar)
         }
         .alert("重新命名任務", isPresented: Binding(
@@ -51,13 +53,23 @@ struct SidebarView: View {
     }
 
     private func row(_ t: TaskNote) -> some View {
-        HStack(spacing: 7) {
+        HStack(spacing: 8) {
             Circle()
-                .fill(model.taskHasLivePane(t.id) ? Color.green : Color.secondary.opacity(0.35))
+                .fill(model.taskHasLivePane(t.id) ? Color(hex: 0x8FCF7F) : Color.secondary.opacity(0.3))
                 .frame(width: 7, height: 7)
-            Text(t.title)
-                .lineLimit(1)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(t.title)
+                    .font(.system(size: 12.5))
+                    .lineLimit(1)
+                if let created = t.created {
+                    Text(created)
+                        .font(.system(size: 9.5))
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                }
+            }
         }
+        .padding(.vertical, 1)
         .tag(t.id)
         .contextMenu {
             Button("重新命名…") {
@@ -83,7 +95,7 @@ struct DaemonStatusView: View {
     var body: some View {
         HStack(spacing: 5) {
             Circle()
-                .fill(model.daemonOK ? Color.green : Color.red)
+                .fill(model.daemonOK ? Color(hex: 0x8FCF7F) : Color(hex: 0xE8646E))
                 .frame(width: 7, height: 7)
             if !model.daemonOK {
                 Button("重連") { model.reconnectDaemon() }
@@ -101,17 +113,20 @@ struct TaskDetailView: View {
     let slug: String
 
     var body: some View {
-        HSplitView {
-            TerminalGridView()
-                .frame(minWidth: 460, maxWidth: .infinity, maxHeight: .infinity)
-                .layoutPriority(1)
-            NotesColumn()
-                .frame(minWidth: 280, idealWidth: 360, maxWidth: 620)
+        VStack(spacing: 0) {
+            HSplitView {
+                TerminalGridView()
+                    .frame(minWidth: 160, maxWidth: .infinity, maxHeight: .infinity)
+                    .layoutPriority(1)
+                NotesColumn()
+                    .frame(minWidth: 160, idealWidth: 380, maxWidth: .infinity, maxHeight: .infinity)
+            }
+            QuotaBarView()
         }
+        .background(Theme.windowBG)
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
                 NewPaneMenu(labelStyle: .toolbar)
-                QuotaButton()
             }
         }
         .navigationTitle(slug)
@@ -170,138 +185,225 @@ struct NewPaneMenu: View {
     }
 }
 
-struct QuotaButton: View {
-    @EnvironmentObject var model: AppModel
-    @State private var showPopover = false
-
-    var body: some View {
-        Button {
-            showPopover.toggle()
-            if model.quotaOutput.isEmpty { model.refreshQuota() }
-        } label: {
-            Label("額度", systemImage: "gauge.with.needle")
-        }
-        .popover(isPresented: $showPopover, arrowEdge: .bottom) {
-            VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    Text("AI 額度").font(.headline)
-                    Spacer()
-                    if let t = model.quotaUpdatedAt {
-                        Text(t, style: .time)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    Button {
-                        model.refreshQuota()
-                    } label: {
-                        if model.quotaBusy {
-                            ProgressView().controlSize(.small)
-                        } else {
-                            Image(systemName: "arrow.clockwise")
-                        }
-                    }
-                    .buttonStyle(.borderless)
-                }
-                ScrollView([.horizontal, .vertical]) {
-                    Text(model.quotaOutput.isEmpty ? "（尚未讀取）" : model.quotaOutput)
-                        .font(.system(size: 11, design: .monospaced))
-                        .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
-                .frame(width: 560, height: 240)
-            }
-            .padding(14)
-        }
-    }
-}
-
 struct NotesColumn: View {
     @EnvironmentObject var model: AppModel
     @EnvironmentObject var session: TaskSession
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack {
+            HStack(spacing: 8) {
                 Text("筆記")
-                    .font(.caption)
+                    .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(.secondary)
                 Spacer()
                 Button {
                     model.openInObsidian(session.slug)
                 } label: {
                     Image(systemName: "arrow.up.forward.app")
+                        .font(.system(size: 11))
                 }
                 .buttonStyle(.borderless)
                 .help("在 Obsidian 開啟")
+                Button {
+                    model.revealNote(session.slug)
+                } label: {
+                    Image(systemName: "folder")
+                        .font(.system(size: 11))
+                }
+                .buttonStyle(.borderless)
+                .help("在 Finder 顯示")
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
+            .padding(.horizontal, 12)
+            .frame(height: 30)
+            .background(Theme.paneHeaderBG)
 
             TextEditor(text: Binding(
                 get: { session.noteText },
                 set: { session.noteText = $0 }
             ))
-            .font(.system(size: 12.5, design: .monospaced))
+            .font(.system(size: 13, design: .monospaced))
+            .lineSpacing(2.5)
             .scrollContentBackground(.hidden)
-            .padding(.horizontal, 6)
-
-            Divider()
-            ComposeBar()
+            .padding(.horizontal, 8)
+            .padding(.vertical, 6)
         }
-        .background(Color(nsColor: .textBackgroundColor))
+        .background(Theme.panelBG)
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.border, lineWidth: 1))
+        .padding(.vertical, 8)
+        .padding(.trailing, 8)
+        .background(Theme.windowBG)
     }
 }
 
-struct ComposeBar: View {
+// MARK: - Quota bar
+
+struct QuotaBarView: View {
     @EnvironmentObject var model: AppModel
-    @EnvironmentObject var session: TaskSession
-    @State private var target: String?
+    @State private var showDetail = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack {
-                Text(model.config.composeSection)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Spacer()
-                if session.aiPanes.count > 1 {
-                    Picker("", selection: $target) {
-                        Text("自動").tag(String?.none)
-                        ForEach(session.aiPanes) { p in
-                            Text(p.title).tag(String?.some(p.id))
+        HStack(spacing: 16) {
+            if let q = model.quota {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 18) {
+                        ForEach(q.accounts, id: \.alias) { acc in
+                            QuotaChipView(account: acc)
                         }
                     }
-                    .controlSize(.small)
-                    .frame(width: 130)
                 }
-                Button {
-                    session.sendCompose(to: target)
-                } label: {
-                    Label("送出", systemImage: "paperplane.fill")
-                }
-                .controlSize(.small)
-                .disabled(session.composeText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                    || (target ?? session.defaultTargetSpecID()) == nil)
-                .help("把草稿貼進 AI pane 並送出（bracketed paste + Enter）")
+            } else {
+                Text(model.quotaError ?? (model.quotaBusy ? "讀取額度中…" : "額度尚未讀取"))
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
             }
-            TextEditor(text: Binding(
-                get: { session.composeText },
-                set: { session.composeText = $0; session.composeChanged() }
-            ))
-            .font(.system(size: 12.5, design: .monospaced))
-            .scrollContentBackground(.hidden)
-            .frame(height: 92)
-            .overlay(alignment: .topLeading) {
-                if session.composeText.isEmpty {
-                    Text("下一輪要送給 AI 的話，寫在這裡（存進筆記，跨機同步）")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.tertiary)
-                        .padding(.top, 2)
-                        .padding(.leading, 5)
-                        .allowsHitTesting(false)
+            Spacer(minLength: 8)
+            if let t = model.quotaUpdatedAt {
+                Text(t, style: .time)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
+            }
+            Button {
+                model.refreshQuota()
+            } label: {
+                if model.quotaBusy {
+                    ProgressView().controlSize(.mini)
+                } else {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 10))
                 }
+            }
+            .buttonStyle(.borderless)
+            .help("重新讀取（每 5 分鐘也會自動更新）")
+            Button {
+                showDetail.toggle()
+            } label: {
+                Image(systemName: "info.circle")
+                    .font(.system(size: 10))
+            }
+            .buttonStyle(.borderless)
+            .popover(isPresented: $showDetail, arrowEdge: .top) {
+                QuotaDetailView()
             }
         }
-        .padding(10)
+        .padding(.horizontal, 12)
+        .frame(height: 30)
+        .background(Theme.panelBG)
+        .overlay(alignment: .top) {
+            Rectangle().fill(Theme.border).frame(height: 1)
+        }
+    }
+}
+
+struct QuotaChipView: View {
+    let account: QuotaAccount
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text(account.alias)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.secondary)
+            ForEach(QuotaSnapshot.orderedBuckets(account), id: \.0) { key, bucket in
+                HStack(spacing: 3) {
+                    Text(QuotaSnapshot.bucketShortLabel[key] ?? key)
+                        .font(.system(size: 9))
+                        .foregroundStyle(.tertiary)
+                    MiniBarView(percent: bucket.percent)
+                    Text(bucket.percent.map { "\(Int($0))%" } ?? "–")
+                        .font(.system(size: 10, weight: .medium, design: .monospaced))
+                        .foregroundStyle(Theme.quotaColor(bucket.percent))
+                }
+                .help(Self.tooltip(key: key, bucket: bucket))
+            }
+        }
+    }
+
+    static func tooltip(key: String, bucket: QuotaBucket) -> String {
+        var parts = [key]
+        if let p = bucket.percent { parts.append("\(Int(p))% 已用") }
+        if let d = bucket.detail { parts.append(d) }
+        if let r = bucket.resets_at, let local = Self.localTime(r) { parts.append("重置 \(local)") }
+        return parts.joined(separator: " · ")
+    }
+
+    static func localTime(_ iso: String) -> String? {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let date = f.date(from: iso) ?? {
+            f.formatOptions = [.withInternetDateTime]
+            return f.date(from: iso)
+        }()
+        guard let date else { return nil }
+        let out = DateFormatter()
+        out.dateFormat = "M/d HH:mm"
+        return out.string(from: date)
+    }
+}
+
+struct MiniBarView: View {
+    let percent: Double?
+
+    var body: some View {
+        ZStack(alignment: .leading) {
+            Capsule().fill(Color.white.opacity(0.08))
+            if let p = percent {
+                Capsule()
+                    .fill(Theme.quotaColor(p))
+                    .frame(width: max(2, 26 * min(1, p / 100)))
+            }
+        }
+        .frame(width: 26, height: 4)
+    }
+}
+
+struct QuotaDetailView: View {
+    @EnvironmentObject var model: AppModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("AI 額度").font(.headline)
+            if let q = model.quota {
+                Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 6) {
+                    ForEach(q.accounts, id: \.alias) { acc in
+                        GridRow {
+                            Text(acc.alias)
+                                .font(.system(size: 12, weight: .semibold))
+                                .gridColumnAlignment(.leading)
+                            VStack(alignment: .leading, spacing: 3) {
+                                ForEach(QuotaSnapshot.orderedBuckets(acc), id: \.0) { key, b in
+                                    HStack(spacing: 6) {
+                                        Text(key)
+                                            .font(.system(size: 11))
+                                            .foregroundStyle(.secondary)
+                                            .frame(width: 90, alignment: .leading)
+                                        MiniBarView(percent: b.percent)
+                                            .frame(width: 60)
+                                        Text(b.percent.map { "\(Int($0))%" } ?? "–")
+                                            .font(.system(size: 11, design: .monospaced))
+                                            .foregroundStyle(Theme.quotaColor(b.percent))
+                                            .frame(width: 38, alignment: .trailing)
+                                        if let d = b.detail {
+                                            Text(d).font(.system(size: 10)).foregroundStyle(.tertiary)
+                                        }
+                                        if let r = b.resets_at, let local = QuotaChipView.localTime(r) {
+                                            Text("→ \(local)").font(.system(size: 10)).foregroundStyle(.tertiary)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if acc.alias != q.accounts.last?.alias {
+                            Divider()
+                        }
+                    }
+                }
+            } else {
+                Text(model.quotaError ?? "尚未讀取")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(14)
+        .frame(minWidth: 380)
     }
 }

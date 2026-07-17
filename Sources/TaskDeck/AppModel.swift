@@ -3,6 +3,42 @@ import Foundation
 import SwiftUI
 import TaskDeckCore
 
+struct QuotaBucket: Codable {
+    var percent: Double?
+    var resets_at: String?
+    var detail: String?
+}
+
+struct QuotaAccount: Codable {
+    var alias: String
+    var buckets: [String: QuotaBucket]
+}
+
+struct QuotaSnapshot: Codable {
+    var fetched_at: String?
+    var accounts: [QuotaAccount]
+
+    /// Preferred display order for buckets inside a chip.
+    static let bucketOrder = ["5h session", "weekly all", "weekly Fable", "credits"]
+    static let bucketShortLabel: [String: String] = [
+        "5h session": "5h",
+        "weekly all": "週",
+        "weekly Fable": "F",
+        "credits": "$",
+    ]
+
+    static func orderedBuckets(_ account: QuotaAccount) -> [(String, QuotaBucket)] {
+        var out: [(String, QuotaBucket)] = []
+        for key in bucketOrder {
+            if let b = account.buckets[key] { out.append((key, b)) }
+        }
+        for (key, b) in account.buckets.sorted(by: { $0.key < $1.key }) where !bucketOrder.contains(key) {
+            out.append((key, b))
+        }
+        return out
+    }
+}
+
 @MainActor
 final class AppModel: ObservableObject {
     @Published var tasks: [TaskNote] = []
@@ -10,17 +46,20 @@ final class AppModel: ObservableObject {
     /// specID → live pane info (across all tasks).
     @Published var paneRuntime: [String: PaneInfo] = [:]
     @Published var daemonOK = false
-    @Published var quotaOutput = ""
+    @Published var quota: QuotaSnapshot?
+    @Published var quotaError: String?
     @Published var quotaUpdatedAt: Date?
     @Published var quotaBusy = false
 
     let config: AppConfig
     let store: TaskStore
     let client = DaemonClient()
+    let hasITerm2 = FileManager.default.fileExists(atPath: "/Applications/iTerm.app")
 
     private var sessions: [String: TaskSession] = [:]
     private var dirWatcher: DispatchSourceFileSystemObject?
     private var dirFD: Int32 = -1
+    private var quotaTimer: Timer?
 
     init() {
         config = AppConfig.load()
@@ -44,6 +83,10 @@ final class AppModel: ObservableObject {
         }
 
         watchTasksDir()
+
+        quotaTimer = Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.refreshQuota() }
+        }
     }
 
     func session(_ slug: String) -> TaskSession {
@@ -87,7 +130,7 @@ final class AppModel: ObservableObject {
     }
 
     func newTask() {
-        let slug = store.create(named: nil, config: config)
+        let slug = store.create(named: nil)
         rescan()
         selection = slug
     }
@@ -146,6 +189,25 @@ final class AppModel: ObservableObject {
         NSWorkspace.shared.activateFileViewerSelecting([store.noteURL(slug)])
     }
 
+    /// Attach a live pane inside a fresh iTerm2 window via `taskdeckctl attach`.
+    /// The pane stays daemon-owned; both views mirror the same PTY.
+    func openPaneInITerm2(_ info: PaneInfo) {
+        let exe = URL(fileURLWithPath: CommandLine.arguments[0]).resolvingSymlinksInPath()
+        let ctl = exe.deletingLastPathComponent().appendingPathComponent("taskdeckctl").path
+        let script = """
+        tell application "iTerm2"
+            activate
+            create window with default profile command "'\(ctl)' attach \(info.id)"
+        end tell
+        """
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        p.arguments = ["-e", script]
+        p.standardOutput = FileHandle.nullDevice
+        p.standardError = FileHandle.nullDevice
+        try? p.run()
+    }
+
     func flushEverything() {
         for s in sessions.values { s.flushAll() }
     }
@@ -167,26 +229,27 @@ final class AppModel: ObservableObject {
         Task.detached(priority: .utility) {
             let p = Process()
             p.executableURL = URL(fileURLWithPath: "/bin/zsh")
-            p.arguments = ["-lc", cmd + " 2>&1"]
+            p.arguments = ["-lc", cmd + " --json 2>/dev/null"]
             let pipe = Pipe()
             p.standardOutput = pipe
-            p.standardError = pipe
-            var out = ""
+            p.standardError = FileHandle.nullDevice
+            var snapshot: QuotaSnapshot?
+            var errText: String?
             do {
                 try p.run()
                 let data = pipe.fileHandleForReading.readDataToEndOfFile()
                 p.waitUntilExit()
-                out = String(data: data, encoding: .utf8) ?? ""
+                snapshot = try JSONDecoder().decode(QuotaSnapshot.self, from: data)
             } catch {
-                out = "無法執行 \(cmd)：\(error.localizedDescription)"
+                errText = "額度讀取失敗（\(cmd) --json）"
             }
-            out = out.replacingOccurrences(of: "\u{1b}\\[[0-9;]*m", with: "", options: .regularExpression)
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            let final = out
+            let s = snapshot
+            let e = errText
             await MainActor.run { [weak self] in
-                self?.quotaOutput = final
-                self?.quotaUpdatedAt = Date()
-                self?.quotaBusy = false
+                guard let self else { return }
+                if let s { self.quota = s; self.quotaError = nil } else { self.quotaError = e }
+                self.quotaUpdatedAt = Date()
+                self.quotaBusy = false
             }
         }
     }
@@ -207,21 +270,16 @@ final class TaskSession: ObservableObject {
         didSet { scheduleMachineSave() }
     }
 
-    @Published var composeText: String
     @Published var focusedSpecID: String?
 
-    private var composeDirty = false
     private var noteTimer: Timer?
     private var machineTimer: Timer?
-    private var composeTimer: Timer?
 
     init(slug: String, app: AppModel) {
         self.slug = slug
         self.app = app
-        let text = app.store.read(slug)
-        noteText = text
+        noteText = app.store.read(slug)
         machine = app.store.machineState(slug)
-        composeText = TaskStore.getSection(text, heading: app.config.composeSection)
         autoStartPanes()
     }
 
@@ -268,32 +326,11 @@ final class TaskSession: ObservableObject {
     }
 
     func flushAll() {
-        composeFlushToNote()
         flushNote()
         flushMachine()
     }
 
-    // MARK: - Compose (bound to the note's compose section)
-
-    func composeChanged() {
-        composeDirty = true
-        composeTimer?.invalidate()
-        composeTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: false) { [weak self] _ in
-            Task { @MainActor in self?.composeFlushToNote() }
-        }
-    }
-
-    func composeFlushToNote() {
-        composeTimer?.invalidate()
-        composeTimer = nil
-        guard composeDirty else { return }
-        noteText = TaskStore.replaceSection(noteText, heading: app.config.composeSection, with: composeText)
-        composeDirty = false
-    }
-
     // MARK: - Panes
-
-    var aiPanes: [PaneSpec] { machine.panes.filter { $0.kind == "ai" } }
 
     func spec(_ id: String) -> PaneSpec? {
         machine.panes.first { $0.id == id }
@@ -308,8 +345,7 @@ final class TaskSession: ObservableObject {
         if team.kind == "claude" {
             let sid = UUID().uuidString.lowercased()
             spec.sessionID = sid
-            noteText = TaskStore.appendLineToSection(noteText, heading: app.config.sessionsSection,
-                                                     line: "- \(team.id) \(sid)")
+            noteText = TaskStore.appendSessionLine(noteText, line: "- \(team.id) \(sid)")
         }
         if machine.primaryTeam == nil { machine.primaryTeam = team.id }
         add(spec)
@@ -413,27 +449,4 @@ final class TaskSession: ObservableObject {
         machine.layout = LayoutOps.setRatio(layout, at: path, to: ratio)
     }
 
-    // MARK: - Compose send
-
-    func sendCompose(to specID: String?) {
-        let text = composeText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return }
-        guard let sid = specID ?? defaultTargetSpecID(),
-              let info = app.paneRuntime[sid], info.running else { return }
-        var bytes: [UInt8] = Array("\u{1b}[200~".utf8) // bracketed paste keeps
-        bytes += Array(text.utf8)                      // multiline drafts in the
-        bytes += Array("\u{1b}[201~".utf8)             // TUI's input box
-        bytes.append(0x0d)
-        var m = WireMessage(type: "input")
-        m.paneID = info.id
-        m.setData(bytes)
-        app.client.fire(m)
-        composeText = ""
-        composeDirty = true
-        composeFlushToNote()
-    }
-
-    func defaultTargetSpecID() -> String? {
-        aiPanes.first(where: { app.paneRuntime[$0.id]?.running == true })?.id
-    }
 }

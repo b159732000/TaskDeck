@@ -26,11 +26,19 @@ TaskDeck.app (SwiftUI)  ──unix socket──▶  taskdeckd (owns every PTY)
   relaunching the GUI never kills your terminals.
 - Terminal panes run interactive login zsh; declared commands (AI CLI,
   `yarn dev`, …) are typed into them, so your aliases work.
-- AI panes (claude-family) pre-generate a session uuid, record it into the
-  note, then start with `--session-id`. Restore = `-r <uuid> || --session-id
-  <uuid>` — same line resumes or starts fresh, never hand-copy session ids.
+- AI panes (claude-family) pre-generate a session uuid, record it at the top
+  of the note (a small `- <team> <uuid>` list closed by a `---` rule; the
+  rest of the note is free-form), then start with `--session-id`. Restore =
+  `-r <uuid> || --session-id <uuid>` — the same line resumes or starts
+  fresh, never hand-copy session ids.
 - After a reboot nothing mass-respawns: the task list is instant (plain
   files), terminals restore lazily per task, opt-in `autoStart` per pane.
+- Any pane can also be attached from a real terminal (`taskdeckctl attach`,
+  Ctrl-] detaches) — the "open in iTerm2" menu item uses this. Both views
+  mirror the same daemon-owned PTY.
+- A persistent quota bar at the bottom parses `quotaCommand --json`
+  (designed around [claude-quota]'s schema: accounts × buckets with
+  `percent` / `resets_at` / `detail`), refreshing every 5 minutes.
 
 ## Build & run
 
@@ -48,6 +56,7 @@ Headless smoke test of the daemon:
 dist/TaskDeck.app/Contents/MacOS/taskdeckctl ping
 dist/TaskDeck.app/Contents/MacOS/taskdeckctl new demo --cmd 'echo hello'
 dist/TaskDeck.app/Contents/MacOS/taskdeckctl tail <paneID> 2
+dist/TaskDeck.app/Contents/MacOS/taskdeckctl attach <paneID>   # Ctrl-] detaches
 ```
 
 ## Configuration
@@ -61,8 +70,6 @@ dist/TaskDeck.app/Contents/MacOS/taskdeckctl tail <paneID> 2
   "teams": [
     {"id": "claude", "label": "Claude", "kind": "claude"}
   ],
-  "composeSection": "Next prompt",
-  "sessionsSection": "AI sessions",
   "quotaCommand": "claude-quota"
 }
 ```

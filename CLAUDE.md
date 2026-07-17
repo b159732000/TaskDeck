@@ -40,3 +40,6 @@ dist/TaskDeck.app/Contents/MacOS/taskdeckctl remove <paneID>   # 測完清掉自
 - 回覆與 UI 文案預設繁體中文；程式碼註解英文。
 - AI pane 的 resume 機制（uuid 先寫筆記再 `--session-id` 啟動；`-r || --session-id` 單行兩用）源自 vault 筆記 `decision-260713-tsk-task-envelope` 的實測，改動前先讀它。
 - 使用者的三個 Claude 帳號是 zsh alias（`claude` / `claude3` / `claude-eng`，差在 `CLAUDE_CONFIG_DIR`）；pane 是互動 login zsh，alias 展開可用，別改成直接 exec。
+- **筆記是自由文本，不套模板欄位**（James 明確要求，2026-07-17）：唯一的結構是頂部 session manifest（H1 後的 `- <team> <uuid>` 清單＋`---` 分隔線，`TaskStore.appendSessionLine` 維護），其餘內容不要動、不要加預設段落。
+- 設計 token 統一放 `Sources/TaskDeck/Theme.swift`（深色優先）；額度條吃 `claude-quota --json`（accounts × buckets schema）。
+- `taskdeckctl attach`（Ctrl-] 離開）：raw-mode 鏡射 daemon pane，「在 iTerm2 開啟」靠它；兩邊共用同一 PTY，resize 後寫者為準。

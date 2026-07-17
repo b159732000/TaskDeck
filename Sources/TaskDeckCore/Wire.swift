@@ -121,6 +121,7 @@ public func sockaddrUn(_ path: String) -> sockaddr_un {
 public final class BlockingConn {
     public let fd: Int32
     private let reader = FrameCodec.Reader()
+    private let sendLock = NSLock()
 
     public init?(path: String = Wire.socketPath()) {
         fd = socket(AF_UNIX, SOCK_STREAM, 0)
@@ -138,6 +139,8 @@ public final class BlockingConn {
 
     public func send(_ m: WireMessage) {
         let d = FrameCodec.encode(m)
+        sendLock.lock()
+        defer { sendLock.unlock() }
         d.withUnsafeBytes { raw in
             var off = 0
             while off < raw.count {

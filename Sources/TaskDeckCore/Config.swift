@@ -44,17 +44,12 @@ public struct AppConfig: Codable, Equatable {
     public var tasksDir: String
     public var defaultCwd: String
     public var teams: [TeamDef]
-    public var composeSection: String
-    public var sessionsSection: String
     public var quotaCommand: String?
 
-    public init(tasksDir: String, defaultCwd: String, teams: [TeamDef],
-                composeSection: String, sessionsSection: String, quotaCommand: String?) {
+    public init(tasksDir: String, defaultCwd: String, teams: [TeamDef], quotaCommand: String?) {
         self.tasksDir = tasksDir
         self.defaultCwd = defaultCwd
         self.teams = teams
-        self.composeSection = composeSection
-        self.sessionsSection = sessionsSection
         self.quotaCommand = quotaCommand
     }
 
@@ -62,13 +57,11 @@ public struct AppConfig: Codable, Equatable {
         tasksDir: "~/Documents/TaskDeck/tasks",
         defaultCwd: "~",
         teams: [TeamDef(id: "claude", label: "Claude", kind: "claude")],
-        composeSection: "Next prompt",
-        sessionsSection: "AI sessions",
         quotaCommand: nil
     )
 
     enum CodingKeys: String, CodingKey {
-        case tasksDir, defaultCwd, teams, composeSection, sessionsSection, quotaCommand
+        case tasksDir, defaultCwd, teams, quotaCommand
     }
 
     public init(from decoder: Decoder) throws {
@@ -77,8 +70,6 @@ public struct AppConfig: Codable, Equatable {
         tasksDir = try c.decodeIfPresent(String.self, forKey: .tasksDir) ?? fb.tasksDir
         defaultCwd = try c.decodeIfPresent(String.self, forKey: .defaultCwd) ?? fb.defaultCwd
         teams = try c.decodeIfPresent([TeamDef].self, forKey: .teams) ?? fb.teams
-        composeSection = try c.decodeIfPresent(String.self, forKey: .composeSection) ?? fb.composeSection
-        sessionsSection = try c.decodeIfPresent(String.self, forKey: .sessionsSection) ?? fb.sessionsSection
         quotaCommand = try c.decodeIfPresent(String.self, forKey: .quotaCommand)
     }
 

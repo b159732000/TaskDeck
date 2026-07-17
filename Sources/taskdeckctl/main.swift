@@ -24,11 +24,80 @@ guard let cmd = rawArgs.first else {
       new <taskID> [--title t] [--cwd path] [--cmd 'command']
       type <paneID> <text...>       # sends text + newline
       tail <paneID> [seconds]       # replay ring buffer, stream output
+      attach <paneID>               # interactive attach (Ctrl-] detaches)
       resize <paneID> <cols> <rows>
       kill <paneID>
       remove <paneID>
       shutdown                      # DANGER: kills every live session
     """)
+}
+
+/// Interactive raw-mode attach: mirrors a daemon pane onto the current tty.
+/// Used by "open in iTerm2" — the pane stays daemon-owned.
+func runAttach(conn: BlockingConn, paneID: String) -> Never {
+    var sub = WireMessage(type: "subscribe")
+    sub.paneID = paneID
+    guard let first = conn.request(sub), first.type == "replay" else {
+        die("attach failed：pane 不存在？（taskdeckctl list 查 paneID）")
+    }
+
+    var orig = termios()
+    tcgetattr(STDIN_FILENO, &orig)
+    var raw = orig
+    cfmakeraw(&raw)
+    tcsetattr(STDIN_FILENO, TCSANOW, &raw)
+    let restore = { var o = orig; _ = tcsetattr(STDIN_FILENO, TCSANOW, &o) }
+
+    if let bytes = first.dataBytes { FileHandle.standardOutput.write(Data(bytes)) }
+
+    func sendLocalSize() {
+        var ws = winsize()
+        let TIOCGWINSZ_VALUE: UInt = 0x4008_7468 // _IOR('t', 104, struct winsize)
+        if ioctl(STDIN_FILENO, TIOCGWINSZ_VALUE, &ws) == 0, ws.ws_col > 0 {
+            var m = WireMessage(type: "resize")
+            m.paneID = paneID
+            m.cols = Int(ws.ws_col)
+            m.rows = Int(ws.ws_row)
+            conn.send(m)
+        }
+    }
+    sendLocalSize()
+
+    signal(SIGWINCH, SIG_IGN)
+    let winch = DispatchSource.makeSignalSource(signal: SIGWINCH, queue: .global())
+    winch.setEventHandler { sendLocalSize() }
+    winch.activate()
+
+    let readerThread = Thread {
+        while let m = conn.recv() {
+            if m.type == "output", m.paneID == paneID, let b = m.dataBytes {
+                FileHandle.standardOutput.write(Data(b))
+            } else if m.type == "paneExited", m.paneID == paneID {
+                restore()
+                FileHandle.standardOutput.write("\r\n[TaskDeck] pane 已結束\r\n".data(using: .utf8)!)
+                exit(0)
+            }
+        }
+        restore()
+        FileHandle.standardOutput.write("\r\n[TaskDeck] daemon 連線中斷\r\n".data(using: .utf8)!)
+        exit(1)
+    }
+    readerThread.start()
+
+    var buf = [UInt8](repeating: 0, count: 4096)
+    while true {
+        let n = read(STDIN_FILENO, &buf, buf.count)
+        if n <= 0 { break }
+        let chunk = Array(buf[0 ..< n])
+        if chunk.contains(0x1D) { break } // Ctrl-] detaches
+        var m = WireMessage(type: "input")
+        m.paneID = paneID
+        m.setData(chunk)
+        conn.send(m)
+    }
+    restore()
+    FileHandle.standardOutput.write("\r\n[TaskDeck] 已離開（pane 仍在背景活著）\r\n".data(using: .utf8)!)
+    exit(0)
 }
 
 guard let conn = BlockingConn() else {
@@ -89,6 +158,10 @@ case "tail":
         }
     }
     print("")
+
+case "attach":
+    guard rawArgs.count > 1 else { die("attach <paneID>") }
+    runAttach(conn: conn, paneID: rawArgs[1])
 
 case "resize":
     guard rawArgs.count > 3, let c = Int(rawArgs[2]), let r = Int(rawArgs[3]) else { die("resize <paneID> <cols> <rows>") }

@@ -165,7 +165,7 @@ public final class TaskStore {
         try? text.data(using: .utf8)?.write(to: noteURL(slug))
     }
 
-    public func create(named name: String?, config: AppConfig) -> String {
+    public func create(named name: String?) -> String {
         var slug = sanitize(name ?? "")
         if slug.isEmpty {
             let df = DateFormatter()
@@ -180,7 +180,7 @@ public final class TaskStore {
         }
         let df = DateFormatter()
         df.dateFormat = "yyyy-MM-dd HH:mm"
-        write(final, template(title: final, created: df.string(from: Date()), config: config))
+        write(final, template(title: final, created: df.string(from: Date())))
         return final
     }
 
@@ -206,7 +206,7 @@ public final class TaskStore {
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    private func template(title: String, created: String, config: AppConfig) -> String {
+    private func template(title: String, created: String) -> String {
         if let t = try? String(contentsOf: Paths.templateFile, encoding: .utf8) {
             return t.replacingOccurrences(of: "{title}", with: title)
                 .replacingOccurrences(of: "{created}", with: created)
@@ -219,11 +219,6 @@ public final class TaskStore {
 
         # \(title)
 
-        ## Notes
-
-        ## \(config.composeSection)
-
-        ## \(config.sessionsSection)
         """
     }
 
@@ -261,37 +256,43 @@ public final class TaskStore {
         return "---\n\(key): \(value)\n---\n\n" + text
     }
 
-    /// Range of the body of `## <heading>`: after the heading line up to the
-    /// next `## ` heading (or EOF).
-    public static func sectionBodyRange(_ text: String, heading: String) -> Range<String.Index>? {
-        let pattern = "(?m)^##\\s+\(NSRegularExpression.escapedPattern(for: heading))\\s*$"
-        guard let hr = text.range(of: pattern, options: .regularExpression) else { return nil }
-        let afterHeading = text.range(of: "\n", range: hr.upperBound ..< text.endIndex)?.upperBound ?? text.endIndex
-        let next = text.range(of: "(?m)^## ", options: .regularExpression, range: afterHeading ..< text.endIndex)?.lowerBound ?? text.endIndex
-        return afterHeading ..< next
-    }
-
-    public static func getSection(_ text: String, heading: String) -> String {
-        guard let r = sectionBodyRange(text, heading: heading) else { return "" }
-        return String(text[r]).trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    public static func replaceSection(_ text: String, heading: String, with body: String) -> String {
-        let trimmed = body.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let r = sectionBodyRange(text, heading: heading) else {
-            var t = text
-            if !t.hasSuffix("\n") { t += "\n" }
-            t += "\n## \(heading)\n\n\(trimmed)\n"
-            return t
+    /// Record a session line in the note's top manifest block: right after
+    /// the H1 (or frontmatter), a run of `- …` list lines closed by a `---`
+    /// rule, with free-form notes below. Creates the block when absent:
+    ///
+    ///     # title
+    ///
+    ///     - claude3 6f0e…
+    ///
+    ///     ---
+    public static func appendSessionLine(_ text: String, line: String) -> String {
+        var t = text
+        let anchor: String.Index
+        if let h1 = t.range(of: "(?m)^# .*$", options: .regularExpression) {
+            anchor = h1.upperBound
+        } else if t.hasPrefix("---\n"), let close = t.range(of: "\n---\n") {
+            anchor = close.upperBound
+        } else {
+            anchor = t.startIndex
         }
-        let replacement = trimmed.isEmpty ? "\n\n" : "\n" + trimmed + "\n\n"
-        return text.replacingCharacters(in: r, with: replacement)
-    }
-
-    public static func appendLineToSection(_ text: String, heading: String, line: String) -> String {
-        let existing = getSection(text, heading: heading)
-        let newBody = existing.isEmpty ? line : existing + "\n" + line
-        return replaceSection(text, heading: heading, with: newBody)
+        if let divider = t.range(of: "(?m)^---[ \\t]*$", options: .regularExpression, range: anchor ..< t.endIndex) {
+            let between = String(t[anchor ..< divider.lowerBound])
+            let isManifest = between.split(separator: "\n", omittingEmptySubsequences: false)
+                .allSatisfy {
+                    let l = $0.trimmingCharacters(in: .whitespaces)
+                    return l.isEmpty || l.hasPrefix("- ")
+                }
+            if isManifest {
+                var lines = between.split(separator: "\n").map(String.init)
+                    .filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+                lines.append(line)
+                t.replaceSubrange(anchor ..< divider.lowerBound,
+                                  with: "\n\n" + lines.joined(separator: "\n") + "\n\n")
+                return t
+            }
+        }
+        t.insert(contentsOf: "\n\n\(line)\n\n---\n", at: anchor)
+        return t
     }
 
     // MARK: - Machine state

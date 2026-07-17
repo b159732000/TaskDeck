@@ -12,9 +12,12 @@ struct TerminalHostView: NSViewRepresentable {
 
     func makeNSView(context: Context) -> TerminalView {
         let tv = TerminalView(frame: CGRect(x: 0, y: 0, width: 600, height: 400))
-        tv.nativeBackgroundColor = NSColor(calibratedRed: 0.086, green: 0.09, blue: 0.11, alpha: 1)
-        tv.nativeForegroundColor = NSColor(calibratedRed: 0.85, green: 0.86, blue: 0.87, alpha: 1)
+        tv.nativeBackgroundColor = Theme.terminalBGNS
+        tv.nativeForegroundColor = Theme.terminalFGNS
         tv.font = NSFont.monospacedSystemFont(ofSize: 12.5, weight: .regular)
+        tv.installColors(Theme.ansi.map {
+            SwiftTerm.Color(red: UInt16($0.0) * 257, green: UInt16($0.1) * 257, blue: UInt16($0.2) * 257)
+        })
         tv.terminalDelegate = context.coordinator
         context.coordinator.attach(tv: tv, client: client, paneID: paneID)
         return tv
@@ -94,16 +97,23 @@ struct TerminalGridView: View {
         Group {
             if let layout = session.machine.layout {
                 LayoutNodeView(node: layout, path: [])
+                    .padding(8)
             } else {
-                VStack(spacing: 14) {
+                VStack(spacing: 16) {
+                    Image(systemName: "terminal")
+                        .font(.system(size: 34))
+                        .foregroundStyle(.quaternary)
                     Text("這個任務還沒有終端")
+                        .font(.system(size: 13))
                         .foregroundStyle(.secondary)
                     NewPaneMenu(labelStyle: .button)
+                        .menuStyle(.borderlessButton)
+                        .fixedSize()
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        .background(Color(nsColor: .underPageBackgroundColor))
+        .background(Theme.windowBG)
     }
 }
 
@@ -120,7 +130,7 @@ private struct LayoutNodeView: View {
             GeometryReader { geo in
                 let horizontal = axis == "h"
                 let total = horizontal ? geo.size.width : geo.size.height
-                let first = max(60, total * ratio - 3)
+                let first = max(60, total * ratio - 4)
                 if horizontal {
                     HStack(spacing: 0) {
                         LayoutNodeView(node: a, path: path + [false]).frame(width: first)
@@ -145,16 +155,21 @@ private struct DividerHandle: View {
     let path: [Bool]
     let total: CGFloat
     @State private var startRatio: Double?
+    @State private var hovering = false
 
     var body: some View {
         Rectangle()
-            .fill(Color.black.opacity(0.001))
-            .overlay(Rectangle().fill(Color(nsColor: .separatorColor)).frame(
-                width: axis == "h" ? 1 : nil, height: axis == "v" ? 1 : nil))
-            .frame(width: axis == "h" ? 6 : nil, height: axis == "v" ? 6 : nil)
+            .fill(Color.clear)
+            .overlay(
+                RoundedRectangle(cornerRadius: 1)
+                    .fill(hovering || startRatio != nil ? Theme.accent.opacity(0.7) : Color.clear)
+                    .frame(width: axis == "h" ? 2 : nil, height: axis == "v" ? 2 : nil)
+            )
+            .frame(width: axis == "h" ? 8 : nil, height: axis == "v" ? 8 : nil)
             .contentShape(Rectangle())
-            .onHover { hovering in
-                if hovering {
+            .onHover { h in
+                hovering = h
+                if h {
                     (axis == "h" ? NSCursor.resizeLeftRight : NSCursor.resizeUpDown).push()
                 } else {
                     NSCursor.pop()
@@ -181,6 +196,7 @@ struct PaneContainerView: View {
 
     private var spec: PaneSpec? { session.spec(specID) }
     private var info: PaneInfo? { model.paneRuntime[specID] }
+    private var focused: Bool { session.focusedSpecID == specID }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -189,6 +205,9 @@ struct PaneContainerView: View {
                 if let info {
                     TerminalHostView(paneID: info.id, client: model.client)
                         .id(info.id)
+                        .padding(.leading, 6)
+                        .padding(.top, 4)
+                        .background(Theme.terminalBG)
                 } else {
                     notStarted
                 }
@@ -197,28 +216,34 @@ struct PaneContainerView: View {
                 }
             }
         }
+        .clipShape(RoundedRectangle(cornerRadius: 8))
         .overlay(
-            RoundedRectangle(cornerRadius: 0)
-                .stroke(session.focusedSpecID == specID ? Color.accentColor.opacity(0.55) : Color.clear, lineWidth: 1)
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(focused ? Theme.accent.opacity(0.65) : Theme.border,
+                        lineWidth: focused ? 1.5 : 1)
         )
+        .padding(1)
         .contentShape(Rectangle())
         .onTapGesture { session.focusedSpecID = specID }
     }
 
     private var header: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: 7) {
             Circle()
-                .fill(info == nil ? Color.secondary.opacity(0.35) : (info!.running ? Color.green : Color.red))
+                .fill(info == nil ? Color.secondary.opacity(0.3)
+                    : (info!.running ? Color(hex: 0x8FCF7F) : Color(hex: 0xE8646E)))
                 .frame(width: 7, height: 7)
             Text(spec?.title ?? "?")
                 .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(.secondary)
                 .lineLimit(1)
             if let team = spec?.team {
                 Text(team)
-                    .font(.system(size: 9))
-                    .padding(.horizontal, 4)
-                    .padding(.vertical, 1)
-                    .background(Color.accentColor.opacity(0.18), in: Capsule())
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundStyle(Theme.accent)
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 1.5)
+                    .background(Theme.accent.opacity(0.14), in: Capsule())
             }
             if spec?.autoStart == true {
                 Image(systemName: "bolt.fill")
@@ -232,6 +257,10 @@ struct PaneContainerView: View {
                     Button("向右分割") { session.splitPane(spec.id, axis: "h") }
                     Button("向下分割") { session.splitPane(spec.id, axis: "v") }
                     Divider()
+                    if model.hasITerm2, let info, info.running {
+                        Button("在 iTerm2 開啟（附掛）") { model.openPaneInITerm2(info) }
+                        Divider()
+                    }
                     Button("重新啟動") { session.restartPane(spec) }
                     Toggle("開任務時自動啟動", isOn: Binding(
                         get: { spec.autoStart },
@@ -243,41 +272,48 @@ struct PaneContainerView: View {
             } label: {
                 Image(systemName: "ellipsis")
                     .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
             }
             .menuStyle(.borderlessButton)
-            .frame(width: 26)
+            .menuIndicator(.hidden)
+            .frame(width: 24)
         }
-        .padding(.horizontal, 8)
-        .frame(height: 24)
-        .background(Color(nsColor: .windowBackgroundColor))
+        .padding(.horizontal, 9)
+        .frame(height: 26)
+        .background(Theme.paneHeaderBG)
     }
 
     private var notStarted: some View {
-        VStack(spacing: 10) {
+        VStack(spacing: 12) {
             Text(spec?.kind == "ai" ? "AI session 未啟動" : "終端未啟動")
-                .font(.callout)
+                .font(.system(size: 12.5))
                 .foregroundStyle(.secondary)
             if let cmd = spec?.startCommand {
                 Text(cmd)
-                    .font(.system(size: 11, design: .monospaced))
+                    .font(.system(size: 10.5, design: .monospaced))
                     .foregroundStyle(.tertiary)
                     .lineLimit(2)
-                    .padding(.horizontal, 12)
+                    .padding(.horizontal, 14)
             }
             Button {
                 if let spec { session.restartPane(spec) }
             } label: {
                 Label(spec?.sessionID != nil ? "啟動並續上對話" : "啟動", systemImage: "play.fill")
+                    .font(.system(size: 12))
             }
+            .buttonStyle(.borderedProminent)
+            .tint(Theme.accent.opacity(0.8))
+            .controlSize(.small)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color(nsColor: .underPageBackgroundColor))
+        .background(Theme.terminalBG)
     }
 
     private func exitedBar(_ info: PaneInfo) -> some View {
         HStack(spacing: 10) {
             Text("已結束（exit \(info.exitCode.map(String.init) ?? "?")）")
                 .font(.system(size: 11))
+                .foregroundStyle(.secondary)
             Button("重新啟動") { if let spec { session.restartPane(spec) } }
                 .controlSize(.small)
             Button("關閉") { if let spec { session.closePane(spec) } }
@@ -286,6 +322,6 @@ struct PaneContainerView: View {
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 6)
-        .background(.thinMaterial)
+        .background(.ultraThinMaterial)
     }
 }
