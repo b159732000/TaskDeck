@@ -28,11 +28,23 @@ struct VisualEffectBackground: NSViewRepresentable {
 /// SwiftUI re-asserts window properties at various points, so the settings
 /// are re-applied on window key/main transitions instead of only once.
 struct TransparentWindow: NSViewRepresentable {
-    func makeNSView(context: Context) -> NSView { Probe() }
+    var autosaveName: String?
+
+    func makeNSView(context: Context) -> NSView { Probe(autosaveName: autosaveName) }
     func updateNSView(_ nsView: NSView, context: Context) {}
 
     final class Probe: NSView {
+        private let autosaveName: String?
+        private var didRestoreFrame = false
         private var tokens: [NSObjectProtocol] = []
+
+        init(autosaveName: String?) {
+            self.autosaveName = autosaveName
+            super.init(frame: .zero)
+        }
+
+        @available(*, unavailable)
+        required init?(coder: NSCoder) { fatalError() }
 
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
@@ -68,6 +80,16 @@ struct TransparentWindow: NSViewRepresentable {
 
         private func applyGlass() {
             guard let w = window else { return }
+            // Frame memory: reopen where the window was last closed —
+            // AppKit saves the frame to defaults on move/resize/close and
+            // we re-apply it once at attach. Works the same whether the app
+            // was quit by dev.sh or by hand（存的是 defaults，跟誰關的無關）.
+            if !didRestoreFrame, let name = autosaveName {
+                didRestoreFrame = true
+                if w.setFrameAutosaveName(name) {
+                    w.setFrameUsingName(name)
+                }
+            }
             // styleMask first: mutating it can rebuild the titlebar views.
             w.styleMask.insert(.fullSizeContentView)
             w.titlebarAppearsTransparent = true
@@ -145,8 +167,10 @@ struct TransparentWindow: NSViewRepresentable {
 
 extension View {
     /// Transparent window + behind-window blur, bottom of the view stack.
-    func glassWindow() -> some View {
+    /// `autosave` gives the window a frame-autosave identity so it reopens
+    /// at its last position/size (per-task popouts get their own name).
+    func glassWindow(autosave: String? = nil) -> some View {
         background(VisualEffectBackground().ignoresSafeArea())
-            .background(TransparentWindow())
+            .background(TransparentWindow(autosaveName: autosave))
     }
 }

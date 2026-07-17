@@ -130,9 +130,14 @@ struct SidebarView: View {
 
     private func row(_ t: TaskNote) -> some View {
         HStack(spacing: 8) {
+            // 點點＝「終端層」的生命跡象（有無活著的 PTY，含 shell/dev
+            // server），與右側徽章（AI 對話狀態）是兩層互補資訊。
             Circle()
                 .fill(model.taskHasLivePane(t.id) ? Color(hex: 0x8FCF7F) : Color.secondary.opacity(0.3))
                 .frame(width: 7, height: 7)
+                .help(model.taskHasLivePane(t.id)
+                    ? "有終端在跑（shell／dev server／AI 都算）"
+                    : "沒有運行中的終端")
             VStack(alignment: .leading, spacing: 1) {
                 Text(t.title)
                     .font(.system(size: 12.5 * model.uiScale))

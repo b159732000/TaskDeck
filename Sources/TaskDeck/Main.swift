@@ -198,7 +198,7 @@ struct ContentView: View {
         // over a dark desktop (the "opaque titlebar" that survived every
         // titlebar-view sweep).
         .background(Theme.windowBG.ignoresSafeArea())
-        .glassWindow()
+        .glassWindow(autosave: "JamesDesk.main")
         .preferredColorScheme(.dark)
     }
 }
@@ -214,7 +214,7 @@ struct PopoutRoot: View {
             .frame(minWidth: 800, minHeight: 480)
             .tint(Theme.accent) // see ContentView
             .background(Theme.windowBG.ignoresSafeArea()) // see ContentView
-            .glassWindow()
+            .glassWindow(autosave: "JamesDesk.task.\(slug)") // 每個任務各記各的位置
             .preferredColorScheme(.dark)
     }
 }
