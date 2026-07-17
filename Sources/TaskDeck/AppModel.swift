@@ -292,6 +292,30 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Base-appearance knobs（外觀設定視窗）：bg 色相預設、不透明度、明暗。
+    /// @Published so every Theme consumer re-renders on change; Theme reads
+    /// the mirrored statics.
+    @Published var bgPresetIndex: Int = UserDefaults.standard.object(forKey: "bgPresetIndex") as? Int ?? 0 {
+        didSet {
+            UserDefaults.standard.set(bgPresetIndex, forKey: "bgPresetIndex")
+            Theme.bgPresetIndex = bgPresetIndex
+        }
+    }
+
+    @Published var bgOpacityBoost: Double = UserDefaults.standard.object(forKey: "bgOpacityBoost") as? Double ?? 0 {
+        didSet {
+            UserDefaults.standard.set(bgOpacityBoost, forKey: "bgOpacityBoost")
+            Theme.bgOpacityBoost = bgOpacityBoost
+        }
+    }
+
+    @Published var bgBrightness: Double = UserDefaults.standard.object(forKey: "bgBrightness") as? Double ?? 0 {
+        didSet {
+            UserDefaults.standard.set(bgBrightness, forKey: "bgBrightness")
+            Theme.bgBrightness = bgBrightness
+        }
+    }
+
     /// Badge clicked: mark the task's CURRENT AI states as seen.
     func ackAIStatus(_ slug: String) {
         let machine = sessions[slug]?.machine ?? store.machineState(slug)

@@ -125,38 +125,36 @@ struct SidebarView: View {
     }
 
     private func row(_ t: TaskNote) -> some View {
-        VStack(alignment: .leading, spacing: 3) {
-            HStack(spacing: 8) {
-                Circle()
-                    .fill(model.taskHasLivePane(t.id) ? Color(hex: 0x8FCF7F) : Color.secondary.opacity(0.3))
-                    .frame(width: 7, height: 7)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(t.title)
-                        .font(.system(size: 12.5 * model.uiScale))
+        HStack(spacing: 8) {
+            Circle()
+                .fill(model.taskHasLivePane(t.id) ? Color(hex: 0x8FCF7F) : Color.secondary.opacity(0.3))
+                .frame(width: 7, height: 7)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(t.title)
+                    .font(.system(size: 12.5 * model.uiScale))
+                    .lineLimit(1)
+                if let created = t.created {
+                    Text(created)
+                        .font(.system(size: 9.5 * model.uiScale))
+                        .foregroundStyle(.tertiary)
                         .lineLimit(1)
-                    if let created = t.created {
-                        Text(created)
-                            .font(.system(size: 9.5 * model.uiScale))
-                            .foregroundStyle(.tertiary)
-                            .lineLimit(1)
-                    }
-                }
-                Spacer(minLength: 4)
-                // AI state at a glance: 🟢 running, 🟡 waiting for the user,
-                // 🔴 blocked on a permission prompt (hook-fed, live panes only).
-                // Click = "已看過" — hides until the state changes again.
-                if let badge = model.aiBadge(t.id) {
-                    Button { model.ackAIStatus(t.id) } label: {
-                        Text(badge).font(.system(size: 9))
-                    }
-                    .buttonStyle(.plain)
-                    .help("點一下＝已看過（狀態再變會重新亮起）")
                 }
             }
-            // 選中的任務在列上直接給狀態切換小按鈕（危險動作留右鍵）。
+            Spacer(minLength: 4)
+            // 選中的任務：狀態切換小 icon 直接內嵌在同一行（不改列高，
+            // 連續點擊不會因版面跳動誤點；危險動作留右鍵）。
             if model.selection == t.id, t.status == "active" {
                 LifecycleChips(task: t)
-                    .padding(.leading, 15)
+            }
+            // AI state at a glance: 🟢 running, 🟡 waiting for the user,
+            // 🔴 blocked on a permission prompt (hook-fed, live panes only).
+            // Click = "已看過" — hides until the state changes again.
+            if let badge = model.aiBadge(t.id) {
+                Button { model.ackAIStatus(t.id) } label: {
+                    Text(badge).font(.system(size: 9))
+                }
+                .buttonStyle(.plain)
+                .help("點一下＝已看過（狀態再變會重新亮起）")
             }
         }
         .padding(.vertical, 1)
@@ -301,37 +299,39 @@ struct ColumnDividerHandle: View {
     }
 }
 
-/// Quick lifecycle switches shown on the SELECTED sidebar row（常用的狀態
-/// 切換就在任務列上；收尾／徹底刪除等危險動作留在右鍵選單，避免誤觸）。
+/// Icon-only lifecycle switches inlined on the SELECTED sidebar row —
+/// same row height as every other row, so rapid top-down triage never
+/// misclicks from layout shift.（危險動作留在右鍵選單。）
 struct LifecycleChips: View {
     @EnvironmentObject var model: AppModel
     let task: TaskNote
 
     var body: some View {
-        HStack(spacing: 3) {
+        HStack(spacing: 2) {
             if task.group != nil {
-                chip("回進行中", "arrow.uturn.backward") { model.setGroupFlag(task.id, nil) }
+                chip("play.fill", "回到進行中") { model.setGroupFlag(task.id, nil) }
             }
             if task.group != "read" {
-                chip("已讀", "eye") { model.setGroupFlag(task.id, "read") }
+                chip("eye", "標記已讀（看過，先不回）") { model.setGroupFlag(task.id, "read") }
             }
             if task.group != "waiting" {
-                chip("等外部", "hourglass") { model.setGroupFlag(task.id, "waiting") }
+                chip("hourglass", "移到等待外部（同事 / review / CI）") {
+                    model.setGroupFlag(task.id, "waiting")
+                }
             }
         }
     }
 
-    private func chip(_ title: String, _ icon: String,
+    private func chip(_ icon: String, _ help: String,
                       action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            Label(title, systemImage: icon)
-                .font(.system(size: 9.5))
-                .padding(.horizontal, 6)
-                .padding(.vertical, 2)
-                .background(Theme.paneHeaderBG, in: Capsule())
+            Image(systemName: icon)
+                .font(.system(size: 9, weight: .medium))
+                .frame(width: 17, height: 17)
+                .background(Theme.paneHeaderBG, in: Circle())
         }
         .buttonStyle(.plain)
-        .help("切換任務狀態（也在右鍵選單）")
+        .help(help)
     }
 }
 

@@ -4,14 +4,59 @@ import SwiftUI
 /// Central design tokens. Dark-first, and translucent: every background
 /// carries alpha so the behind-window blur (iTerm2-style glass) shows
 /// through. The terminal keeps the highest opacity for readability.
+///
+/// The base look is user-tunable（選單「外觀」→ 外觀設定）: a bg-hue
+/// preset, an opacity boost (0 = 現行玻璃感 → 1 = 不透明) and a
+/// brightness nudge, all applied uniformly to the four bg layers.
 enum Theme {
-    static let windowBG = Color(hex: 0x0E1116).opacity(0.22)
-    static let panelBG = Color(hex: 0x131820).opacity(0.26)
-    static let paneHeaderBG = Color(hex: 0x1A202A).opacity(0.33)
-    static let terminalBG = Color(hex: 0x14181F).opacity(0.37)
-    static let border = Color(hex: 0x2A3341)
+    struct BGPreset {
+        let name: String
+        let window: UInt32, panel: UInt32, header: UInt32, terminal: UInt32, border: UInt32
+    }
 
-    /// Accent presets（選單「主題色」切換；AppModel.accentHex 持久化）。
+    static let bgPresets: [BGPreset] = [
+        .init(name: "石墨藍（預設）", window: 0x0E1116, panel: 0x131820,
+              header: 0x1A202A, terminal: 0x14181F, border: 0x2A3341),
+        .init(name: "純中性", window: 0x101012, panel: 0x151517,
+              header: 0x1D1D20, terminal: 0x131315, border: 0x303036),
+        .init(name: "暖岩", window: 0x141009, panel: 0x1A150E,
+              header: 0x231C12, terminal: 0x18130C, border: 0x3B3222),
+        .init(name: "松綠", window: 0x0C1410, panel: 0x101A15,
+              header: 0x16231C, terminal: 0x101814, border: 0x28392F),
+        .init(name: "暗紫", window: 0x120E1A, panel: 0x171221,
+              header: 0x1F182B, terminal: 0x151021, border: 0x362B49),
+    ]
+
+    // Current appearance (mirrored from AppModel's persisted @Published
+    // values; UserDefaults seeds the first read so launch is correct).
+    static var bgPresetIndex: Int =
+        UserDefaults.standard.object(forKey: "bgPresetIndex") as? Int ?? 0
+    static var bgOpacityBoost: Double =
+        UserDefaults.standard.object(forKey: "bgOpacityBoost") as? Double ?? 0
+    static var bgBrightness: Double =
+        UserDefaults.standard.object(forKey: "bgBrightness") as? Double ?? 0
+
+    private static var preset: BGPreset {
+        bgPresets[min(max(0, bgPresetIndex), bgPresets.count - 1)]
+    }
+
+    private static func bg(_ hex: UInt32, _ baseAlpha: Double) -> Color {
+        let f = 1.0 + bgBrightness
+        let a = baseAlpha + (1 - baseAlpha) * bgOpacityBoost
+        return Color(.sRGB,
+                     red: min(1, Double((hex >> 16) & 0xFF) / 255 * f),
+                     green: min(1, Double((hex >> 8) & 0xFF) / 255 * f),
+                     blue: min(1, Double(hex & 0xFF) / 255 * f),
+                     opacity: a)
+    }
+
+    static var windowBG: Color { bg(preset.window, 0.22) }
+    static var panelBG: Color { bg(preset.panel, 0.26) }
+    static var paneHeaderBG: Color { bg(preset.header, 0.33) }
+    static var terminalBG: Color { bg(preset.terminal, 0.37) }
+    static var border: Color { bg(preset.border, 1.0) }
+
+    /// Accent presets（強調色：焦點框、主力徽章等）。
     static let accentPresets: [(name: String, hex: UInt32)] = [
         ("藍（預設）", 0x5B9DFF), ("紫", 0xB18CFF), ("綠", 0x7FCF8F),
         ("橘", 0xF0A35E), ("粉", 0xEF8FB9),
