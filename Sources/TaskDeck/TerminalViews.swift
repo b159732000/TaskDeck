@@ -23,19 +23,16 @@ struct TerminalHostView: NSViewRepresentable {
     let paneID: String
     let client: DaemonClient
     let font: NSFont
+    /// 16-color ANSI palette. Config `ansiColors` (e.g. the user's iTerm2
+    /// palette, so both terminals render identically) with the surgical
+    /// `Theme.terminalAnsi` as fallback.
+    let palette: [(UInt8, UInt8, UInt8)]
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
     func makeNSView(context: Context) -> TerminalView {
         let tv = GlassTerminalView(frame: CGRect(x: 0, y: 0, width: 600, height: 400))
-        // ANSI palette: SwiftTerm's stock 16 colors, EXCEPT blue/brightBlue.
-        // Stock blue is a near-invisible navy (3,0,178) on our dark glass —
-        // Claude's progress bar renders in it. A fully custom palette shipped
-        // briefly and regressed dim TUI text (dark slots became invisible),
-        // so this is surgical: slots 4/12 remapped to the Theme blues, the
-        // other 14 — including the dim-critical 0/8 — stay byte-identical to
-        // SwiftTerm's `defaultInstalledColors`.
-        tv.installColors(Theme.terminalAnsi.map {
+        tv.installColors(palette.map {
             SwiftTerm.Color(red: UInt16($0.0) * 257,
                             green: UInt16($0.1) * 257,
                             blue: UInt16($0.2) * 257)
@@ -53,6 +50,9 @@ struct TerminalHostView: NSViewRepresentable {
         if nsView.font.pointSize != font.pointSize || nsView.font.fontName != font.fontName {
             nsView.font = font
         }
+        // Defensive: anything upstream re-stamping the layer with the solid
+        // native background would silently kill the glass.
+        nsView.layer?.backgroundColor = NSColor.clear.cgColor
     }
 
     static func dismantleNSView(_ nsView: TerminalView, coordinator: Coordinator) {
@@ -256,7 +256,9 @@ struct PaneContainerView: View {
             header
             ZStack(alignment: .bottom) {
                 if let info {
-                    TerminalHostView(paneID: info.id, client: model.client, font: model.terminalFont)
+                    TerminalHostView(paneID: info.id, client: model.client,
+                                     font: model.terminalFont,
+                                     palette: model.ansiPalette ?? Theme.terminalAnsi)
                         .id(info.id)
                         .padding(.leading, 6)
                         .padding(.top, 4)

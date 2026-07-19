@@ -93,6 +93,18 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Parsed `config.ansiColors` (16 × "#RRGGBB") or nil to keep defaults.
+    var ansiPalette: [(UInt8, UInt8, UInt8)]? {
+        guard let hexes = config.ansiColors, hexes.count == 16 else { return nil }
+        var out: [(UInt8, UInt8, UInt8)] = []
+        for h in hexes {
+            let s = h.trimmingCharacters(in: .whitespaces).replacingOccurrences(of: "#", with: "")
+            guard s.count == 6, let v = UInt32(s, radix: 16) else { return nil }
+            out.append((UInt8((v >> 16) & 0xFF), UInt8((v >> 8) & 0xFF), UInt8(v & 0xFF)))
+        }
+        return out
+    }
+
     func zoomIn() { uiScale = min(1.6, ((uiScale + 0.1) * 10).rounded() / 10) }
     func zoomOut() { uiScale = max(0.7, ((uiScale - 0.1) * 10).rounded() / 10) }
     func zoomReset() { uiScale = 1.0 }

@@ -82,10 +82,13 @@ enum Theme {
         UserDefaults.standard.object(forKey: "accentHex") as? UInt32 ?? 0x5B9DFF
     static var accent: Color { Color(hex: accentHexCurrent) }
 
-    /// SwiftTerm paints its own background over ours — keep it clear and let
-    /// the translucent SwiftUI layer underneath provide the tint.
-    static let terminalBGNS = NSColor.clear
-    static let terminalFGNS = NSColor(hex: 0xC9CFD8)
+    /// Solid, alpha-1 value: SwiftTerm uses it for inverse-video math
+    /// (zsh highlights pasted text with standout = fg/bg swap — a clear
+    /// color here painted pasted text invisibly). Glass is unaffected:
+    /// transparency comes from GlassTerminalView forcing the CALayer clear,
+    /// which the nativeBackgroundColor setter never touches.
+    static let terminalBGNS = NSColor(hex: 0x14181F)
+    static let terminalFGNS = NSColor(hex: 0xDCDFE4)
 
     /// One-Dark-flavored 16-color ANSI palette (8-bit components).
     /// Used by `AnsiText` (quota table rendering), NOT the terminal.

@@ -79,6 +79,7 @@ Everything user-specific lives **outside the repo** in
 | `shell` | `/bin/zsh` | login shell for every pane (spawned `-il`); zsh/bash/fish all work |
 | `terminalFont` | auto | terminal font name. Unset: installed Nerd Fonts are probed (MesloLGS NF first), then the system mono font. Powerline/PUA prompt glyphs **require** a Nerd Font — there is no system fallback for private-use glyphs. |
 | `terminalFontSize` | 13 | terminal font size |
+| `ansiColors` | built-in | 16 `"#RRGGBB"` strings overriding ANSI colors 0-15 — copy them from your iTerm2/terminal profile and both render identically |
 | `teams` | one `claude` entry | one entry per AI CLI account — see below |
 | `quotaCommand` | none | CLI printing the quota JSON for the bottom bar — see below |
 

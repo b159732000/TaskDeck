@@ -84,12 +84,16 @@ public struct AppConfig: Codable, Equatable {
     /// Slack workspace team id (T…): turns https permalinks into slack://
     /// deep links so resources open in the app, not a browser tab.
     public var slackTeamID: String?
+    /// Optional ANSI palette override: exactly 16 "#RRGGBB" strings for
+    /// colors 0-15 — e.g. copied from your iTerm2 profile so both terminals
+    /// render identically. Unset = built-in default palette.
+    public var ansiColors: [String]?
 
     public init(tasksDir: String, defaultCwd: String, teams: [TeamDef],
                 quotaCommand: String?, shell: String = "/bin/zsh",
                 terminalFont: String? = nil, terminalFontSize: Double? = nil,
                 chromeCommand: String? = nil, chromeDebugPort: Int? = nil,
-                slackTeamID: String? = nil) {
+                slackTeamID: String? = nil, ansiColors: [String]? = nil) {
         self.tasksDir = tasksDir
         self.defaultCwd = defaultCwd
         self.teams = teams
@@ -100,6 +104,7 @@ public struct AppConfig: Codable, Equatable {
         self.chromeCommand = chromeCommand
         self.chromeDebugPort = chromeDebugPort
         self.slackTeamID = slackTeamID
+        self.ansiColors = ansiColors
     }
 
     public static let fallback = AppConfig(
@@ -111,7 +116,7 @@ public struct AppConfig: Codable, Equatable {
 
     enum CodingKeys: String, CodingKey {
         case tasksDir, defaultCwd, teams, quotaCommand, shell, terminalFont, terminalFontSize
-        case chromeCommand, chromeDebugPort, slackTeamID
+        case chromeCommand, chromeDebugPort, slackTeamID, ansiColors
     }
 
     public init(from decoder: Decoder) throws {
@@ -127,6 +132,7 @@ public struct AppConfig: Codable, Equatable {
         chromeCommand = try c.decodeIfPresent(String.self, forKey: .chromeCommand)
         chromeDebugPort = try c.decodeIfPresent(Int.self, forKey: .chromeDebugPort)
         slackTeamID = try c.decodeIfPresent(String.self, forKey: .slackTeamID)
+        ansiColors = try c.decodeIfPresent([String].self, forKey: .ansiColors)
     }
 
     public static func load() -> AppConfig {
