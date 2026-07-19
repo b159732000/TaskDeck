@@ -5,7 +5,10 @@ let package = Package(
     name: "TaskDeck",
     platforms: [.macOS(.v14)],
     dependencies: [
-        .package(url: "https://github.com/migueldeicaza/SwiftTerm.git", from: "1.2.0"),
+        // Fork adds `transparentBackground` (default-bg cells left unpainted
+        // so the glass shows through text rows) — candidate for upstream PR.
+        .package(url: "https://github.com/b159732000/SwiftTerm.git",
+                 revision: "4c805c690721b8c8c4df2827c41d89fe84418df2"),
     ],
     targets: [
         .target(name: "TaskDeckCore"),

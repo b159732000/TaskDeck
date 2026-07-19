@@ -37,6 +37,10 @@ struct TerminalHostView: NSViewRepresentable {
                             green: UInt16($0.1) * 257,
                             blue: UInt16($0.2) * 257)
         })
+        // Fork option: default-bg cells stay unpainted so the glass shows
+        // through text rows, while the solid nativeBackgroundColor keeps
+        // inverse-video (pasted-text standout) readable.
+        tv.transparentBackground = true
         tv.nativeBackgroundColor = Theme.terminalBGNS
         tv.nativeForegroundColor = Theme.terminalFGNS
         tv.font = font
