@@ -26,6 +26,13 @@ public struct TaskResource: Equatable {
 /// else in the note — including hand-written resource lines — is preserved
 /// verbatim (see CLAUDE.md note conventions).
 ///
+/// Placement (since 260720): the block lives in the note's structured top
+/// area — right below the session manifest's closing `---`, above the
+/// free-form notes — and is itself closed by a `---` rule so rewrites can
+/// never eat untitled free text below it. Legacy notes with the section
+/// elsewhere still parse/rewrite in place (the one-time migration moves
+/// them up).
+///
 /// Recognized bullet forms, anywhere inside `## Resources`:
 ///     - https://example.com
 ///     - [title](https://example.com)
@@ -39,8 +46,9 @@ public struct TaskResource: Equatable {
 public enum ResourceOps {
     // MARK: - Section location
 
-    /// Range of the `## Resources` section body (after the heading line,
-    /// up to the next `## ` heading or end of note).
+    /// Range of the `## Resources` section body (after the heading line, up
+    /// to the next `## ` heading, a `---` rule — the block terminator that
+    /// separates it from free-form notes — or end of note).
     static func sectionBodyRange(_ text: String) -> Range<String.Index>? {
         guard let heading = text.range(of: "(?mi)^##[ \\t]+resources[ \\t]*$",
                                        options: .regularExpression) else { return nil }
@@ -48,11 +56,40 @@ public enum ResourceOps {
         let start = heading.upperBound < text.endIndex
             ? text.index(after: heading.upperBound)
             : text.endIndex
-        if let next = text.range(of: "(?m)^##[ \\t]", options: .regularExpression,
+        if let next = text.range(of: "(?m)^(?:##[ \\t]|---[ \\t]*$)", options: .regularExpression,
                                  range: start ..< text.endIndex) {
             return start ..< next.lowerBound
         }
         return start ..< text.endIndex
+    }
+
+    /// Where a fresh `## Resources` block goes: right below the session
+    /// manifest's closing `---` (the note's structured top area), above the
+    /// free-form notes. Falls back to just after the H1 (or the frontmatter)
+    /// when the note has no manifest yet — `appendSessionLine` later inserts
+    /// the manifest above it, keeping the order stable.
+    static func resourcesInsertionPoint(_ t: String) -> String.Index {
+        let anchor: String.Index
+        if let h1 = t.range(of: "(?m)^# .*$", options: .regularExpression) {
+            anchor = h1.upperBound
+        } else if t.hasPrefix("---\n"), let close = t.range(of: "\n---\n") {
+            anchor = close.upperBound
+        } else {
+            anchor = t.startIndex
+        }
+        if let divider = t.range(of: "(?m)^---[ \\t]*$\\n?", options: .regularExpression,
+                                 range: anchor ..< t.endIndex) {
+            // Same manifest-shape rule as TaskStore.appendSessionLine: only
+            // trust the divider when everything above it is list/blank lines.
+            let between = String(t[anchor ..< divider.lowerBound])
+            let isManifest = between.split(separator: "\n", omittingEmptySubsequences: false)
+                .allSatisfy {
+                    let l = $0.trimmingCharacters(in: .whitespaces)
+                    return l.isEmpty || l.hasPrefix("- ")
+                }
+            if isManifest { return divider.upperBound }
+        }
+        return anchor
     }
 
     // MARK: - Parse
@@ -113,8 +150,9 @@ public enum ResourceOps {
 
     /// Replace the bullet list under `### <subsection>` (e.g. Chrome,
     /// Safari) inside `## Resources` with `entries` (title, url). Creates
-    /// the section / subsection when missing (appended at the end of the
-    /// note). Hand-written lines outside that subsection are never touched.
+    /// the section / subsection when missing (inserted in the note's top
+    /// area, closed by a `---` rule). Hand-written lines outside that
+    /// subsection are never touched.
     public static func setSnapshot(_ text: String, subsection: String,
                                    entries: [(title: String, url: String)]) -> String {
         var t = text
@@ -123,8 +161,15 @@ public enum ResourceOps {
             .joined(separator: "\n")
 
         if sectionBodyRange(t) == nil {
-            if !t.hasSuffix("\n") { t += "\n" }
-            t += "\n## Resources\n\n### \(subsection)\n\n\(bullets)\n"
+            let insertion = resourcesInsertionPoint(t)
+            var block = "\n## Resources\n\n### \(subsection)\n\n\(bullets)\n\n---\n"
+            if insertion == t.startIndex {
+                block.removeFirst()
+            } else if t[t.index(before: insertion)] != "\n" {
+                // e.g. anchored at the end of the H1 line — keep a blank line.
+                block = "\n" + block
+            }
+            t.insert(contentsOf: block, at: insertion)
             return t
         }
         guard let body = sectionBodyRange(t) else { return t }

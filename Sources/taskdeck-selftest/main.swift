@@ -15,6 +15,12 @@ func check(_ name: String, _ cond: @autoclosure () -> Bool) {
     }
 }
 
+/// True when `a` occurs before `b` in `s` (both must exist).
+func ordered(_ s: String, _ a: String, _ b: String) -> Bool {
+    guard let ra = s.range(of: a), let rb = s.range(of: b) else { return false }
+    return ra.lowerBound < rb.lowerBound
+}
+
 let note = """
 ---
 status: active
@@ -95,6 +101,37 @@ let bare = ResourceOps.setChromeSnapshot("# t\n\n就一行",
                                          entries: [(title: "x", url: "https://x.example.com")])
 check("snapshot: creates ## Resources", bare.contains("## Resources") && bare.contains("### Chrome"))
 check("snapshot: created section parses", ResourceOps.parse(bare).count == 1)
+check("snapshot: created section sits above free text", ordered(bare, "## Resources", "就一行"))
+
+// MARK: top placement — new sections land under the manifest, above notes,
+// closed by a --- rule so rewrites can't eat free text
+
+let topNote = "---\nstatus: active\n---\n\n# demo\n\n- claude3 abc-123\n\n---\n\n自由筆記在下面。\n"
+let topOut = ResourceOps.setChromeSnapshot(topNote, entries: [(title: "t", url: "https://t.example.com")])
+check("top: manifest → resources → notes order",
+      ordered(topOut, "- claude3 abc-123", "## Resources")
+      && ordered(topOut, "## Resources", "自由筆記在下面。"))
+check("top: block closed by --- before notes",
+      (topOut.contains("---\n\n自由筆記在下面。") || topOut.contains("---\n自由筆記在下面。"))
+      && ResourceOps.parse(topOut).count == 1)
+
+let topNoisy = topOut.replacingOccurrences(
+    of: "自由筆記在下面。",
+    with: "自由筆記在下面。\n\n- https://free-note-link.example.com")
+check("top: bullets below --- are not resources",
+      !ResourceOps.parse(topNoisy).contains { $0.url.contains("free-note-link") })
+
+let topAgain = ResourceOps.setChromeSnapshot(topNoisy, entries: [(title: "u", url: "https://u.example.com")])
+check("top: re-snapshot replaces bullets only",
+      !topAgain.contains("t.example.com") && topAgain.contains("u.example.com"))
+check("top: re-snapshot keeps free notes",
+      topAgain.contains("自由筆記在下面。") && topAgain.contains("free-note-link.example.com"))
+check("top: still exactly one ### Chrome", topAgain.components(separatedBy: "### Chrome").count == 2)
+
+let withSession = TaskStore.appendSessionLine(topOut, line: "- claude new-999")
+check("top: session line joins manifest, not resources",
+      ordered(withSession, "- claude new-999", "## Resources"))
+check("top: manifest line count", TaskStore.manifestLines(withSession).count == 2)
 
 // MARK: edge — heading at EOF must not crash
 
