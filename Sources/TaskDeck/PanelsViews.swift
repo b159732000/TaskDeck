@@ -46,7 +46,7 @@ struct SidebarView: View {
         List {
             if !needsYou.isEmpty {
                 Section(isExpanded: $needsYouExpanded) {
-                    ForEach(needsYou) { row($0) }
+                    ForEach(needsYou) { row($0, needsYou: true) }
                 } header: {
                     Label("等你（\(needsYou.count)）", systemImage: "bell.fill")
                         .font(.system(size: 11, weight: .bold))
@@ -55,13 +55,13 @@ struct SidebarView: View {
             }
             if !aiRunning.isEmpty {
                 Section(isExpanded: $aiRunningExpanded) {
-                    ForEach(aiRunning) { row($0) }
+                    ForEach(aiRunning) { row($0, needsYou: false) }
                 } header: {
                     Text("AI 執行中（\(aiRunning.count)）")
                 }
             }
             Section(isExpanded: $runningExpanded) {
-                ForEach(idle) { row($0) }
+                ForEach(idle) { row($0, needsYou: false) }
                     .onMove { from, to in
                         model.moveRunningTasks(idle.map(\.id), from: from, to: to)
                     }
@@ -70,28 +70,28 @@ struct SidebarView: View {
             }
             if !read.isEmpty {
                 Section(isExpanded: $readExpanded) {
-                    ForEach(read) { row($0) }
+                    ForEach(read) { row($0, needsYou: false) }
                 } header: {
                     Text("已讀（看過待回，\(read.count)）")
                 }
             }
             if !waiting.isEmpty {
                 Section(isExpanded: $waitingExpanded) {
-                    ForEach(waiting) { row($0) }
+                    ForEach(waiting) { row($0, needsYou: false) }
                 } header: {
                     Text("等待外部（\(waiting.count)）")
                 }
             }
             if !semi.isEmpty {
                 Section(isExpanded: $sunkExpanded) {
-                    ForEach(semi) { row($0) }
+                    ForEach(semi) { row($0, needsYou: false) }
                 } header: {
                     Text("半封存 >3 天（\(semi.count)）")
                 }
             }
             if !done.isEmpty {
                 Section(isExpanded: $doneExpanded) {
-                    ForEach(done) { row($0) }
+                    ForEach(done) { row($0, needsYou: false) }
                 } header: {
                     Text("已完成（\(done.count)）")
                 }
@@ -152,9 +152,11 @@ struct SidebarView: View {
         }
     }
 
-    private func row(_ t: TaskNote) -> some View {
-        let needsYou = model.sidebarGroup(t) == .needsYou
-        return HStack(spacing: 8) {
+    // needsYou is passed by the section (which already knows its group) so
+    // the row never recomputes sidebarGroup — that ran per-row per-render and
+    // starved the selection tint's repaint behind the detail-pane rebuild.
+    private func row(_ t: TaskNote, needsYou: Bool) -> some View {
+        HStack(spacing: 8) {
             VStack(alignment: .leading, spacing: 1) {
                 Text(t.title)
                     .font(.system(size: 12.5 * model.uiScale))
@@ -211,8 +213,10 @@ struct SidebarView: View {
                 }
             }
             .padding(.horizontal, 4)
-            .animation(.easeInOut(duration: 0.17), value: hoveredSlug)
-            .animation(.easeInOut(duration: 0.17), value: model.selection)
+            // Selection snaps (no cross-fade): the detail-pane rebuild can hog
+            // the main thread right after a tap, and an animated tint would
+            // visibly crawl behind it. Hover keeps a light fade.
+            .animation(.easeInOut(duration: 0.15), value: hoveredSlug)
         )
         .contentShape(Rectangle())
         .onTapGesture { model.selection = t.id }
