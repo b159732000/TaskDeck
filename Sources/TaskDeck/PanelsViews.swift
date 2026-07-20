@@ -48,7 +48,9 @@ struct SidebarView: View {
                 Section(isExpanded: $needsYouExpanded) {
                     ForEach(needsYou) { row($0) }
                 } header: {
-                    Text("等你（\(needsYou.count)）")
+                    Label("等你（\(needsYou.count)）", systemImage: "bell.fill")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundStyle(Theme.needsYou)
                 }
             }
             if !aiRunning.isEmpty {
@@ -151,7 +153,8 @@ struct SidebarView: View {
     }
 
     private func row(_ t: TaskNote) -> some View {
-        HStack(spacing: 8) {
+        let needsYou = model.sidebarGroup(t) == .needsYou
+        return HStack(spacing: 8) {
             VStack(alignment: .leading, spacing: 1) {
                 Text(t.title)
                     .font(.system(size: 12.5 * model.uiScale))
@@ -191,14 +194,25 @@ struct SidebarView: View {
         }
         // 高亮不看焦點：系統的選取高亮只在側邊欄有鍵盤焦點時飽和，焦點
         // 移去終端就變灰——自畫一層常駐選取底色（hover 給更淡的一階）。
+        // 「等你」任務再加一層暖橘底＋左側強調條，讓待確認的最醒目。
         .listRowBackground(
-            RoundedRectangle(cornerRadius: 6)
-                .fill(model.selection == t.id
-                    ? Theme.accent.opacity(0.16)
-                    : (hoveredSlug == t.id ? Color.white.opacity(0.05) : .clear))
-                .padding(.horizontal, 4)
-                .animation(.easeInOut(duration: 0.17), value: hoveredSlug)
-                .animation(.easeInOut(duration: 0.17), value: model.selection)
+            ZStack(alignment: .leading) {
+                RoundedRectangle(cornerRadius: 6)
+                    .fill(model.selection == t.id
+                        ? Theme.accent.opacity(0.16)
+                        : (needsYou
+                            ? Theme.needsYou.opacity(0.12)
+                            : (hoveredSlug == t.id ? Color.white.opacity(0.05) : .clear)))
+                if needsYou {
+                    RoundedRectangle(cornerRadius: 1.5)
+                        .fill(Theme.needsYou)
+                        .frame(width: 3)
+                        .padding(.vertical, 3)
+                }
+            }
+            .padding(.horizontal, 4)
+            .animation(.easeInOut(duration: 0.17), value: hoveredSlug)
+            .animation(.easeInOut(duration: 0.17), value: model.selection)
         )
         .contentShape(Rectangle())
         .onTapGesture { model.selection = t.id }

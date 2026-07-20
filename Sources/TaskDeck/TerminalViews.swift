@@ -317,7 +317,11 @@ struct PaneContainerView: View {
                 .font(.system(size: 11 * model.uiScale, weight: .medium))
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
-            if let team = spec?.team {
+            // Prefer the session's real account (file location) over the
+            // spec's recorded team, which can be stale if a different claude
+            // was run in the pane.
+            if let spec, spec.kind == "ai",
+               let team = spec.sessionID.flatMap({ model.teamFromSessionFile($0) }) ?? spec.team {
                 Text(team)
                     .font(.system(size: 9, weight: .medium))
                     .foregroundStyle(Theme.accent)

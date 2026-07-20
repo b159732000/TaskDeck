@@ -461,20 +461,24 @@ final class AppModel: ObservableObject {
     }
 
     /// Ground-truth account for a session: which team's CLAUDE_CONFIG_DIR
-    /// actually holds its conversation file. This beats the manifest's
-    /// recorded team, which is only a guess made at creation and is wrong
-    /// whenever the session was started/switched to a different account by
-    /// hand (the 平滑著色 case: manifest said claude, the file lived in
-    /// claude-team3). nil when no team's dir has it (unknown).
-    private func teamFromSessionFile(_ sid: String) -> String? {
+    /// actually holds its conversation record. Beats the manifest's recorded
+    /// team, which is only a guess at creation and wrong whenever the session
+    /// was started/switched to another account by hand (平滑著色: manifest
+    /// said claude, the record lived in claude-team3). The record is stored
+    /// per project cwd as either `<sid>.jsonl` (older) or a `<sid>` directory
+    /// (this claude version) — match both. nil = unknown.
+    func teamFromSessionFile(_ sid: String) -> String? {
+        let fm = FileManager.default
         for team in config.teams {
             guard let dir = team.configDir else { continue }
             let projects = URL(fileURLWithPath: Paths.expand(dir)).appendingPathComponent("projects")
-            guard let subs = try? FileManager.default.contentsOfDirectory(
+            guard let subs = try? fm.contentsOfDirectory(
                 at: projects, includingPropertiesForKeys: nil) else { continue }
-            for sub in subs where FileManager.default.fileExists(
-                atPath: sub.appendingPathComponent("\(sid).jsonl").path) {
-                return team.id
+            for sub in subs {
+                if fm.fileExists(atPath: sub.appendingPathComponent("\(sid).jsonl").path)
+                    || fm.fileExists(atPath: sub.appendingPathComponent(sid).path) {
+                    return team.id
+                }
             }
         }
         return nil
