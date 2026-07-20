@@ -384,7 +384,9 @@ final class AppModel: ObservableObject {
     // MARK: - Sidebar grouping
     //（等你 / 進行中 / 已讀 / 等待外部 / 半封存 / 已完成）
 
-    enum SidebarGroup { case needsYou, running, read, waitingExt, semiArchived, done }
+    // aiRunning is signal-driven（AI 執行中）; idle is the default home —
+    // new tasks, shell-only work, and expired signals（待開工）.
+    enum SidebarGroup { case needsYou, aiRunning, idle, read, waitingExt, semiArchived, done }
 
     /// 已讀 / 等待外部 items with 3 days of silence sink into 半封存
     /// (folded); a month of silence there auto-archives into 已完成 with an
@@ -514,12 +516,12 @@ final class AppModel: ObservableObject {
         }
         let attention = aiAttention(t.id)
         if attention?.permission == true { return .needsYou } // 🔴 blocked beats everything
-        if aiRunningNow(t.id) { return .running }             // actively working now
+        if aiRunningNow(t.id) { return .aiRunning }           // AI working right now
         if attention != nil { return .needsYou }
         if hasAckedStop(t.id) {
             return quiet > Self.sinkAfter ? .semiArchived : .read
         }
-        return .running
+        return .idle // no AI activity at all — new / manual / expired
     }
 
     /// Set / clear the manual lifecycle flag ("waiting" 等待外部、"read"

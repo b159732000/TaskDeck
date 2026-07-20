@@ -10,6 +10,7 @@ struct SidebarView: View {
     @State private var deletingSlug: String?
     @State private var hoveredSlug: String?
     @AppStorage("needsYouSectionExpanded") private var needsYouExpanded = true
+    @AppStorage("aiRunningSectionExpanded") private var aiRunningExpanded = true
     @AppStorage("runningSectionExpanded") private var runningExpanded = true
     @AppStorage("readSectionExpanded") private var readExpanded = true
     @AppStorage("waitingSectionExpanded") private var waitingExpanded = true
@@ -17,7 +18,8 @@ struct SidebarView: View {
     @AppStorage("sunkSectionExpanded") private var sunkExpanded = false
 
     var body: some View {
-        // 由上而下：等你（自動佇列）→ 進行中 → 已讀（看過待回）→ 等待外部
+        // 由上而下：等你（自動佇列）→ AI 執行中（訊號驅動）→ 待開工（預設
+        // 家：新任務／手動作業／訊號過期，可拖曳排序）→ 已讀（看過待回）→ 等待外部
         //（手動）→ 半封存（>3 天沒動靜，預設折疊；滿 30 天自動歸入已完成）
         // → 已完成（封存）。規則見 AppModel.sidebarGroup / autoArchiveSweep。
         let groups = Dictionary(grouping: model.tasks, by: { model.sidebarGroup($0) })
@@ -27,7 +29,8 @@ struct SidebarView: View {
             if ia.permission != ib.permission { return ia.permission } // 🔴 first
             return ia.since < ib.since // owed longest on top
         }
-        let running = groups[.running] ?? []
+        let aiRunning = groups[.aiRunning] ?? []
+        let idle = groups[.idle] ?? []
         let read = (groups[.read] ?? []).sorted {
             (model.silence($0) ?? 0) < (model.silence($1) ?? 0) // 最近動的在上
         }
@@ -48,13 +51,20 @@ struct SidebarView: View {
                     Text("等你（\(needsYou.count)）")
                 }
             }
+            if !aiRunning.isEmpty {
+                Section(isExpanded: $aiRunningExpanded) {
+                    ForEach(aiRunning) { row($0) }
+                } header: {
+                    Text("AI 執行中（\(aiRunning.count)）")
+                }
+            }
             Section(isExpanded: $runningExpanded) {
-                ForEach(running) { row($0) }
+                ForEach(idle) { row($0) }
                     .onMove { from, to in
-                        model.moveRunningTasks(running.map(\.id), from: from, to: to)
+                        model.moveRunningTasks(idle.map(\.id), from: from, to: to)
                     }
             } header: {
-                Text("進行中（\(running.count)）")
+                Text("待開工（\(idle.count)）")
             }
             if !read.isEmpty {
                 Section(isExpanded: $readExpanded) {
