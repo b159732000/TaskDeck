@@ -538,6 +538,9 @@ final class AppModel: ObservableObject {
             if attention != nil { return .needsYou }              // finished, awaits review
         }
 
+        // Manual placement (honored when it's the most recent event). 等你
+        // can be set by hand too — it stays put (no time-sink) until AI acts.
+        if t.group == "needsyou" { return .needsYou }
         if t.group == "waiting" {
             return quiet > Self.sinkAfter ? .semiArchived : .waitingExt
         }
@@ -546,6 +549,16 @@ final class AppModel: ObservableObject {
         }
         return .idle // new / no manual flag / expired signals
     }
+
+    /// Manual move targets (frontmatter `group`): the value to store and the
+    /// section it lands in. `nil` value = clear flag → 待開工. AI 執行中 and
+    /// 半封存 are excluded (live/derived, not hand-settable).
+    static let manualMoveTargets: [(label: String, value: String?, group: SidebarGroup)] = [
+        ("待開工", nil, .idle),
+        ("等你（我要 review）", "needsyou", .needsYou),
+        ("已讀（看過先不回）", "read", .read),
+        ("等待外部（同事 / review / CI）", "waiting", .waitingExt),
+    ]
 
     /// Set / clear the manual lifecycle flag ("waiting" 等待外部、"read"
     /// 已讀、nil 移回待開工). `group_since` is stamped to now so the placement

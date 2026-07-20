@@ -220,14 +220,18 @@ struct SidebarView: View {
             Button("在 Finder 顯示筆記") { model.revealNote(t.id) }
             Divider()
             if t.status == "active" {
-                if t.group != nil {
-                    Button("移回進行中") { model.setGroupFlag(t.id, nil) }
-                }
-                if t.group != "read" {
-                    Button("標記已讀（看過，先不回）") { model.setGroupFlag(t.id, "read") }
-                }
-                if t.group != "waiting" {
-                    Button("移到等待外部（同事 / review / CI）") { model.setGroupFlag(t.id, "waiting") }
+                Menu("移動到") {
+                    ForEach(AppModel.manualMoveTargets, id: \.label) { target in
+                        Button {
+                            model.setGroupFlag(t.id, target.value)
+                        } label: {
+                            if t.group == target.value {
+                                Label(target.label, systemImage: "checkmark")
+                            } else {
+                                Text(target.label)
+                            }
+                        }
+                    }
                 }
                 Button("收尾（關閉全部終端＋標記完成）", role: .destructive) { model.archiveTask(t.id) }
             } else {
@@ -408,7 +412,10 @@ struct LifecycleChips: View {
     var body: some View {
         HStack(spacing: 2) {
             if task.group != nil {
-                chip("play.fill", "回到進行中") { model.setGroupFlag(task.id, nil) }
+                chip("play.fill", "回到待開工") { model.setGroupFlag(task.id, nil) }
+            }
+            if task.group != "needsyou" {
+                chip("bell", "移到等你（我要 review）") { model.setGroupFlag(task.id, "needsyou") }
             }
             if task.group != "read" {
                 chip("eye", "標記已讀（看過，先不回）") { model.setGroupFlag(task.id, "read") }
