@@ -285,11 +285,12 @@ final class AppModel: ObservableObject {
         let cwd: String?
     }
 
-    /// All AI sessions of a task: app-created pane specs ∪ the note's
-    /// manifest lines. The manifest is the durable record — sessions started
-    /// by hand in a shell pane, attached via iTerm2, or whose pane spec was
-    /// later closed only exist there, and they still owe the user a review
-    /// when they stop (the PRO-1268 lesson, 260720). Deduped by session id.
+    /// All AI sessions of a task: app-created pane specs ∪ the note's manifest
+    /// lines ∪ any live-signal session whose id appears ANYWHERE in the note.
+    /// The last source is what catches sessions the app never registered —
+    /// started by hand in a shell pane, resumed, or pasted from `/status`
+    /// ("Session ID: <uuid>") below the manifest divider — as long as the id
+    /// is written somewhere in the note. Deduped by session id.
     func taskAISessions(_ slug: String) -> [TaskAISession] {
         let machine = sessions[slug]?.machine ?? store.machineState(slug)
         var seen = Set<String>()
@@ -302,12 +303,19 @@ final class AppModel: ObservableObject {
         for line in TaskStore.manifestLines(text) where line.hasPrefix("- ") {
             let parts = line.dropFirst(2).split(separator: " ").map(String.init)
             guard parts.count >= 2 else { continue }
-            let team = parts[0]
             let sid = parts[1]
             guard (32 ... 36).contains(sid.count),
                   sid.allSatisfy({ $0.isHexDigit || $0 == "-" }),
                   seen.insert(sid).inserted else { continue }
-            out.append(TaskAISession(sid: sid, team: team, cwd: nil))
+            out.append(TaskAISession(sid: sid, team: parts[0], cwd: nil))
+        }
+        // Any known session (hook status file) whose id is written anywhere in
+        // the note belongs to this task, even outside the manifest. Team is
+        // unknown here but a hook signal doesn't need it (only the mtime
+        // fallback does), so these still drive running / 等你 grouping.
+        for sid in aiStatus.keys where !seen.contains(sid) && text.contains(sid) {
+            seen.insert(sid)
+            out.append(TaskAISession(sid: sid, team: nil, cwd: nil))
         }
         return out
     }
