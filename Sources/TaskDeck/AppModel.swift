@@ -270,25 +270,54 @@ final class AppModel: ObservableObject {
 
     // MARK: - AI status badges
 
-    /// Sidebar badge for a task's AI panes: 🔴 needs permission, 🟢 running,
-    /// 🟡 turn finished / waiting for the user. Only live panes count — a
-    /// stale file from an exited claude never shows (and entries expire).
-    /// Acknowledged entries (badge clicked) stay hidden until the state
-    /// changes again.
-    func aiBadge(_ slug: String) -> String? {
+    /// One AI session attributable to a task, wherever it was started.
+    struct TaskAISession {
+        let sid: String
+        let team: String?
+        let cwd: String?
+    }
+
+    /// All AI sessions of a task: app-created pane specs ∪ the note's
+    /// manifest lines. The manifest is the durable record — sessions started
+    /// by hand in a shell pane, attached via iTerm2, or whose pane spec was
+    /// later closed only exist there, and they still owe the user a review
+    /// when they stop (the PRO-1268 lesson, 260720). Deduped by session id.
+    func taskAISessions(_ slug: String) -> [TaskAISession] {
         let machine = sessions[slug]?.machine ?? store.machineState(slug)
-        var states: Set<String> = []
+        var seen = Set<String>()
+        var out: [TaskAISession] = []
         for pane in machine.panes where pane.kind == "ai" {
-            guard let sid = pane.sessionID,
-                  let entry = statusEntry(for: pane),
-                  entry.state != "ended",
-                  paneRuntime[pane.id]?.running == true,
-                  (ackedAI[sid] ?? .distantPast) < entry.ts else { continue }
+            guard let sid = pane.sessionID, seen.insert(sid).inserted else { continue }
+            out.append(TaskAISession(sid: sid, team: pane.team, cwd: pane.cwd))
+        }
+        let text = sessions[slug]?.noteText ?? store.read(slug)
+        for line in TaskStore.manifestLines(text) where line.hasPrefix("- ") {
+            let parts = line.dropFirst(2).split(separator: " ").map(String.init)
+            guard parts.count >= 2 else { continue }
+            let team = parts[0]
+            let sid = parts[1]
+            guard (32 ... 36).contains(sid.count),
+                  sid.allSatisfy({ $0.isHexDigit || $0 == "-" }),
+                  seen.insert(sid).inserted else { continue }
+            out.append(TaskAISession(sid: sid, team: team, cwd: nil))
+        }
+        return out
+    }
+
+    /// Sidebar badge for a task's AI sessions: 🔴 needs permission,
+    /// 🟢 running, 🟡 output finished（等你看）— including sessions that
+    /// already ended without being acknowledged. Acknowledged entries
+    /// (badge clicked) stay hidden until the state changes again.
+    func aiBadge(_ slug: String) -> String? {
+        var states: Set<String> = []
+        for s in taskAISessions(slug) {
+            guard let entry = statusEntry(sid: s.sid, team: s.team, cwd: s.cwd),
+                  (ackedAI[s.sid] ?? .distantPast) < entry.ts else { continue }
             states.insert(entry.state)
         }
         if states.contains("permission") { return "🔴" }
         if states.contains("running") { return "🟢" }
-        if states.contains("waiting") { return "🟡" }
+        if states.contains("waiting") || states.contains("ended") { return "🟡" }
         return nil
     }
 
@@ -337,10 +366,9 @@ final class AppModel: ObservableObject {
 
     /// Badge clicked: mark the task's CURRENT AI states as seen.
     func ackAIStatus(_ slug: String) {
-        let machine = sessions[slug]?.machine ?? store.machineState(slug)
-        for pane in machine.panes where pane.kind == "ai" {
-            if let sid = pane.sessionID, let entry = aiStatus[sid] {
-                ackedAI[sid] = entry.ts
+        for s in taskAISessions(slug) {
+            if let entry = statusEntry(sid: s.sid, team: s.team, cwd: s.cwd) {
+                ackedAI[s.sid] = entry.ts
             }
         }
     }
@@ -362,25 +390,33 @@ final class AppModel: ObservableObject {
         return df
     }()
 
-    /// Effective AI state for a pane: hook signal first; when a session
+    /// States that mean the ball is in the user's court: output finished
+    /// (waiting), needs permission, or the session ended without ever being
+    /// acknowledged — an unreviewed ended session still owes a review
+    /// (Stop's "waiting" gets overwritten by SessionEnd's "ended" in the
+    /// one-state-per-session file, so excluding "ended" would drop the debt).
+    private static let attentionStates: Set<String> = ["waiting", "permission", "ended"]
+    /// Signals older than this stop steering the sidebar either way；the
+    /// real clearing mechanism is the ack（已看過）, not time.
+    private static let signalWindow: TimeInterval = 7 * 24 * 3600
+
+    /// Effective AI state for a session: hook signal first; when a session
     /// predates the hooks (no status file), fall back to the conversation
     /// file's mtime — writes stop when the AI stops, so quiet ≥10 min ⇒
-    /// "waiting", fresher ⇒ "running". Hook entries expire after a day;
-    /// the mtime fallback gets a week (its whole point is rescuing zombies).
-    private func statusEntry(for pane: PaneSpec) -> (state: String, ts: Date)? {
-        guard pane.kind == "ai", let sid = pane.sessionID else { return nil }
+    /// "waiting", fresher ⇒ "running".
+    private func statusEntry(sid: String, team: String?, cwd: String?) -> (state: String, ts: Date)? {
         if let entry = aiStatus[sid] {
-            return Date().timeIntervalSince(entry.ts) < 24 * 3600 ? entry : nil
+            return Date().timeIntervalSince(entry.ts) < Self.signalWindow ? entry : nil
         }
-        guard let team = pane.team,
+        guard let team,
               let dir = config.teams.first(where: { $0.id == team })?.configDir else { return nil }
-        let cwd = Paths.expand(pane.cwd ?? config.defaultCwd)
-        let projectSlug = cwd.replacingOccurrences(of: "/", with: "-")
+        let cwdPath = Paths.expand(cwd ?? config.defaultCwd)
+        let projectSlug = cwdPath.replacingOccurrences(of: "/", with: "-")
             .replacingOccurrences(of: ".", with: "-")
         let file = URL(fileURLWithPath: Paths.expand(dir))
             .appendingPathComponent("projects/\(projectSlug)/\(sid).jsonl")
         guard let mtime = (try? FileManager.default.attributesOfItem(atPath: file.path))?[.modificationDate] as? Date,
-              Date().timeIntervalSince(mtime) < 7 * 24 * 3600 else { return nil }
+              Date().timeIntervalSince(mtime) < Self.signalWindow else { return nil }
         return Date().timeIntervalSince(mtime) < 600
             ? ("running", mtime)
             : ("waiting", mtime)
@@ -389,16 +425,16 @@ final class AppModel: ObservableObject {
     /// The strongest unacked "ball is in your court" signal for a task:
     /// permission beats waiting; `since` = when the AI stopped (oldest such
     /// signal, so the needs-you queue is FIFO by how long you've been owed).
+    /// Sessions count wherever they live (pane spec or note manifest) and
+    /// whether or not their pane still runs — finished output awaits review
+    /// even after the process is gone.
     func aiAttention(_ slug: String) -> (permission: Bool, since: Date)? {
-        let machine = sessions[slug]?.machine ?? store.machineState(slug)
         var permission = false
         var oldest: Date?
-        for pane in machine.panes where pane.kind == "ai" {
-            guard let sid = pane.sessionID,
-                  let entry = statusEntry(for: pane),
-                  entry.state == "waiting" || entry.state == "permission",
-                  paneRuntime[pane.id]?.running == true,
-                  (ackedAI[sid] ?? .distantPast) < entry.ts else { continue }
+        for s in taskAISessions(slug) {
+            guard let entry = statusEntry(sid: s.sid, team: s.team, cwd: s.cwd),
+                  Self.attentionStates.contains(entry.state),
+                  (ackedAI[s.sid] ?? .distantPast) < entry.ts else { continue }
             if entry.state == "permission" { permission = true }
             if oldest == nil || entry.ts < oldest! { oldest = entry.ts }
         }
@@ -409,19 +445,18 @@ final class AppModel: ObservableObject {
     /// Newest signal across the task's AI sessions (acked or not) —
     /// "last activity" for the sink rule.
     private func lastAIActivity(_ slug: String) -> Date? {
-        let machine = sessions[slug]?.machine ?? store.machineState(slug)
-        return machine.panes.compactMap { statusEntry(for: $0)?.ts }.max()
+        taskAISessions(slug)
+            .compactMap { statusEntry(sid: $0.sid, team: $0.team, cwd: $0.cwd)?.ts }
+            .max()
     }
 
     /// Does the task have an AI stop signal the user already acknowledged
     /// (= "已讀"：看過了、還沒給下一步)?
     private func hasAckedStop(_ slug: String) -> Bool {
-        let machine = sessions[slug]?.machine ?? store.machineState(slug)
-        return machine.panes.contains { pane in
-            guard let sid = pane.sessionID,
-                  let entry = statusEntry(for: pane),
-                  entry.state == "waiting" || entry.state == "permission" else { return false }
-            return (ackedAI[sid] ?? .distantPast) >= entry.ts
+        taskAISessions(slug).contains { s in
+            guard let entry = statusEntry(sid: s.sid, team: s.team, cwd: s.cwd),
+                  Self.attentionStates.contains(entry.state) else { return false }
+            return (ackedAI[s.sid] ?? .distantPast) >= entry.ts
         }
     }
 
