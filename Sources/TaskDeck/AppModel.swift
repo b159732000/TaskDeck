@@ -539,38 +539,34 @@ final class AppModel: ObservableObject {
         return Date().timeIntervalSince(last)
     }
 
-    // Grouping model (260720 v2): THE MOST RECENT EVENT WINS. An AI signal and
-    // a manual placement each carry a timestamp; whichever happened later
-    // decides the group. So a fresh chat pulls a parked task back to AI 執行中
-    // (AI event is newer), and manually moving a finished task to 等待外部
-    // sticks (the click is newer than the old Stop). An actively-running
-    // session is the one exception — it always wins (you can't park a task
-    // whose AI is mid-turn; it re-stamps itself every tool call anyway).
+    // Grouping model (260720 v3): MANUAL PLACEMENT STICKS; a running session
+    // is the only thing that overrides it. Rationale from real use: while you
+    // chat with a task, every finished turn emits a fresh "waiting" signal, so
+    // a recency rule ("newest event wins") could never let you park an
+    // actively-used task — each turn re-stole it to 等你. So:
+    //   • actively running → AI 執行中 (a live fact, always shown)
+    //   • parked (group set) → honor the manual group; a finished turn does
+    //     NOT bounce it to 等你 (you took control — it stays until you move it)
+    //   • not parked → AI signals drive: waiting/ended/permission → 等你
+    // This satisfies all three asks: unparked tasks auto-surface when the AI
+    // finishes, parked tasks stay put, and running always shows.
     func sidebarGroup(_ t: TaskNote) -> SidebarGroup {
         if t.status == "done" { return .done }
         let quiet = silence(t) ?? 0
 
-        if aiRunningNow(t.id) { return .aiRunning } // actively running always wins
+        if aiRunningNow(t.id) { return .aiRunning } // live fact, overrides all
 
-        // Manual placement is authoritative when it's at least as recent as the
-        // newest AI signal; otherwise the AI signal drives (finished→等你).
-        let parkedAt = t.groupSince.flatMap { Self.fmDate.date(from: $0) }
-        let lastAI = lastAIActivity(t.id)
-        let manualWins = parkedAt != nil && (lastAI == nil || parkedAt! >= lastAI!)
-
-        if !manualWins {
-            let attention = aiAttention(t.id)
-            if attention?.permission == true { return .needsYou } // 🔴 blocked on you
-            if attention != nil { return .needsYou }              // finished, awaits review
+        // Parked by hand → sticky. 等你 can be set manually too (no time-sink).
+        switch t.group {
+        case "needsyou": return .needsYou
+        case "waiting": return quiet > Self.sinkAfter ? .semiArchived : .waitingExt
+        case "read": return quiet > Self.sinkAfter ? .semiArchived : .read
+        default: break
         }
 
-        // Manual placement (honored when it's the most recent event). 等你
-        // can be set by hand too — it stays put (no time-sink) until AI acts.
-        if t.group == "needsyou" { return .needsYou }
-        if t.group == "waiting" {
-            return quiet > Self.sinkAfter ? .semiArchived : .waitingExt
-        }
-        if t.group == "read" || hasAckedStop(t.id) {
+        // Unparked → AI signals drive.
+        if aiAttention(t.id) != nil { return .needsYou } // finished / awaits review
+        if hasAckedStop(t.id) {
             return quiet > Self.sinkAfter ? .semiArchived : .read
         }
         return .idle // new / no manual flag / expired signals
