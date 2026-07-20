@@ -9,6 +9,10 @@ struct SidebarView: View {
     @State private var renameText = ""
     @State private var deletingSlug: String?
     @State private var hoveredSlug: String?
+    @AppStorage("needsYouSectionExpanded") private var needsYouExpanded = true
+    @AppStorage("runningSectionExpanded") private var runningExpanded = true
+    @AppStorage("readSectionExpanded") private var readExpanded = true
+    @AppStorage("waitingSectionExpanded") private var waitingExpanded = true
     @AppStorage("doneSectionExpanded") private var doneExpanded = true
     @AppStorage("sunkSectionExpanded") private var sunkExpanded = false
 
@@ -38,24 +42,32 @@ struct SidebarView: View {
         // 點列設 model.selection，唯一的高亮圖層就是 listRowBackground。
         List {
             if !needsYou.isEmpty {
-                Section("等你（\(needsYou.count)）") {
+                Section(isExpanded: $needsYouExpanded) {
                     ForEach(needsYou) { row($0) }
+                } header: {
+                    Text("等你（\(needsYou.count)）")
                 }
             }
-            Section("進行中") {
+            Section(isExpanded: $runningExpanded) {
                 ForEach(running) { row($0) }
                     .onMove { from, to in
                         model.moveRunningTasks(running.map(\.id), from: from, to: to)
                     }
+            } header: {
+                Text("進行中（\(running.count)）")
             }
             if !read.isEmpty {
-                Section("已讀（看過待回，\(read.count)）") {
+                Section(isExpanded: $readExpanded) {
                     ForEach(read) { row($0) }
+                } header: {
+                    Text("已讀（看過待回，\(read.count)）")
                 }
             }
             if !waiting.isEmpty {
-                Section("等待外部（\(waiting.count)）") {
+                Section(isExpanded: $waitingExpanded) {
                     ForEach(waiting) { row($0) }
+                } header: {
+                    Text("等待外部（\(waiting.count)）")
                 }
             }
             if !semi.isEmpty {
