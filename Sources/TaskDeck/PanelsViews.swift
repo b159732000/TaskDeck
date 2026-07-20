@@ -50,7 +50,7 @@ struct SidebarView: View {
                 } header: {
                     Text("等你（\(needsYou.count)）")
                         .font(.system(size: 11, weight: .bold))
-                        .foregroundStyle(Theme.needsYou)
+                        .foregroundStyle(Theme.accent)
                 }
             }
             if !aiRunning.isEmpty {
@@ -152,6 +152,16 @@ struct SidebarView: View {
         }
     }
 
+    /// Row background tint, all in the one accent hue: selected 等你 is the
+    /// brightest, then plain selection, then an unselected 等你 hint, then a
+    /// faint hover. No second color — brightness alone ranks them.
+    private func rowFill(selected: Bool, needsYou: Bool, hovered: Bool) -> Color {
+        if selected { return Theme.accent.opacity(needsYou ? 0.30 : 0.16) }
+        if needsYou { return Theme.accent.opacity(0.11) }
+        if hovered { return Color.white.opacity(0.05) }
+        return .clear
+    }
+
     // needsYou is passed by the section (which already knows its group) so
     // the row never recomputes sidebarGroup — that ran per-row per-render and
     // starved the selection tint's repaint behind the detail-pane rebuild.
@@ -196,18 +206,17 @@ struct SidebarView: View {
         }
         // 高亮不看焦點：系統的選取高亮只在側邊欄有鍵盤焦點時飽和，焦點
         // 移去終端就變灰——自畫一層常駐選取底色（hover 給更淡的一階）。
-        // 「等你」任務再加一層暖橘底＋左側強調條，讓待確認的最醒目。
+        // 「等你」用同一主配色（accent）的深淺區分：未選一層淡底＋左側強調
+        // 條，選中再加深，不引入額外色相。
         .listRowBackground(
             ZStack(alignment: .leading) {
                 RoundedRectangle(cornerRadius: 6)
-                    .fill(model.selection == t.id
-                        ? Theme.accent.opacity(0.16)
-                        : (needsYou
-                            ? Theme.needsYou.opacity(0.12)
-                            : (hoveredSlug == t.id ? Color.white.opacity(0.05) : .clear)))
+                    .fill(rowFill(selected: model.selection == t.id,
+                                  needsYou: needsYou,
+                                  hovered: hoveredSlug == t.id))
                 if needsYou {
                     RoundedRectangle(cornerRadius: 1.5)
-                        .fill(Theme.needsYou)
+                        .fill(Theme.accent)
                         .frame(width: 3)
                         .padding(.vertical, 3)
                 }

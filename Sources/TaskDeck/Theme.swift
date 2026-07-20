@@ -82,10 +82,6 @@ enum Theme {
         UserDefaults.standard.object(forKey: "accentHex") as? UInt32 ?? 0x5B9DFF
     static var accent: Color { Color(hex: accentHexCurrent) }
 
-    /// Attention color for the 等你 section — warm amber, deliberately not the
-    /// (user-tunable) accent so "the ball is in your court" always stands out.
-    static let needsYou = Color(hex: 0xF2A63B)
-
     /// Solid, alpha-1 value: SwiftTerm uses it for inverse-video math
     /// (zsh highlights pasted text with standout = fg/bg swap — a clear
     /// color here painted pasted text invisibly). Glass is unaffected:
