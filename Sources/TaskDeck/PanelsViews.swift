@@ -152,11 +152,11 @@ struct SidebarView: View {
         }
     }
 
-    /// Row background tint, all in the one accent hue: selected 等你 is the
-    /// brightest, then plain selection, then an unselected 等你 hint, then a
-    /// faint hover. No second color — brightness alone ranks them.
+    /// Row background tint, all in the one accent hue: any selection is the
+    /// brightest, then an unselected 等你 hint, then a faint hover. No second
+    /// color — brightness alone ranks them.
     private func rowFill(selected: Bool, needsYou: Bool, hovered: Bool) -> Color {
-        if selected { return Theme.accent.opacity(needsYou ? 0.30 : 0.16) }
+        if selected { return Theme.accent.opacity(0.30) }
         if needsYou { return Theme.accent.opacity(0.11) }
         if hovered { return Color.white.opacity(0.05) }
         return .clear
