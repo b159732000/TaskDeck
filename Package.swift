@@ -5,10 +5,12 @@ let package = Package(
     name: "TaskDeck",
     platforms: [.macOS(.v14)],
     dependencies: [
-        // Fork adds `transparentBackground` (default-bg cells left unpainted
-        // so the glass shows through text rows) — candidate for upstream PR.
+        // Fork adds: `transparentBackground` (default-bg cells left unpainted
+        // so the glass shows through text rows) and inline IME marked-text
+        // rendering (composing CJK painted into the grid, not a floating
+        // bubble) — both candidates for upstream PR.
         .package(url: "https://github.com/b159732000/SwiftTerm.git",
-                 revision: "4c805c690721b8c8c4df2827c41d89fe84418df2"),
+                 revision: "d932d763921389e18d26effeb7433df280875c98"),
     ],
     targets: [
         .target(name: "TaskDeckCore"),
