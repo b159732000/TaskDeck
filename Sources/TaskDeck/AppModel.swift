@@ -923,7 +923,8 @@ final class TaskSession: ObservableObject {
     }
 
     /// 手動接管主力（配額之家）；自動偵測只顯示「現用」、永不改寫這裡。
-    func setPrimaryTeam(_ team: String) {
+    /// nil 清除主力（回到「設定主力」）。
+    func setPrimaryTeam(_ team: String?) {
         machine.primaryTeam = team
     }
 

@@ -287,7 +287,7 @@ struct TaskDetailView: View {
         case let (p?, a?) where p != a: return "主力 \(p) · 現用 \(a)"
         case let (p?, _): return "主力 \(p)"
         case let (nil, a?): return "主力未定 · 現用 \(a)"
-        default: return ""
+        default: return "設定主力"
         }
     }
 
@@ -299,40 +299,45 @@ struct TaskDetailView: View {
                     .lineLimit(1)
                 // 主力＝配額之家（手動指定）；現用＝最近有動靜的帳號（自動
                 // 偵測、只顯示不改寫）。不一致時亮橘提醒，點 chip 一鍵接管。
+                // Always shown so a shell-only task (no AI pane) can still be
+                // given a 主力 by hand. Dim "設定主力" when nothing is set yet.
                 let primary = session.machine.primaryTeam
                 let active = model.activeTeam(session.slug)
-                if primary != nil || active != nil {
-                    let mismatch = active != nil && primary != nil && active != primary
-                    Menu {
-                        if let active, mismatch {
-                            Button("改立 \(active) 為主力") { session.setPrimaryTeam(active) }
-                            Divider()
-                        }
-                        ForEach(model.config.teams) { t in
-                            Button {
-                                session.setPrimaryTeam(t.id)
-                            } label: {
-                                if t.id == primary {
-                                    Label(t.label, systemImage: "checkmark")
-                                } else {
-                                    Text(t.label)
-                                }
+                let unset = primary == nil && active == nil
+                let mismatch = active != nil && primary != nil && active != primary
+                let tint = mismatch ? Color.orange : (unset ? Color.secondary : Theme.accent)
+                Menu {
+                    if let active, mismatch {
+                        Button("改立 \(active) 為主力") { session.setPrimaryTeam(active) }
+                        Divider()
+                    }
+                    ForEach(model.config.teams) { t in
+                        Button {
+                            session.setPrimaryTeam(t.id)
+                        } label: {
+                            if t.id == primary {
+                                Label(t.label, systemImage: "checkmark")
+                            } else {
+                                Text(t.label)
                             }
                         }
-                    } label: {
-                        Text(primaryChipText(primary: primary, active: active))
-                            .font(.system(size: 10))
-                            .foregroundStyle(mismatch ? Color.orange : Theme.accent)
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
-                            .background((mismatch ? Color.orange : Theme.accent).opacity(0.14),
-                                        in: Capsule())
                     }
-                    .menuStyle(.borderlessButton)
-                    .menuIndicator(.hidden)
-                    .fixedSize()
-                    .help("主力＝任務的配額之家（手動指定）；現用＝最近有動靜的帳號（自動偵測）。點擊可改主力。")
+                    if primary != nil {
+                        Divider()
+                        Button("清除主力") { session.setPrimaryTeam(nil) }
+                    }
+                } label: {
+                    Text(primaryChipText(primary: primary, active: active))
+                        .font(.system(size: 10))
+                        .foregroundStyle(tint)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(tint.opacity(0.14), in: Capsule())
                 }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .help("主力＝任務的配額之家（手動指定）；現用＝最近有動靜的帳號（自動偵測）。點擊可改主力。")
                 Spacer()
                 ResourceMenu()
                 NewPaneMenu(labelStyle: .toolbar)
