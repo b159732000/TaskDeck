@@ -152,14 +152,6 @@ struct SidebarView: View {
 
     private func row(_ t: TaskNote) -> some View {
         HStack(spacing: 8) {
-            // 點點＝「終端層」的生命跡象（有無活著的 PTY，含 shell/dev
-            // server），與右側徽章（AI 對話狀態）是兩層互補資訊。
-            Circle()
-                .fill(model.taskHasLivePane(t.id) ? Color(hex: 0x8FCF7F) : Color.secondary.opacity(0.3))
-                .frame(width: 7, height: 7)
-                .help(model.taskHasLivePane(t.id)
-                    ? "有終端在跑（shell／dev server／AI 都算）"
-                    : "沒有運行中的終端")
             VStack(alignment: .leading, spacing: 1) {
                 Text(t.title)
                     .font(.system(size: 12.5 * model.uiScale))
@@ -172,16 +164,6 @@ struct SidebarView: View {
                 }
             }
             Spacer(minLength: 4)
-            // AI state at a glance: 🟢 running, 🟡 waiting for the user,
-            // 🔴 blocked on a permission prompt (hook-fed, live panes only).
-            // Click = "已看過" — hides until the state changes again.
-            if let badge = model.aiBadge(t.id) {
-                Button { model.ackAIStatus(t.id) } label: {
-                    Text(badge).font(.system(size: 9))
-                }
-                .buttonStyle(.plain)
-                .help("點一下＝已看過（狀態再變會重新亮起）")
-            }
         }
         .padding(.vertical, 1)
         // (d) hover 才浮出狀態切換：以 overlay 疊在列的右端——不進版面流，
