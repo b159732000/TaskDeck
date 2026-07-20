@@ -65,6 +65,22 @@ enum ChromeCDP {
         (try? await windows(port: port).map(\.id)).map(Set.init) ?? []
     }
 
+    /// Bring one of the given windows to the front by activating its first
+    /// tab (the REST endpoint raises the OS window too). Returns false when
+    /// none of the ids exist anymore — caller falls back to just activating
+    /// the app. Activation only; never opens/closes/navigates anything.
+    static func activateWindow(port: Int, windowIDs: Set<Int>) async -> Bool {
+        guard !windowIDs.isEmpty,
+              let wins = try? await windows(port: port),
+              let win = wins.first(where: { windowIDs.contains($0.id) }),
+              let tab = win.tabs.first,
+              let url = URL(string: "http://127.0.0.1:\(port)/json/activate/\(tab.targetID)")
+        else { return false }
+        guard let (_, resp) = try? await URLSession.shared.data(from: url),
+              (resp as? HTTPURLResponse)?.statusCode == 200 else { return false }
+        return true
+    }
+
     /// Close every tab of the given windows (closing all tabs closes the
     /// window). The ONLY write this client performs — scoped to windows the
     /// task explicitly remembered, so "close resource windows" can't touch

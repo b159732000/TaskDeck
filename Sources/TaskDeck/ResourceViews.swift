@@ -37,6 +37,51 @@ enum SafariScript {
         }
     }
 
+    /// Raise the Safari window containing a tab that matches one of the
+    /// task's Safari resource URLs (prefix match either way — live URLs grow
+    /// query strings). Returns false when Safari isn't running or nothing
+    /// matches; the caller then just activates Safari.
+    static func bringToFront(matching urls: [String]) -> Bool {
+        guard !urls.isEmpty,
+              !NSRunningApplication.runningApplications(
+                  withBundleIdentifier: "com.apple.Safari").isEmpty else { return false }
+        func esc(_ s: String) -> String {
+            s.replacingOccurrences(of: "\\", with: "\\\\")
+                .replacingOccurrences(of: "\"", with: "\\\"")
+        }
+        let items = urls.map { "\"" + esc($0) + "\"" }.joined(separator: ", ")
+        let script = """
+        set targets to {\(items)}
+        tell application "Safari"
+            repeat with w in windows
+                repeat with t in tabs of w
+                    set u to URL of t as string
+                    repeat with tgt in targets
+                        set tgtStr to tgt as string
+                        if (u starts with tgtStr) or (tgtStr starts with u) then
+                            set current tab of w to t
+                            set index of w to 1
+                            activate
+                            return "HIT"
+                        end if
+                    end repeat
+                end repeat
+            end repeat
+        end tell
+        return "MISS"
+        """
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        p.arguments = ["-e", script]
+        let pipe = Pipe()
+        p.standardOutput = pipe
+        p.standardError = FileHandle.nullDevice
+        guard (try? p.run()) != nil else { return false }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        p.waitUntilExit()
+        return (String(data: data, encoding: .utf8) ?? "").contains("HIT")
+    }
+
     static func windows() -> [Window] {
         // `tell app "Safari"` would LAUNCH Safari when it isn't running.
         let running = NSRunningApplication.runningApplications(
@@ -78,6 +123,34 @@ enum SafariScript {
         }
         return out.filter { !$0.tabs.isEmpty }
     }
+}
+
+/// The debug-profile Chrome's app process (matched by its debug port, so the
+/// user's daily Chrome is never touched). Runs pgrep off the main thread.
+private func devChromeApp(port: Int) async -> NSRunningApplication? {
+    let pids: [pid_t] = await Task.detached {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
+        p.arguments = ["-f", "remote-debugging-port=\(port)"]
+        let pipe = Pipe()
+        p.standardOutput = pipe
+        p.standardError = FileHandle.nullDevice
+        guard (try? p.run()) != nil else { return [] }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        p.waitUntilExit()
+        return (String(data: data, encoding: .utf8) ?? "")
+            .split(separator: "\n")
+            .compactMap { pid_t($0.trimmingCharacters(in: .whitespaces)) }
+    }.value
+    // Helpers share the command line; the browser process is the one that is
+    // an actual app (bundle com.google.Chrome).
+    for pid in pids {
+        if let app = NSRunningApplication(processIdentifier: pid),
+           app.bundleIdentifier == "com.google.Chrome" {
+            return app
+        }
+    }
+    return nil
 }
 
 // MARK: - Open / snapshot / close actions (per task)
@@ -211,6 +284,52 @@ extension TaskSession {
         return wrote
     }
 
+    // MARK: Bring to front（切到視窗所在的桌面）
+
+    /// Raise the task's Chrome resource window. macOS then switches to the
+    /// Space it lives on（系統設定「切換至 App 時切換空間」，預設開啟）。
+    /// Returns a user-facing note, or nil on a clean raise.
+    func bringChromeToFront() async -> String? {
+        let port = app.config.chromeDebugPort ?? 9222
+        let ids = Set(machine.rememberedChromeWindows)
+        let raised = await ChromeCDP.activateWindow(port: port, windowIDs: ids)
+        guard let chrome = await devChromeApp(port: port) else {
+            return "debug Chrome 沒在跑——先用「開啟全部資源」拉起來"
+        }
+        chrome.activate()
+        if raised { return nil }
+        return ids.isEmpty
+            ? "任務還沒記住 Chrome 視窗（開資源或快照一次即可）——已喚起 debug Chrome"
+            : "記住的視窗已不存在（Chrome 重啟過？）——已喚起 debug Chrome；快照一次可重新對號"
+    }
+
+    /// Raise the Safari window holding one of the task's Safari resources.
+    func bringSafariToFront() async -> String? {
+        let urls = resources.filter { $0.kind == .safari }.map(\.url)
+        let hit = await Task.detached { SafariScript.bringToFront(matching: urls) }.value
+        if hit { return nil }
+        guard let safari = NSRunningApplication.runningApplications(
+            withBundleIdentifier: "com.apple.Safari").first else {
+            return "Safari 沒在跑"
+        }
+        safari.activate()
+        return urls.isEmpty
+            ? "筆記沒有 Safari 資源——已喚起 Safari"
+            : "沒有分頁符合任務的 Safari 資源——已喚起 Safari"
+    }
+
+    /// Jump to the task's Slack conversations (deep links activate Slack and
+    /// switch Spaces on their own).
+    func jumpToSlack() -> String? {
+        let slack = resources.filter { $0.kind == .slack }
+        guard !slack.isEmpty else { return "筆記沒有 Slack 資源" }
+        for r in slack {
+            let link = ResourceOps.slackDeepLink(r.url, teamID: app.config.slackTeamID) ?? r.url
+            if let u = URL(string: link) { NSWorkspace.shared.open(u) }
+        }
+        return nil
+    }
+
     /// Close the Chrome windows this task remembered (opened via "open
     /// resources" or picked at snapshot). Tracked windows only — never a
     /// guess. Safari windows aren't tracked; closing them stays manual.
@@ -257,6 +376,23 @@ struct ResourceMenu: View {
                     }
                 }
             }
+            Divider()
+            let kinds = Set(session.resources.map(\.kind))
+            Button("帶到最前：Chrome 視窗") {
+                UsageLog.bump("resources.frontChrome")
+                Task { message = await session.bringChromeToFront() }
+            }
+            .disabled(!kinds.contains(.chrome) && session.machine.rememberedChromeWindows.isEmpty)
+            Button("帶到最前：Safari 視窗") {
+                UsageLog.bump("resources.frontSafari")
+                Task { message = await session.bringSafariToFront() }
+            }
+            .disabled(!kinds.contains(.safari))
+            Button("跳到 Slack 對話") {
+                UsageLog.bump("resources.frontSlack")
+                message = session.jumpToSlack()
+            }
+            .disabled(!kinds.contains(.slack))
             Divider()
             Button("關閉 Chrome 資源視窗", role: .destructive) {
                 UsageLog.bump("resources.closeWindows")
