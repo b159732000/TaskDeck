@@ -48,7 +48,7 @@ struct SidebarView: View {
                 Section(isExpanded: $needsYouExpanded) {
                     ForEach(needsYou) { row($0, needsYou: true) }
                 } header: {
-                    Label("等你（\(needsYou.count)）", systemImage: "bell.fill")
+                    Text("等你（\(needsYou.count)）")
                         .font(.system(size: 11, weight: .bold))
                         .foregroundStyle(Theme.needsYou)
                 }
