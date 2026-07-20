@@ -513,36 +513,44 @@ final class AppModel: ObservableObject {
         return Date().timeIntervalSince(last)
     }
 
-    // Grouping model (260720): LIVE AI SIGNALS ALWAYS WIN. Whenever the AI is
-    // running or owes the user something, that decides the group — even for a
-    // task manually parked in 等待外部/已讀. Manual placement only describes an
-    // otherwise-idle task. This is the coherent version of what kept surprising
-    // James: starting a chat must pull the task into AI 執行中; finishing must
-    // push it to 等你 — from any section.
+    // Grouping model (260720 v2): THE MOST RECENT EVENT WINS. An AI signal and
+    // a manual placement each carry a timestamp; whichever happened later
+    // decides the group. So a fresh chat pulls a parked task back to AI 執行中
+    // (AI event is newer), and manually moving a finished task to 等待外部
+    // sticks (the click is newer than the old Stop). An actively-running
+    // session is the one exception — it always wins (you can't park a task
+    // whose AI is mid-turn; it re-stamps itself every tool call anyway).
     func sidebarGroup(_ t: TaskNote) -> SidebarGroup {
         if t.status == "done" { return .done }
         let quiet = silence(t) ?? 0
 
-        // ── live AI signals: highest precedence, drive auto-switching ──
-        let attention = aiAttention(t.id)
-        if attention?.permission == true { return .needsYou } // 🔴 blocked on you
-        if aiRunningNow(t.id) { return .aiRunning }           // AI working right now
-        if attention != nil { return .needsYou }              // finished, awaits review
+        if aiRunningNow(t.id) { return .aiRunning } // actively running always wins
 
-        // ── no live AI signal: manual placement / idle default ──
+        // Manual placement is authoritative when it's at least as recent as the
+        // newest AI signal; otherwise the AI signal drives (finished→等你).
+        let parkedAt = t.groupSince.flatMap { Self.fmDate.date(from: $0) }
+        let lastAI = lastAIActivity(t.id)
+        let manualWins = parkedAt != nil && (lastAI == nil || parkedAt! >= lastAI!)
+
+        if !manualWins {
+            let attention = aiAttention(t.id)
+            if attention?.permission == true { return .needsYou } // 🔴 blocked on you
+            if attention != nil { return .needsYou }              // finished, awaits review
+        }
+
         if t.group == "waiting" {
             return quiet > Self.sinkAfter ? .semiArchived : .waitingExt
         }
         if t.group == "read" || hasAckedStop(t.id) {
             return quiet > Self.sinkAfter ? .semiArchived : .read
         }
-        return .idle // new / manual / expired signals
+        return .idle // new / no manual flag / expired signals
     }
 
     /// Set / clear the manual lifecycle flag ("waiting" 等待外部、"read"
-    /// 已讀、nil 移回進行中). Flagged tasks keep their badges but never jump
-    /// groups on AI signals — except 已讀 tasks, which a NEW unacked stop
-    /// signal naturally pulls back into 等你 (via the ack mechanism).
+    /// 已讀、nil 移回待開工). `group_since` is stamped to now so the placement
+    /// competes with AI signals by recency (see sidebarGroup): it wins until
+    /// the AI next does something, which then pulls the task back.
     func setGroupFlag(_ slug: String, _ flag: String?) {
         func transform(_ text: String) -> String {
             if let flag {
