@@ -505,23 +505,30 @@ final class AppModel: ObservableObject {
         return Date().timeIntervalSince(last)
     }
 
+    // Grouping model (260720): LIVE AI SIGNALS ALWAYS WIN. Whenever the AI is
+    // running or owes the user something, that decides the group — even for a
+    // task manually parked in 等待外部/已讀. Manual placement only describes an
+    // otherwise-idle task. This is the coherent version of what kept surprising
+    // James: starting a chat must pull the task into AI 執行中; finishing must
+    // push it to 等你 — from any section.
     func sidebarGroup(_ t: TaskNote) -> SidebarGroup {
         if t.status == "done" { return .done }
         let quiet = silence(t) ?? 0
+
+        // ── live AI signals: highest precedence, drive auto-switching ──
+        let attention = aiAttention(t.id)
+        if attention?.permission == true { return .needsYou } // 🔴 blocked on you
+        if aiRunningNow(t.id) { return .aiRunning }           // AI working right now
+        if attention != nil { return .needsYou }              // finished, awaits review
+
+        // ── no live AI signal: manual placement / idle default ──
         if t.group == "waiting" {
             return quiet > Self.sinkAfter ? .semiArchived : .waitingExt
         }
-        if t.group == "read" {
+        if t.group == "read" || hasAckedStop(t.id) {
             return quiet > Self.sinkAfter ? .semiArchived : .read
         }
-        let attention = aiAttention(t.id)
-        if attention?.permission == true { return .needsYou } // 🔴 blocked beats everything
-        if aiRunningNow(t.id) { return .aiRunning }           // AI working right now
-        if attention != nil { return .needsYou }
-        if hasAckedStop(t.id) {
-            return quiet > Self.sinkAfter ? .semiArchived : .read
-        }
-        return .idle // no AI activity at all — new / manual / expired
+        return .idle // new / manual / expired signals
     }
 
     /// Set / clear the manual lifecycle flag ("waiting" 等待外部、"read"
