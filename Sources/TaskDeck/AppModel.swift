@@ -442,6 +442,18 @@ final class AppModel: ObservableObject {
         return (permission, oldest)
     }
 
+    /// Any session actively running right now (hook-fresh within 30 min —
+    /// PreToolUse re-stamps the file on every tool call, so a live turn
+    /// stays fresh). While the AI is visibly working the user is engaged:
+    /// stale review debts from OLDER sessions must not pin the task in
+    /// 等你 (the PRO-1268 round two lesson, 260720).
+    private func aiRunningNow(_ slug: String) -> Bool {
+        taskAISessions(slug).contains { s in
+            guard let entry = statusEntry(sid: s.sid, team: s.team, cwd: s.cwd) else { return false }
+            return entry.state == "running" && Date().timeIntervalSince(entry.ts) < 1800
+        }
+    }
+
     /// Newest signal across the task's AI sessions (acked or not) —
     /// "last activity" for the sink rule.
     private func lastAIActivity(_ slug: String) -> Date? {
@@ -479,7 +491,10 @@ final class AppModel: ObservableObject {
         if t.group == "read" {
             return quiet > Self.sinkAfter ? .semiArchived : .read
         }
-        if aiAttention(t.id) != nil { return .needsYou }
+        let attention = aiAttention(t.id)
+        if attention?.permission == true { return .needsYou } // 🔴 blocked beats everything
+        if aiRunningNow(t.id) { return .running }             // actively working now
+        if attention != nil { return .needsYou }
         if hasAckedStop(t.id) {
             return quiet > Self.sinkAfter ? .semiArchived : .read
         }
