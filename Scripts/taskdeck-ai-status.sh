@@ -38,7 +38,12 @@ if event == "Notification":
 if not state:
     sys.exit(0)
 
-with open(f"{out_dir}/{sid}.json", "w") as f:
+# Atomic tmp+rename, NOT an in-place rewrite: the GUI watches the directory
+# with kqueue, which only fires on create/delete/RENAME — truncating the
+# existing file in place updates silently and the sidebar goes stale.
+tmp = f"{out_dir}/.{sid}.json.tmp"
+with open(tmp, "w") as f:
     json.dump({"session_id": sid, "state": state, "ts": time.time()}, f)
+os.replace(tmp, f"{out_dir}/{sid}.json")
 PY
 exit 0

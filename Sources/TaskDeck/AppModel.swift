@@ -38,6 +38,7 @@ final class AppModel: ObservableObject {
     private var dirWatcher: DispatchSourceFileSystemObject?
     private var dirFD: Int32 = -1
     private var quotaTimer: Timer?
+    private var statusTimer: Timer?
 
     /// AI session states from the Claude Code hook script
     /// (`Scripts/taskdeck-ai-status.sh` → `Paths.statusDir/<session>.json`):
@@ -90,6 +91,13 @@ final class AppModel: ObservableObject {
 
         quotaTimer = Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.refreshQuota() }
+        }
+
+        // Belt-and-suspenders for AI status: the dir watcher only fires on
+        // create/delete/rename, and time-based grouping rules (running
+        // freshness, sink thresholds) need periodic recomputation anyway.
+        statusTimer = Timer.scheduledTimer(withTimeInterval: 20, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.reloadAIStatus() }
         }
     }
 
@@ -442,6 +450,19 @@ final class AppModel: ObservableObject {
         return (permission, oldest)
     }
 
+    /// The team with the freshest signal across the task's sessions —
+    /// "現用" in the header chip. Display-only: never rewrites primaryTeam
+    /// (主力 is the task's quota home and stays a manual decision).
+    func activeTeam(_ slug: String) -> String? {
+        var best: (ts: Date, team: String)?
+        for s in taskAISessions(slug) {
+            guard let team = s.team,
+                  let entry = statusEntry(sid: s.sid, team: s.team, cwd: s.cwd) else { continue }
+            if best == nil || entry.ts > best!.ts { best = (entry.ts, team) }
+        }
+        return best?.team
+    }
+
     /// Any session actively running right now (hook-fresh within 30 min —
     /// PreToolUse re-stamps the file on every tool call, so a live turn
     /// stays fresh). While the AI is visibly working the user is engaged:
@@ -790,6 +811,7 @@ final class TaskSession: ObservableObject {
             noteText = TaskStore.appendSessionLine(noteText, line: "- \(team.id) \(sid)")
         }
         if machine.primaryTeam == nil { machine.primaryTeam = team.id }
+        // （之後想換配額之家：點標頭的主力 chip 手動改，系統不自動改寫。）
         add(spec, side: side)
     }
 
@@ -873,6 +895,11 @@ final class TaskSession: ObservableObject {
             machine.layout = LayoutOps.remove(layout, target: spec.id)
         }
         if focusedSpecID == spec.id { focusedSpecID = nil }
+    }
+
+    /// 手動接管主力（配額之家）；自動偵測只顯示「現用」、永不改寫這裡。
+    func setPrimaryTeam(_ team: String) {
+        machine.primaryTeam = team
     }
 
     func toggleAutoStart(_ spec: PaneSpec) {
