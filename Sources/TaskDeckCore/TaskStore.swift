@@ -213,7 +213,11 @@ public final class TaskStore {
         }
         let df = DateFormatter()
         df.dateFormat = "yyyy-MM-dd HH:mm"
-        write(final, template(title: final, created: df.string(from: Date())))
+        var text = template(title: final, created: df.string(from: Date()))
+        // Permanent identity: slugs are unique (filesystem dedupe) but
+        // change on rename; the frontmatter id survives everything.
+        text = Self.setFrontmatterValue(text, key: "id", value: UUID().uuidString.lowercased())
+        write(final, text)
         return final
     }
 

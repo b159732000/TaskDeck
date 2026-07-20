@@ -904,6 +904,16 @@ final class TaskSession: ObservableObject {
         machine.primaryTeam = team
     }
 
+    /// The task's permanent id (frontmatter `id`, rename-proof). Stamped at
+    /// creation since 260720; older notes get one lazily on first use.
+    func permanentID() -> String {
+        if let id = TaskStore.frontmatter(noteText)["id"], !id.isEmpty { return id }
+        let id = UUID().uuidString.lowercased()
+        noteText = TaskStore.setFrontmatterValue(noteText, key: "id", value: id)
+        flushNote()
+        return id
+    }
+
     func toggleAutoStart(_ spec: PaneSpec) {
         guard let i = machine.panes.firstIndex(where: { $0.id == spec.id }) else { return }
         machine.panes[i].autoStart.toggle()

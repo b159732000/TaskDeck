@@ -16,6 +16,24 @@ final class GlassTerminalView: TerminalView {
         super.viewDidMoveToWindow()
         layer?.backgroundColor = NSColor.clear.cgColor
     }
+
+    /// iTerm2 "natural text editing" essentials, sent as readline control
+    /// bytes: ⌘← beginning-of-line (^A), ⌘→ end-of-line (^E), ⌘⌫ kill to
+    /// line start (^U). Only when this terminal is the first responder —
+    /// never steals ⌘← from the notes editor — and only bare ⌘ (⌘⇧ etc.
+    /// pass through untouched).
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        let mods = event.modifierFlags.intersection([.command, .shift, .option, .control])
+        guard mods == .command, window?.firstResponder === self else {
+            return super.performKeyEquivalent(with: event)
+        }
+        switch event.keyCode {
+        case 123: send([0x01]); return true // ⌘←
+        case 124: send([0x05]); return true // ⌘→
+        case 51: send([0x15]); return true  // ⌘⌫
+        default: return super.performKeyEquivalent(with: event)
+        }
+    }
 }
 
 /// SwiftTerm view attached to a daemon-owned pane over the socket.

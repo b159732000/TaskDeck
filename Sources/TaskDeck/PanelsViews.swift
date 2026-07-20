@@ -221,7 +221,11 @@ struct SidebarView: View {
         .contentShape(Rectangle())
         .onTapGesture { model.selection = t.id }
         .contextMenu {
-            Button("複製 ID") {
+            Button("複製 ID（永久 UUID）") {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(model.session(t.id).permanentID(), forType: .string)
+            }
+            Button("複製任務名") {
                 NSPasteboard.general.clearContents()
                 NSPasteboard.general.setString(t.id, forType: .string)
             }
