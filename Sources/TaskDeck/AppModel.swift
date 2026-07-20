@@ -460,17 +460,39 @@ final class AppModel: ObservableObject {
         return (permission, oldest)
     }
 
-    /// The team with the freshest signal across the task's sessions —
-    /// "現用" in the header chip. Display-only: never rewrites primaryTeam
-    /// (主力 is the task's quota home and stays a manual decision).
-    func activeTeam(_ slug: String) -> String? {
-        var best: (ts: Date, team: String)?
-        for s in taskAISessions(slug) {
-            guard let team = s.team,
-                  let entry = statusEntry(sid: s.sid, team: s.team, cwd: s.cwd) else { continue }
-            if best == nil || entry.ts > best!.ts { best = (entry.ts, team) }
+    /// Ground-truth account for a session: which team's CLAUDE_CONFIG_DIR
+    /// actually holds its conversation file. This beats the manifest's
+    /// recorded team, which is only a guess made at creation and is wrong
+    /// whenever the session was started/switched to a different account by
+    /// hand (the 平滑著色 case: manifest said claude, the file lived in
+    /// claude-team3). nil when no team's dir has it (unknown).
+    private func teamFromSessionFile(_ sid: String) -> String? {
+        for team in config.teams {
+            guard let dir = team.configDir else { continue }
+            let projects = URL(fileURLWithPath: Paths.expand(dir)).appendingPathComponent("projects")
+            guard let subs = try? FileManager.default.contentsOfDirectory(
+                at: projects, includingPropertiesForKeys: nil) else { continue }
+            for sub in subs where FileManager.default.fileExists(
+                atPath: sub.appendingPathComponent("\(sid).jsonl").path) {
+                return team.id
+            }
         }
-        return best?.team
+        return nil
+    }
+
+    /// The account currently working on the task — "現用" in the header chip.
+    /// The freshest-signal session's REAL account (resolved from its file
+    /// location), falling back to the manifest team only when the file can't
+    /// be found. Display-only: never rewrites primaryTeam (主力 is the manual
+    /// quota home).
+    func activeTeam(_ slug: String) -> String? {
+        var best: (ts: Date, sid: String, team: String?)?
+        for s in taskAISessions(slug) {
+            guard let entry = statusEntry(sid: s.sid, team: s.team, cwd: s.cwd) else { continue }
+            if best == nil || entry.ts > best!.ts { best = (entry.ts, s.sid, s.team) }
+        }
+        guard let best else { return nil }
+        return teamFromSessionFile(best.sid) ?? best.team
     }
 
     /// Any session actively running right now (hook-fresh within 30 min —
