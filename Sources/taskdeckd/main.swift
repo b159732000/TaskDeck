@@ -37,6 +37,12 @@ final class Pane {
     private(set) var ring = [UInt8]()
     private var readSource: DispatchSourceRead?
     private var procSource: DispatchSourceProcess?
+    // Output that couldn't be written yet (PTY buffer full). Flushed by an
+    // event-driven write source — never by spinning, which would wedge the
+    // shared state queue (see writeBytes).
+    private var pendingWrite = [UInt8]()
+    private var writeSource: DispatchSourceWrite?
+    private static let pendingCap = 4 * 1024 * 1024
     unowned let server: Server
 
     static let ringCap = 512 * 1024
@@ -113,19 +119,68 @@ final class Pane {
         writeBytes(Array((command + "\n").utf8))
     }
 
+    // Non-blocking write. Historically this spun with usleep on EAGAIN — but
+    // it runs on the shared serial state queue, and the read/drain that would
+    // empty the PTY is queued behind it, so a full PTY buffer (child stopped
+    // reading) deadlocked the entire daemon. Now: write what we can, buffer
+    // the rest, and let an event-driven write source flush it when the fd is
+    // writable again. Never blocks the queue.
     func writeBytes(_ bytes: [UInt8]) {
         guard master >= 0 else { return }
+        if !pendingWrite.isEmpty {
+            appendPending(bytes[...]) // keep byte order behind what's queued
+            return
+        }
         var slice = bytes[...]
         while !slice.isEmpty {
             let n = slice.withUnsafeBytes { Darwin.write(master, $0.baseAddress, $0.count) }
             if n > 0 {
                 slice = slice.dropFirst(n)
-            } else if errno == EAGAIN || errno == EINTR {
-                usleep(2000)
+            } else if errno == EINTR {
+                continue
+            } else if errno == EAGAIN || errno == EWOULDBLOCK {
+                appendPending(slice)
+                startWriteSource()
+                return
             } else {
+                return // hard error (e.g. pane closed)
+            }
+        }
+    }
+
+    private func appendPending(_ slice: ArraySlice<UInt8>) {
+        pendingWrite.append(contentsOf: slice)
+        if pendingWrite.count > Pane.pendingCap {
+            // Child isn't draining; cap the backlog rather than grow forever.
+            pendingWrite.removeFirst(pendingWrite.count - Pane.pendingCap)
+            dlog("pane \(id) write backlog capped (child not reading?)")
+        }
+    }
+
+    private func startWriteSource() {
+        guard writeSource == nil, master >= 0 else { return }
+        let ws = DispatchSource.makeWriteSource(fileDescriptor: master, queue: server.queue)
+        ws.setEventHandler { [weak self] in self?.flushPending() }
+        ws.activate()
+        writeSource = ws
+    }
+
+    private func flushPending() {
+        while !pendingWrite.isEmpty {
+            let n = pendingWrite.withUnsafeBytes { Darwin.write(master, $0.baseAddress, $0.count) }
+            if n > 0 {
+                pendingWrite.removeFirst(n)
+            } else if errno == EINTR {
+                continue
+            } else if errno == EAGAIN || errno == EWOULDBLOCK {
+                return // stay subscribed; fire again when writable
+            } else {
+                pendingWrite.removeAll()
                 break
             }
         }
+        writeSource?.cancel()
+        writeSource = nil
     }
 
     private func drain() {
@@ -152,6 +207,9 @@ final class Pane {
     private func closeMaster() {
         readSource?.cancel()
         readSource = nil
+        writeSource?.cancel()
+        writeSource = nil
+        pendingWrite.removeAll()
         if master >= 0 {
             close(master)
             master = -1
