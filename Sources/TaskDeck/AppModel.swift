@@ -880,6 +880,32 @@ final class TaskSession: ObservableObject {
             side: side)
     }
 
+    /// Session ids written anywhere in the note that map to a real on-disk
+    /// conversation but aren't already an open pane — i.e. sessions the app
+    /// didn't create (started by hand in a shell, pasted from `/status`,
+    /// left over after a reboot). Each carries the account resolved from its
+    /// file location, so resuming uses the right claude. Lets the user get
+    /// back into a task's conversation the app was never told about.
+    func resumableSessions() -> [(sid: String, team: String)] {
+        let ids = Set(noteText.ranges(of: try! Regex(
+            "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"))
+            .map { String(noteText[$0]) })
+        let openSids = Set(machine.panes.compactMap { $0.sessionID })
+        var out: [(String, String)] = []
+        for sid in ids.sorted() where sid != TaskStore.frontmatter(noteText)["id"]
+            && !openSids.contains(sid) {
+            if let team = app.teamFromSessionFile(sid) { out.append((sid, team)) }
+        }
+        return out
+    }
+
+    /// Open a pane that resumes an existing session under its real account
+    /// (`<team> -r <sid>` succeeds because the conversation exists).
+    func resumeSession(sid: String, team: String) {
+        let args = app.config.teams.first(where: { $0.id == team })?.args
+        add(PaneSpec(title: team, kind: "ai", team: team, sessionID: sid, extraArgs: args))
+    }
+
     private func add(_ spec: PaneSpec, side: Bool = false) {
         var spec = spec
         if side { spec.location = "side" }

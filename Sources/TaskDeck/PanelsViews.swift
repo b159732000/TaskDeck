@@ -488,6 +488,17 @@ struct NewPaneMenu: View {
             ForEach(model.config.teams) { team in
                 Button("AI · \(team.label)") { session.addAIPane(team: team, side: side) }
             }
+            // Sessions found in the note (started by hand / pasted / post-reboot)
+            // that map to a real conversation — resume under the right account.
+            let resumable = session.resumableSessions()
+            if !resumable.isEmpty {
+                Divider()
+                ForEach(resumable, id: \.sid) { r in
+                    Button("續上：\(r.team) · \(r.sid.prefix(8))") {
+                        session.resumeSession(sid: r.sid, team: r.team)
+                    }
+                }
+            }
             Divider()
             Button("指令（server / 腳本）…") { showCommandSheet = true }
         } label: {
