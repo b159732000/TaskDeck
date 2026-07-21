@@ -17,41 +17,40 @@ final class GlassTerminalView: TerminalView {
         layer?.backgroundColor = NSColor.clear.cgColor
     }
 
-    /// Shift+Return → newline, not submit. SwiftTerm sends a bare CR for both
-    /// plain and shifted Return (main Return isn't a kitty functional key
-    /// upstream), so Claude Code can't tell them apart and Shift+Enter
-    /// submits. Emit a distinct sequence: the kitty CSI-u encoding for
-    /// Shift+Enter when the app enabled the kitty keyboard protocol, else
-    /// ESC+CR (meta-return), which Claude reads as insert-newline.
-    override func keyDown(with event: NSEvent) {
-        if event.keyCode == 36, // kVK_Return (main Return)
-           event.modifierFlags.intersection([.command, .control, .option, .shift]) == .shift {
+    /// Key interception. TerminalView overrides `keyDown` as non-open so we
+    /// can't subclass it; `performKeyEquivalent` (open on NSView, called
+    /// before keyDown for the key window) is where we intercept.
+    /// Only when this terminal is first responder — never steals keys from
+    /// the notes editor.
+    ///   • Shift+Return → newline, not submit. SwiftTerm sends a bare CR for
+    ///     both plain and shifted Return (main Return isn't a kitty functional
+    ///     key upstream), so Claude Code saw Shift+Enter as Enter and
+    ///     submitted. Emit a distinct sequence: kitty CSI-u for Shift+Enter
+    ///     when the app negotiated the kitty protocol, else ESC+CR
+    ///     (meta-return) — both read as insert-newline.
+    ///   • iTerm2 "natural text editing": ⌘← ^A, ⌘→ ^E, ⌘⌫ ^U.
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        guard window?.firstResponder === self else {
+            return super.performKeyEquivalent(with: event)
+        }
+        let mods = event.modifierFlags.intersection([.command, .shift, .option, .control])
+        if event.keyCode == 36, mods == .shift { // Shift+Return
             if terminal?.keyboardEnhancementFlags.isEmpty == false {
                 send(txt: "\u{1b}[13;2u")
             } else {
                 send([0x1b, 0x0d])
             }
-            return
+            return true
         }
-        super.keyDown(with: event)
-    }
-
-    /// iTerm2 "natural text editing" essentials, sent as readline control
-    /// bytes: ⌘← beginning-of-line (^A), ⌘→ end-of-line (^E), ⌘⌫ kill to
-    /// line start (^U). Only when this terminal is the first responder —
-    /// never steals ⌘← from the notes editor — and only bare ⌘ (⌘⇧ etc.
-    /// pass through untouched).
-    override func performKeyEquivalent(with event: NSEvent) -> Bool {
-        let mods = event.modifierFlags.intersection([.command, .shift, .option, .control])
-        guard mods == .command, window?.firstResponder === self else {
-            return super.performKeyEquivalent(with: event)
+        if mods == .command {
+            switch event.keyCode {
+            case 123: send([0x01]); return true // ⌘←
+            case 124: send([0x05]); return true // ⌘→
+            case 51: send([0x15]); return true  // ⌘⌫
+            default: break
+            }
         }
-        switch event.keyCode {
-        case 123: send([0x01]); return true // ⌘←
-        case 124: send([0x05]); return true // ⌘→
-        case 51: send([0x15]); return true  // ⌘⌫
-        default: return super.performKeyEquivalent(with: event)
-        }
+        return super.performKeyEquivalent(with: event)
     }
 }
 
