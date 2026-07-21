@@ -177,6 +177,13 @@ struct SidebarView: View {
                         .foregroundStyle(.tertiary)
                         .lineLimit(1)
                 }
+                // User-typed latest status（詳情頁頂端可編輯；設定檔案 frontmatter latest）
+                if let s = t.statusLine, !s.isEmpty {
+                    Text(s)
+                        .font(.system(size: 10 * model.uiScale))
+                        .foregroundStyle(Theme.accent.opacity(0.9))
+                        .lineLimit(1)
+                }
             }
             Spacer(minLength: 4)
         }
@@ -287,6 +294,30 @@ struct DaemonStatusView: View {
     }
 }
 
+/// One-line "latest status" the user types (frontmatter `latest`), mirrored
+/// under the sidebar title. Commits on Enter or when focus leaves.
+struct StatusLineField: View {
+    @EnvironmentObject var session: TaskSession
+    @State private var text = ""
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "text.line.first.and.arrowtriangle.forward")
+                .font(.system(size: 9))
+                .foregroundStyle(.tertiary)
+            TextField("最新狀態…（例：07201822 等 QA）", text: $text)
+                .textFieldStyle(.plain)
+                .font(.system(size: 11))
+                .foregroundStyle(Theme.accent)
+                .focused($focused)
+                .onSubmit { session.setLatestStatus(text) }
+                .onChange(of: focused) { f in if !f { session.setLatestStatus(text) } }
+                .task(id: session.slug) { text = session.latestStatus }
+        }
+    }
+}
+
 struct TaskDetailView: View {
     @EnvironmentObject var model: AppModel
     @EnvironmentObject var session: TaskSession
@@ -359,6 +390,11 @@ struct TaskDetailView: View {
             }
             .padding(.horizontal, 12)
             .frame(height: 36)
+
+            // Editable one-line status — shows under the sidebar title too.
+            StatusLineField()
+                .padding(.horizontal, 12)
+                .padding(.bottom, 6)
 
             Rectangle().fill(Theme.border).frame(height: 1)
 

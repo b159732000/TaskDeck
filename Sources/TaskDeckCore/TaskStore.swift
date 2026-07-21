@@ -16,6 +16,9 @@ public struct TaskNote: Identifiable, Equatable {
     /// "yyyy-MM-dd HH:mm"; legacy key `waiting_since` still read) — drives
     /// the >72h semi-archive and >30d auto-done buckets.
     public var groupSince: String?
+    /// User-typed one-line status shown under the sidebar title (frontmatter
+    /// `latest`), e.g. "07201822 等 QA". Free text, single line.
+    public var statusLine: String? = nil
 }
 
 public struct PaneSpec: Codable, Identifiable, Equatable {
@@ -179,7 +182,8 @@ public final class TaskStore {
                                 created: fm["created"],
                                 path: url,
                                 group: fm["group"],
-                                groupSince: fm["group_since"] ?? fm["waiting_since"]))
+                                groupSince: fm["group_since"] ?? fm["waiting_since"],
+                                statusLine: fm["latest"]))
         }
         out.sort { a, b in
             if a.status != b.status { return a.status == "active" }

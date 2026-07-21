@@ -876,6 +876,22 @@ final class TaskSession: ObservableObject {
         }
     }
 
+    /// User-typed one-line status (frontmatter `latest`), shown under the
+    /// sidebar title. Free text; empty clears it.
+    var latestStatus: String { TaskStore.frontmatter(noteText)["latest"] ?? "" }
+
+    func setLatestStatus(_ s: String) {
+        let v = s.replacingOccurrences(of: "\n", with: " ")
+            .trimmingCharacters(in: .whitespaces)
+        let cur = TaskStore.frontmatter(noteText)["latest"] ?? ""
+        guard v != cur else { return }
+        noteText = v.isEmpty
+            ? TaskStore.removeFrontmatterKey(noteText, key: "latest")
+            : TaskStore.setFrontmatterValue(noteText, key: "latest", value: v)
+        flushNote()
+        app.rescan() // refresh the sidebar row immediately
+    }
+
     /// Pick up edits made to the note OUTSIDE the app (Obsidian, vault sync):
     /// manually-added session ids, resource links, notes. Skipped when an
     /// in-app edit is pending so we never clobber unsaved typing; the reload
