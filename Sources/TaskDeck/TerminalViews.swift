@@ -335,17 +335,49 @@ struct PaneContainerView: View {
                 .font(.system(size: 11 * model.uiScale, weight: .medium))
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
-            // Prefer the session's real account (file location) over the
-            // spec's recorded team, which can be stale if a different claude
-            // was run in the pane.
-            if let spec, spec.kind == "ai",
-               let team = spec.sessionID.flatMap({ model.teamFromSessionFile($0) }) ?? spec.team {
-                Text(team)
-                    .font(.system(size: 9, weight: .medium))
-                    .foregroundStyle(Theme.accent)
-                    .padding(.horizontal, 5)
-                    .padding(.vertical, 1.5)
-                    .background(Theme.accent.opacity(0.14), in: Capsule())
+            // Account badge, clickable. Prefer the session's real account
+            // (file location) over the spec's recorded team, which drifts when
+            // a different claude was run in the pane. The menu lets you correct
+            // the account, or rebind the pane to the session it's ACTUALLY
+            // running (fixes the task's group / 現用 / attribution).
+            if let spec, spec.kind == "ai" {
+                let shown = spec.sessionID.flatMap { model.teamFromSessionFile($0) } ?? spec.team ?? "?"
+                Menu {
+                    Section("這個終端的帳號") {
+                        ForEach(model.config.teams.filter { $0.kind == "claude" }) { t in
+                            Button {
+                                session.rebindPane(specID: spec.id, team: t.id, sid: nil)
+                            } label: {
+                                if t.id == spec.team { Label(t.label, systemImage: "checkmark") }
+                                else { Text(t.label) }
+                            }
+                        }
+                    }
+                    let recents = model.recentSessions(cwd: Paths.expand(spec.cwd ?? model.config.defaultCwd))
+                    if !recents.isEmpty {
+                        Section("重新綁定到實際 session（近期）") {
+                            ForEach(recents, id: \.sid) { r in
+                                Button {
+                                    session.rebindPane(specID: spec.id, team: r.team, sid: r.sid)
+                                } label: {
+                                    let mark = r.sid == spec.sessionID ? "● " : ""
+                                    Text("\(mark)\(r.team) · \(r.sid.prefix(8))")
+                                }
+                            }
+                        }
+                    }
+                } label: {
+                    Text(shown)
+                        .font(.system(size: 9, weight: .medium))
+                        .foregroundStyle(Theme.accent)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1.5)
+                        .background(Theme.accent.opacity(0.14), in: Capsule())
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .help("點擊：改這個終端的帳號，或重新綁定到它實際在跑的 session")
             }
             if spec?.autoStart == true {
                 Image(systemName: "bolt.fill")

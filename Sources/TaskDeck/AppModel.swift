@@ -484,6 +484,30 @@ final class AppModel: ObservableObject {
         return nil
     }
 
+    /// Recent conversations on disk for `cwd`, across every team account —
+    /// (team, sid, modified). Powers the pane "rebind to the real session"
+    /// picker when the app's recorded session drifted from what's running.
+    func recentSessions(cwd: String, limit: Int = 10) -> [(team: String, sid: String, at: Date)] {
+        let fm = FileManager.default
+        let slug = Paths.expand(cwd)
+            .replacingOccurrences(of: "/", with: "-").replacingOccurrences(of: ".", with: "-")
+        var out: [(String, String, Date)] = []
+        for team in config.teams {
+            guard let dir = team.configDir else { continue }
+            let proj = URL(fileURLWithPath: Paths.expand(dir))
+                .appendingPathComponent("projects/\(slug)")
+            guard let items = try? fm.contentsOfDirectory(
+                at: proj, includingPropertiesForKeys: [.contentModificationDateKey]) else { continue }
+            for f in items where f.pathExtension == "jsonl" {
+                let sid = f.deletingPathExtension().lastPathComponent
+                let mt = (try? f.resourceValues(forKeys: [.contentModificationDateKey]))?
+                    .contentModificationDate ?? .distantPast
+                out.append((team.id, sid, mt))
+            }
+        }
+        return out.sorted { $0.2 > $1.2 }.prefix(limit).map { $0 }
+    }
+
     /// The account currently working on the task — "現用" in the header chip.
     /// The freshest-signal session's REAL account (resolved from its file
     /// location), falling back to the manifest team only when the file can't
@@ -904,6 +928,24 @@ final class TaskSession: ObservableObject {
     func resumeSession(sid: String, team: String) {
         let args = app.config.teams.first(where: { $0.id == team })?.args
         add(PaneSpec(title: team, kind: "ai", team: team, sessionID: sid, extraArgs: args))
+    }
+
+    /// Point an AI pane's spec at the account/session it's ACTUALLY running,
+    /// when it drifted from what the app pre-generated (user ran a different
+    /// claude by hand, resumed another session, etc.). Fixes attribution so
+    /// the task's group / 現用 / badge reflect reality — without restarting
+    /// the live pane. Also records the id in the note manifest so it survives
+    /// reboots. `sid` nil = just correct the account label.
+    func rebindPane(specID: String, team: String, sid: String?) {
+        guard let i = machine.panes.firstIndex(where: { $0.id == specID }) else { return }
+        machine.panes[i].team = team
+        machine.panes[i].extraArgs = app.config.teams.first(where: { $0.id == team })?.args
+        if let sid, !sid.isEmpty {
+            machine.panes[i].sessionID = sid
+            if !TaskStore.manifestLines(noteText).contains(where: { $0.contains(sid) }) {
+                noteText = TaskStore.appendSessionLine(noteText, line: "- \(team) \(sid)")
+            }
+        }
     }
 
     private func add(_ spec: PaneSpec, side: Bool = false) {
