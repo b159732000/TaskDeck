@@ -757,8 +757,8 @@ struct QuotaFooterView: View {
                         .frame(width: 24, height: 18)
                 } else {
                     HeaderIconButton(icon: "arrow.clockwise",
-                                     help: "重新讀取（每 5 分鐘自動更新，全 app 共用一份）") {
-                        model.refreshQuota()
+                                     help: "強制重新抓取最新（略過快取）；每 5 分鐘也會自動更新") {
+                        model.refreshQuota(force: true)
                     }
                 }
             }

@@ -754,8 +754,13 @@ final class AppModel: ObservableObject {
 
     // MARK: - Quota
 
-    func refreshQuota() {
-        guard let cmd = config.quotaCommand, !cmd.isEmpty, !quotaBusy else { return }
+    /// `force` = a manual refresh: bypass the quota tool's cache so the button
+    /// actually re-fetches. Auto refreshes (timer / launch) keep the
+    /// configured `--max-age` so they share the cache and don't hit the API
+    /// rate limit. Appending `--max-age 0` wins over any configured value.
+    func refreshQuota(force: Bool = false) {
+        guard var cmd = config.quotaCommand, !cmd.isEmpty, !quotaBusy else { return }
+        if force { cmd += " --max-age 0" }
         quotaBusy = true
         Task.detached(priority: .utility) {
             let errPath = "/tmp/taskdeck-quota.err"

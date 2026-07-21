@@ -68,6 +68,16 @@ final class Pane {
         var ws = winsize(ws_row: UInt16(rows), ws_col: UInt16(cols), ws_xpixel: 0, ws_ypixel: 0)
 
         var env = ProcessInfo.processInfo.environment
+        // A pane must be a fresh login terminal, not inherit the environment
+        // of whatever launched the app. When JamesDesk is started from inside
+        // a Claude Code session (e.g. a dev relaunch), that session injects
+        // CLAUDE_* vars — notably CLAUDE_CONFIG_DIR, which PINS the account —
+        // and they would leak into every pane, so plain `claude` (and the
+        // account aliases) resolve the wrong config dir. Strip them; the
+        // login shell re-establishes anything the user actually wants.
+        for key in env.keys where key.hasPrefix("CLAUDE") || key == "CLAUDECODE" {
+            env.removeValue(forKey: key)
+        }
         env["TERM"] = "xterm-256color"
         env["COLORTERM"] = "truecolor"
         if env["LANG"] == nil { env["LANG"] = "en_US.UTF-8" }
