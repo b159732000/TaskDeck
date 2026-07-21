@@ -15,6 +15,48 @@ final class GlassTerminalView: TerminalView {
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         layer?.backgroundColor = NSColor.clear.cgColor
+        // Accept dropped files (images, etc.) like iTerm2 — the path is typed
+        // into the pane so claude (or any CLI) can read it.
+        registerForDraggedTypes([.fileURL])
+    }
+
+    // MARK: - File drag & drop → insert path(s)
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        hasDroppableFiles(sender) ? .copy : []
+    }
+
+    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
+        hasDroppableFiles(sender) ? .copy : []
+    }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        let opts: [NSPasteboard.ReadingOptionKey: Any] = [.urlReadingFileURLsOnly: true]
+        guard let urls = sender.draggingPasteboard.readObjects(
+            forClasses: [NSURL.self], options: opts) as? [URL], !urls.isEmpty else { return false }
+        // Space-joined, shell-escaped paths + a trailing space, exactly like
+        // dropping a file into iTerm2; claude reads the path (images included).
+        let text = urls.map { Self.shellEscape($0.path) }.joined(separator: " ") + " "
+        window?.makeFirstResponder(self)
+        send(txt: text)
+        return true
+    }
+
+    private func hasDroppableFiles(_ sender: NSDraggingInfo) -> Bool {
+        sender.draggingPasteboard.canReadObject(
+            forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true])
+    }
+
+    /// Backslash-escape characters the shell / prompt would otherwise split on
+    /// (spaces, quotes, globs…), so a path with spaces arrives as one token.
+    static func shellEscape(_ path: String) -> String {
+        let special = Set(" \t\n\"'\\()[]{}$&;|<>*?!#`~")
+        var out = ""
+        for ch in path {
+            if special.contains(ch) { out.append("\\") }
+            out.append(ch)
+        }
+        return out
     }
 
     /// Key interception. TerminalView overrides `keyDown` as non-open so we
