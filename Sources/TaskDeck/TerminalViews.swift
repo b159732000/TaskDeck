@@ -17,6 +17,25 @@ final class GlassTerminalView: TerminalView {
         layer?.backgroundColor = NSColor.clear.cgColor
     }
 
+    /// Shift+Return → newline, not submit. SwiftTerm sends a bare CR for both
+    /// plain and shifted Return (main Return isn't a kitty functional key
+    /// upstream), so Claude Code can't tell them apart and Shift+Enter
+    /// submits. Emit a distinct sequence: the kitty CSI-u encoding for
+    /// Shift+Enter when the app enabled the kitty keyboard protocol, else
+    /// ESC+CR (meta-return), which Claude reads as insert-newline.
+    override func keyDown(with event: NSEvent) {
+        if event.keyCode == 36, // kVK_Return (main Return)
+           event.modifierFlags.intersection([.command, .control, .option, .shift]) == .shift {
+            if terminal?.keyboardEnhancementFlags.isEmpty == false {
+                send(txt: "\u{1b}[13;2u")
+            } else {
+                send([0x1b, 0x0d])
+            }
+            return
+        }
+        super.keyDown(with: event)
+    }
+
     /// iTerm2 "natural text editing" essentials, sent as readline control
     /// bytes: ⌘← beginning-of-line (^A), ⌘→ end-of-line (^E), ⌘⌫ kill to
     /// line start (^U). Only when this terminal is the first responder —
