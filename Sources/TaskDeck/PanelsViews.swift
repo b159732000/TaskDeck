@@ -8,6 +8,8 @@ struct SidebarView: View {
     @State private var renamingSlug: String?
     @State private var renameText = ""
     @State private var deletingSlug: String?
+    @State private var statusSlug: String?
+    @State private var statusText = ""
     @State private var hoveredSlug: String?
     @AppStorage("needsYouSectionExpanded") private var needsYouExpanded = true
     @AppStorage("aiRunningSectionExpanded") private var aiRunningExpanded = true
@@ -134,6 +136,23 @@ struct SidebarView: View {
         } message: {
             Text("同步改筆記檔名與標題")
         }
+        .alert("最新狀態", isPresented: Binding(
+            get: { statusSlug != nil },
+            set: { if !$0 { statusSlug = nil } }
+        )) {
+            TextField("例：07201822 等 QA", text: $statusText)
+            Button("確定") {
+                if let slug = statusSlug { model.session(slug).setLatestStatus(statusText) }
+                statusSlug = nil
+            }
+            Button("清除", role: .destructive) {
+                if let slug = statusSlug { model.session(slug).setLatestStatus("") }
+                statusSlug = nil
+            }
+            Button("取消", role: .cancel) { statusSlug = nil }
+        } message: {
+            Text("顯示在側欄任務名稱下方（存進筆記，跨機同步）")
+        }
         .alert("徹底刪除任務", isPresented: Binding(
             get: { deletingSlug != nil },
             set: { if !$0 { deletingSlug = nil } }
@@ -248,6 +267,10 @@ struct SidebarView: View {
             Button("重新命名…") {
                 renameText = t.id
                 renamingSlug = t.id
+            }
+            Button("設定最新狀態…") {
+                statusText = t.statusLine ?? ""
+                statusSlug = t.id
             }
             Button("在新視窗開啟") { openWindow(id: "task", value: t.id) }
             Button("在 Obsidian 開啟") { model.openInObsidian(t.id) }
