@@ -41,9 +41,15 @@ if not state:
 # Atomic tmp+rename, NOT an in-place rewrite: the GUI watches the directory
 # with kqueue, which only fires on create/delete/RENAME — truncating the
 # existing file in place updates silently and the sidebar goes stale.
+rec = {"session_id": sid, "state": state, "ts": time.time()}
+# The pane (via taskdeckd) exports TASKDECK_TASK; record it so the app can
+# attribute this session to its task regardless of how it was started.
+task = os.environ.get("TASKDECK_TASK")
+if task:
+    rec["task"] = task
 tmp = f"{out_dir}/.{sid}.json.tmp"
 with open(tmp, "w") as f:
-    json.dump({"session_id": sid, "state": state, "ts": time.time()}, f)
+    json.dump(rec, f)
 os.replace(tmp, f"{out_dir}/{sid}.json")
 PY
 exit 0

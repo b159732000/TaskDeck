@@ -82,6 +82,11 @@ final class Pane {
         env["COLORTERM"] = "truecolor"
         if env["LANG"] == nil { env["LANG"] = "en_US.UTF-8" }
         env["TASKDECK"] = "1"
+        // Tag the pane with its task so the AI-status hook can record which
+        // task a session belongs to — attributes ANY session started here
+        // (auto-resume, manual, account switch), not just what the app
+        // launched. Fixes the recurring "app tracks the wrong session" group.
+        if !taskID.isEmpty { env["TASKDECK_TASK"] = taskID }
         for (k, v) in extraEnv { env[k] = v }
 
         // Everything the child touches must be prepared before fork.

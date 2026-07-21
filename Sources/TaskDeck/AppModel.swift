@@ -44,6 +44,9 @@ final class AppModel: ObservableObject {
     /// (`Scripts/taskdeck-ai-status.sh` → `Paths.statusDir/<session>.json`):
     /// sessionID → (running | waiting | permission | ended, written-at).
     @Published var aiStatus: [String: (state: String, ts: Date)] = [:]
+    /// session id → task slug, from the hook's `task` field (pane's
+    /// TASKDECK_TASK). Auto-attributes sessions to tasks however they started.
+    @Published var sessionTask: [String: String] = [:]
     /// "已看過"：sessionID → the status timestamp the user acknowledged by
     /// clicking the badge. Entries at or before this ts stop showing; the
     /// next state change (newer ts) lights the badge again.
@@ -333,6 +336,13 @@ final class AppModel: ObservableObject {
         // unknown here but a hook signal doesn't need it (only the mtime
         // fallback does), so these still drive running / 等你 grouping.
         for sid in aiStatus.keys where !seen.contains(sid) && text.contains(sid) {
+            seen.insert(sid)
+            out.append(TaskAISession(sid: sid, team: nil, cwd: nil))
+        }
+        // Sessions the hook tagged with this task (pane's TASKDECK_TASK) —
+        // auto-attributed no matter how they were started, even if never
+        // recorded in the note or a pane spec.
+        for (sid, task) in sessionTask where task == slug && !seen.contains(sid) {
             seen.insert(sid)
             out.append(TaskAISession(sid: sid, team: nil, cwd: nil))
         }
@@ -697,16 +707,22 @@ final class AppModel: ObservableObject {
 
     private func reloadAIStatus() {
         var map: [String: (state: String, ts: Date)] = [:]
+        var tasks: [String: String] = [:]
         let files = (try? FileManager.default.contentsOfDirectory(
             at: Paths.statusDir, includingPropertiesForKeys: nil)) ?? []
         for f in files where f.pathExtension == "json" {
             guard let d = try? Data(contentsOf: f),
                   let obj = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
                   let state = obj["state"] as? String else { continue }
+            let sid = f.deletingPathExtension().lastPathComponent
             let ts = (obj["ts"] as? Double).map { Date(timeIntervalSince1970: $0) } ?? .distantPast
-            map[f.deletingPathExtension().lastPathComponent] = (state, ts)
+            map[sid] = (state, ts)
+            // Task tag written by the hook (pane's TASKDECK_TASK) — lets us
+            // attribute a session to its task no matter how it was started.
+            if let task = obj["task"] as? String, !task.isEmpty { tasks[sid] = task }
         }
         aiStatus = map
+        sessionTask = tasks
     }
 
     func openInObsidian(_ slug: String) {
