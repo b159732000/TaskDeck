@@ -96,9 +96,28 @@ final class AppModel: ObservableObject {
         // Belt-and-suspenders for AI status: the dir watcher only fires on
         // create/delete/rename, and time-based grouping rules (running
         // freshness, sink thresholds) need periodic recomputation anyway.
+        // Also poll open notes for external (Obsidian) edits — a kqueue on the
+        // tasks dir doesn't fire on a file's content change.
         statusTimer = Timer.scheduledTimer(withTimeInterval: 20, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.reloadAIStatus() }
+            Task { @MainActor in
+                self?.reloadAIStatus()
+                self?.reloadOpenNotes()
+            }
         }
+
+        // Reload notes the instant the app regains focus (e.g. switching back
+        // from Obsidian), so external edits feel live rather than ≤20s late.
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in self?.reloadOpenNotes() }
+        }
+    }
+
+    /// Re-read every open task's note from disk (picks up Obsidian/vault-sync
+    /// edits: manually-added session ids, resources, notes).
+    func reloadOpenNotes() {
+        for s in sessions.values { s.reloadFromDiskIfChanged() }
     }
 
     /// Parsed `config.ansiColors` (16 × "#RRGGBB") or nil to keep defaults.
@@ -794,8 +813,11 @@ final class TaskSession: ObservableObject {
     unowned let app: AppModel
 
     @Published var noteText: String {
-        didSet { scheduleNoteSave() }
+        didSet { if !suppressSave { scheduleNoteSave() } }
     }
+    /// True while applying an external (on-disk) note change, so the reload
+    /// doesn't schedule a save-back.
+    private var suppressSave = false
 
     @Published var machine: TaskMachineState {
         didSet { scheduleMachineSave() }
@@ -852,6 +874,20 @@ final class TaskSession: ObservableObject {
         if disk != merged {
             app.store.write(slug, merged)
         }
+    }
+
+    /// Pick up edits made to the note OUTSIDE the app (Obsidian, vault sync):
+    /// manually-added session ids, resource links, notes. Skipped when an
+    /// in-app edit is pending so we never clobber unsaved typing; the reload
+    /// itself doesn't schedule a save-back. Re-deriving noteText refreshes
+    /// grouping / 現用 / the 續上 list, since taskAISessions reads it.
+    func reloadFromDiskIfChanged() {
+        guard noteTimer == nil else { return } // pending in-app edit wins
+        let disk = app.store.read(slug)
+        guard disk != noteText, !disk.isEmpty else { return }
+        suppressSave = true
+        noteText = disk
+        suppressSave = false
     }
 
     private func scheduleMachineSave() {
