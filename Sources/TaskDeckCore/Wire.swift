@@ -113,6 +113,17 @@ public enum FrameCodec {
     }
 }
 
+/// Mark a descriptor close-on-exec. Every long-lived fd in the daemon (log,
+/// lock, listener, client conns, PTY masters) and the GUI (daemon socket,
+/// kqueue watchers) must carry this: panes are spawned via forkpty→execve and
+/// GUI helpers via Process, so an unmarked fd leaks into every child — pane N
+/// inheriting the previous N−1 PTY masters kept EOFs from ever arriving and
+/// grew per-child fd tables quadratically.
+public func setCloseOnExec(_ fd: Int32) {
+    let flags = fcntl(fd, F_GETFD)
+    if flags >= 0 { _ = fcntl(fd, F_SETFD, flags | FD_CLOEXEC) }
+}
+
 public func sockaddrUn(_ path: String) -> sockaddr_un {
     var addr = sockaddr_un()
     addr.sun_family = sa_family_t(AF_UNIX)
@@ -134,6 +145,7 @@ public final class BlockingConn {
     public init?(path: String = Wire.socketPath()) {
         fd = socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else { return nil }
+        setCloseOnExec(fd)
         var addr = sockaddrUn(path)
         let ok = withUnsafePointer(to: &addr) {
             $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {

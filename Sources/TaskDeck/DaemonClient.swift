@@ -37,6 +37,7 @@ final class DaemonClient {
         guard fd < 0 else { return true }
         let s = socket(AF_UNIX, SOCK_STREAM, 0)
         guard s >= 0 else { return false }
+        setCloseOnExec(s) // don't leak into Process children (quota, osascript)
         var addr = sockaddrUn(Wire.socketPath())
         let ok = withUnsafePointer(to: &addr) {
             $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {

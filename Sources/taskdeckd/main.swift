@@ -15,6 +15,7 @@ private var logFile: UnsafeMutablePointer<FILE>?
 
 func initLog(path: String) {
     logFile = fopen(path, "a")
+    if let f = logFile { setCloseOnExec(fileno(f)) }
 }
 
 func dlog(_ s: String) {
@@ -121,7 +122,9 @@ final class Pane {
                           userInfo: [NSLocalizedDescriptionKey: "forkpty failed errno=\(errno)"])
         }
         if child == 0 {
-            if let c = cCwd, chdir(c) != 0 { _ = chdir("/") }
+            // cwd is validated server-side before spawn; if it vanished in the
+            // gap, fail loudly (visible exit) instead of silently running in /.
+            if let c = cCwd, chdir(c) != 0 { _exit(126) }
             execve(cArgs[0], cArgs, cEnv)
             _exit(127)
         }
@@ -130,6 +133,10 @@ final class Pane {
         master = m
         running = true
         _ = fcntl(master, F_SETFL, O_NONBLOCK)
+        // Without this, every LATER pane's child inherits this master: EOF
+        // never arrives (someone always holds the master) and fd tables grow
+        // quadratically across panes.
+        setCloseOnExec(master)
 
         let rs = DispatchSource.makeReadSource(fileDescriptor: master, queue: server.queue)
         rs.setEventHandler { [weak self] in self?.drain() }
@@ -350,28 +357,32 @@ final class Server {
     var dying: [String: Pane] = [:]
     var conns: [ObjectIdentifier: Conn] = [:]
     private var listenFD: Int32 = -1
+    private var singletonLockFD: Int32 = -1
     private var acceptSource: DispatchSourceRead?
 
     func start() {
         let path = Wire.socketPath()
 
-        // Singleton guard: if another daemon answers on the socket, bail out.
-        let probe = socket(AF_UNIX, SOCK_STREAM, 0)
-        var probeAddr = sockaddrUn(path)
-        let alreadyRunning = withUnsafePointer(to: &probeAddr) {
-            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                connect(probe, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) == 0
-            }
-        }
-        close(probe)
-        if alreadyRunning {
-            dlog("another taskdeckd is already running; exiting")
+        // Singleton guard: an exclusive flock on <socket>.lock. The old
+        // "probe-connect, then unlink+bind" had a TOCTOU hole — two daemons
+        // starting together could both probe-fail, then the later bind wins
+        // and the earlier one keeps orphaned PTYs on an unreachable socket.
+        // flock is atomic, auto-released on process death (stale lock files
+        // are harmless), and per-socket so isolated test daemons don't
+        // contend with production.
+        let lockFD = open(path + ".lock", O_CREAT | O_RDWR, 0o600)
+        guard lockFD >= 0 else { dlog("cannot open lock file errno=\(errno)"); exit(1) }
+        setCloseOnExec(lockFD)
+        if flock(lockFD, LOCK_EX | LOCK_NB) != 0 {
+            dlog("another taskdeckd is already running (lock held); exiting")
             exit(2)
         }
+        singletonLockFD = lockFD // held for the daemon's lifetime
         unlink(path)
 
         listenFD = socket(AF_UNIX, SOCK_STREAM, 0)
         guard listenFD >= 0 else { dlog("socket() failed"); exit(1) }
+        setCloseOnExec(listenFD)
         var addr = sockaddrUn(path)
         let bound = withUnsafePointer(to: &addr) {
             $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
@@ -391,6 +402,7 @@ final class Server {
     private func acceptOne() {
         let fd = accept(listenFD, nil, nil)
         guard fd >= 0 else { return }
+        setCloseOnExec(fd)
         let c = Conn(fd: fd, server: self)
         conns[ObjectIdentifier(c)] = c
         c.start(on: queue)
@@ -420,8 +432,17 @@ final class Server {
             reply(c, to: m, "panes") { $0.panes = panes.values.map(\.infoStruct) }
 
         case "newPane":
+            // Validate cwd BEFORE forking: silently spawning in / while the UI
+            // shows the requested cwd misdirects every command the user types.
+            let cwd = m.cwd ?? NSHomeDirectory()
+            var cwdIsDir: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: cwd, isDirectory: &cwdIsDir),
+                  cwdIsDir.boolValue else {
+                reply(c, to: m, "error") { $0.message = "cwd is not a directory: \(cwd)" }
+                return
+            }
             let pane = Pane(taskID: m.taskID ?? "", specID: m.specID ?? UUID().uuidString,
-                            title: m.title ?? "terminal", cwd: m.cwd ?? NSHomeDirectory(),
+                            title: m.title ?? "terminal", cwd: cwd,
                             shell: m.shell ?? "/bin/zsh",
                             cols: m.cols ?? 100, rows: m.rows ?? 28, server: self)
             do {

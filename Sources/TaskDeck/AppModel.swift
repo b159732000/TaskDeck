@@ -752,6 +752,7 @@ final class AppModel: ObservableObject {
     private func watchStatusDir() {
         statusFD = open(Paths.statusDir.path, O_EVTONLY)
         guard statusFD >= 0 else { return }
+        setCloseOnExec(statusFD)
         let src = DispatchSource.makeFileSystemObjectSource(
             fileDescriptor: statusFD, eventMask: .write, queue: .main)
         src.setEventHandler { [weak self] in self?.reloadAIStatus() }
@@ -817,6 +818,7 @@ final class AppModel: ObservableObject {
     private func watchTasksDir() {
         dirFD = open(store.dir.path, O_EVTONLY)
         guard dirFD >= 0 else { return }
+        setCloseOnExec(dirFD)
         let src = DispatchSource.makeFileSystemObjectSource(fileDescriptor: dirFD, eventMask: .write, queue: .main)
         src.setEventHandler { [weak self] in self?.rescan() }
         src.activate()

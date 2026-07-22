@@ -182,6 +182,62 @@ check("resize -1/-1: daemon survives (clamped)", req(conn, "ping")?.type == "pon
 fire("resize") { $0.paneID = paneID; $0.cols = 99999; $0.rows = 99999 }
 check("resize 99999: daemon survives (clamped)", req(conn, "ping")?.type == "pong")
 
+// ---- fd hygiene (FD_CLOEXEC) ---------------------------------------------
+// Each pane child lists its own /dev/fd. Without close-on-exec on daemon fds,
+// pane N inherits the log fd, lock fd, listener, conns and the previous N−1
+// PTY masters — so the count GROWS with pane index. With the fix it's flat.
+
+func fdCount(specID: String, marker: String) -> Int? {
+    let r = req(conn, "newPane") {
+        $0.taskID = "itest"
+        $0.specID = specID
+        $0.title = "fd"
+        $0.cwd = workDir
+        $0.shell = "/bin/sh"
+        $0.cols = 80
+        $0.rows = 24
+        $0.command = "echo \(marker)-begin; ls /dev/fd; echo \(marker)-end"
+    }
+    guard let pid = r?.paneID, r?.type == "ok" else { return nil }
+    guard let c2 = BlockingConn(path: sockPath) else { return nil }
+    var sub = WireMessage(type: "subscribe")
+    sub.paneID = pid
+    sub.id = UUID().uuidString
+    c2.send(sub)
+    var acc = [UInt8]()
+    let deadline = Date().addingTimeInterval(6)
+    while Date() < deadline {
+        guard let m = c2.recv() else { break }
+        if let b = m.dataBytes { acc.append(contentsOf: b) }
+        guard let s = String(bytes: acc, encoding: .utf8) else { continue }
+        if let begin = s.range(of: "\(marker)-begin"), let end = s.range(of: "\(marker)-end") {
+            let body = s[begin.upperBound ..< end.lowerBound]
+            // Count numeric fd entries (ls output; ignore prompt noise).
+            let n = body.split(whereSeparator: { $0.isNewline || $0 == " " || $0 == "\t" || $0 == "\r" })
+                .filter { !$0.isEmpty && $0.allSatisfy(\.isNumber) }.count
+            return n
+        }
+    }
+    return nil
+}
+
+let fdA = fdCount(specID: "fd-A", marker: "fdchk1")
+let fdB = fdCount(specID: "fd-B", marker: "fdchk2")
+check("cloexec: pane sees its own fds only (≤5)", (fdA ?? 99) <= 5)
+check("cloexec: fd count does not grow with pane index", fdA != nil && fdB != nil && fdB! <= fdA!)
+
+// Invalid cwd must be rejected before fork, not silently run in /.
+let badCwd = req(conn, "newPane") {
+    $0.taskID = "itest"
+    $0.specID = "bad-cwd"
+    $0.title = "x"
+    $0.cwd = tmpRoot + "/definitely-missing"
+    $0.shell = "/bin/sh"
+    $0.cols = 80
+    $0.rows = 24
+}
+check("newPane: invalid cwd → error reply", badCwd?.type == "error")
+
 // Long-lived pane, then remove: child must be reaped (no defunct) and gone.
 newReply = req(conn, "newPane") {
     $0.taskID = "itest"
@@ -198,10 +254,11 @@ check("newPane sleeper: ok", newReply?.type == "ok" && !sleeper.isEmpty)
 usleep(600_000)
 _ = req(conn, "remove") { $0.paneID = sleeper }
 // SIGHUP → child exits; childExited reaps + closes fd (dying-dict fix).
+// Other idle pane shells (marker/fd panes) stay alive by design; the leak
+// signal is a DEFUNCT child lingering unreaped.
 var reaped = false
 for _ in 0 ..< 40 { // up to 4s
-    if defunctChildren(of: daemon.processIdentifier) == 0,
-       liveChildren(of: daemon.processIdentifier) <= 1 { // marker pane's sh may linger
+    if defunctChildren(of: daemon.processIdentifier) == 0 {
         reaped = true
         break
     }
