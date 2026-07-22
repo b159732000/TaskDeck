@@ -15,7 +15,7 @@ session id 續上。
 ## Architecture
 
 ```
-TaskDeck.app (SwiftUI)  ──unix socket──▶  taskdeckd (owns every PTY)
+JamesDesk.app (SwiftUI)  ──unix socket──▶  taskdeckd (owns every PTY)
         │                                       │
         ├── task notes: <tasksDir>/<slug>.md    └── ring-buffer scrollback,
         └── pane specs/layout:                      survives GUI relaunch
@@ -43,7 +43,7 @@ Requires macOS 14+ and a Swift toolchain (Command Line Tools are enough —
 no Xcode needed).
 
 ```sh
-Scripts/bundle.sh    # swift build + assemble dist/TaskDeck.app
+Scripts/bundle.sh    # swift build + assemble dist/JamesDesk.app
 Scripts/dev.sh       # bundle + install to /Applications + relaunch GUI
                      # (the daemon and your sessions are never touched)
 ```
@@ -51,7 +51,7 @@ Scripts/dev.sh       # bundle + install to /Applications + relaunch GUI
 Headless smoke test of the daemon:
 
 ```sh
-CTL="/Applications/TaskDeck.app/Contents/MacOS/taskdeckctl"
+CTL="/Applications/JamesDesk.app/Contents/MacOS/taskdeckctl"
 "$CTL" ping
 "$CTL" new demo --cmd 'echo hello'
 "$CTL" tail <paneID> 2

@@ -121,14 +121,21 @@ enum ChromeCDP {
         return wsURL
     }
 
+    // Locked: concurrent CDP operations (snapshot + open racing) incremented
+    // this unsynchronized shared counter from different tasks.
     private static var nextID = 0
+    private static let idLock = NSLock()
 
     /// One JSON-RPC round trip. Requests are sequential; CDP events (frames
     /// without our id) are skipped while waiting for the matching response.
     private static func call(_ ws: URLSessionWebSocketTask, method: String,
                              params: [String: Any]) async throws -> [String: Any] {
-        nextID += 1
-        let id = nextID
+        let id: Int = {
+            idLock.lock()
+            defer { idLock.unlock() }
+            nextID += 1
+            return nextID
+        }()
         let payload: [String: Any] = ["id": id, "method": method, "params": params]
         let data = try JSONSerialization.data(withJSONObject: payload)
         try await ws.send(.string(String(data: data, encoding: .utf8) ?? "{}"))

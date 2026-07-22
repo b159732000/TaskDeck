@@ -272,6 +272,16 @@ check("attn: unacked permission beats waiting, since = oldest",
 check("attn: all acked → nil",
       GroupingRules.attention([sig("waiting", agoSec: 30, acked: true)]) == nil)
 
+// MARK: snapshot — URLs containing parens survive the markdown round-trip
+
+let parenOut = ResourceOps.setChromeSnapshot("# t\n", entries: [
+    (title: "wiki", url: "https://en.wikipedia.org/wiki/Foo_(bar)"),
+])
+check("paren: raw ) escaped in link target", parenOut.contains("(https://en.wikipedia.org/wiki/Foo_%28bar%29)"))
+let parenParsed = ResourceOps.parse(parenOut)
+check("paren: parses back as one resource", parenParsed.count == 1
+      && parenParsed[0].url == "https://en.wikipedia.org/wiki/Foo_%28bar%29")
+
 // MARK: ByteQueue — FIFO semantics survive consume/compaction/trim
 
 var bq = ByteQueue()

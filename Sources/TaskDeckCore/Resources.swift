@@ -156,8 +156,14 @@ public enum ResourceOps {
     public static func setSnapshot(_ text: String, subsection: String,
                                    entries: [(title: String, url: String)]) -> String {
         var t = text
+        // Parens must be %-escaped inside a markdown link target — a raw ")"
+        // in the URL ends the link early and the tail leaks as note text.
+        func linkSafe(_ url: String) -> String {
+            url.replacingOccurrences(of: "(", with: "%28")
+                .replacingOccurrences(of: ")", with: "%29")
+        }
         let bullets = entries
-            .map { "- [\(sanitizeTitle($0.title))](\($0.url))" }
+            .map { "- [\(sanitizeTitle($0.title))](\(linkSafe($0.url)))" }
             .joined(separator: "\n")
 
         if sectionBodyRange(t) == nil {

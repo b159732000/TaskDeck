@@ -32,5 +32,7 @@
 	<true/>
 	<key>NSHumanReadableCopyright</key>
 	<string>© 2026 James Guo — PolyForm Noncommercial 1.0.0</string>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>JamesDesk 以 AppleScript 控制 Safari（開啟/快照任務資源分頁）與 iTerm2（附掛終端），需要自動化權限。</string>
 </dict>
 </plist>

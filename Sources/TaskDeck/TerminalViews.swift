@@ -496,9 +496,13 @@ struct PaneContainerView: View {
             Spacer()
             Menu {
                 if let spec {
-                    Button("向右分割") { session.splitPane(spec.id, axis: "h") }
-                    Button("向下分割") { session.splitPane(spec.id, axis: "v") }
-                    Divider()
+                    // Side panes live outside the split tree — splitting one
+                    // spawned an invisible pane parked in no layout.
+                    if spec.location != "side" {
+                        Button("向右分割") { session.splitPane(spec.id, axis: "h") }
+                        Button("向下分割") { session.splitPane(spec.id, axis: "v") }
+                        Divider()
+                    }
                     if model.hasITerm2, let info, info.running {
                         Button("在 iTerm2 開啟（附掛）") { model.openPaneInITerm2(info) }
                         Divider()

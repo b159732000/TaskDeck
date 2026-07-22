@@ -66,11 +66,12 @@ struct TransparentWindow: NSViewRepresentable {
                 })
             }
             // Scroll-edge backdrops get (re)created as content scrolls under
-            // the titlebar — sweep on every window update (cheap, guarded).
+            // the titlebar. didUpdate fires near per-frame while terminals
+            // stream, and the sweep walks the whole view tree — throttle it.
             tokens.append(NotificationCenter.default.addObserver(
                 forName: NSWindow.didUpdateNotification, object: w, queue: .main
             ) { [weak self] _ in
-                self?.hideScrollEdgeBackdrops()
+                self?.throttledBackdropSweep()
             })
         }
 
@@ -99,6 +100,18 @@ struct TransparentWindow: NSViewRepresentable {
             hideTitlebarMaterial(w)
             hideScrollEdgeBackdrops()
             dumpFrameIfRequested(w)
+        }
+
+        private var lastSweep = Date.distantPast
+
+        /// Rate-limited entry for the per-didUpdate sweep (≤5/s). applyGlass
+        /// still calls the unthrottled sweep for immediate correctness on
+        /// real chrome changes.
+        private func throttledBackdropSweep() {
+            let now = Date()
+            guard now.timeIntervalSince(lastSweep) > 0.2 else { return }
+            lastSweep = now
+            hideScrollEdgeBackdrops()
         }
 
         /// macOS 26 adds opaque "BackdropView" scroll-edge layers where list

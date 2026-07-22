@@ -338,10 +338,32 @@ extension TaskSession {
         guard !ids.isEmpty else { return "這個任務沒有記住的 Chrome 資源視窗" }
         let port = app.config.chromeDebugPort ?? 9222
         do {
-            let n = try await ChromeCDP.closeWindows(port: port, windowIDs: ids)
+            // Window IDs are NOT stable across Chrome restarts — a remembered
+            // id can now be someone else's window (e.g. a fresh debug
+            // session). Verify identity before the only destructive CDP call:
+            // only close a remembered window that still shows at least one of
+            // this task's recorded resource URLs.
+            let noteURLs = Set(ResourceOps.parse(noteText).map(\.url))
+            let wins = try await ChromeCDP.windows(port: port)
+            var verified = Set<Int>()
+            var mismatched = 0
+            for w in wins where ids.contains(w.id) {
+                if w.tabs.contains(where: { noteURLs.contains($0.url) }) {
+                    verified.insert(w.id)
+                } else {
+                    mismatched += 1
+                }
+            }
+            let n = verified.isEmpty ? 0
+                : try await ChromeCDP.closeWindows(port: port, windowIDs: verified)
             machine.chromeWindowIDs = []
             machine.chromeWindowID = nil
-            return n > 0 ? "已關閉 \(n) 個分頁（任務的 Chrome 資源視窗）"
+            if n > 0, mismatched > 0 {
+                return "已關閉 \(n) 個分頁；另有 \(mismatched) 個記住的視窗內容與記錄不符（Chrome 重啟過？）已跳過，記錄已清除"
+            }
+            if n > 0 { return "已關閉 \(n) 個分頁（任務的 Chrome 資源視窗）" }
+            return mismatched > 0
+                ? "記住的視窗內容與本任務記錄不符（Chrome 可能重啟過）——為安全未關閉，記錄已清除"
                 : "記住的視窗已不存在（可能 Chrome 重啟過）——記錄已清除"
         } catch {
             return (error as? LocalizedError)?.errorDescription ?? "關閉失敗"
