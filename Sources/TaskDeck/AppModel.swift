@@ -530,6 +530,12 @@ final class AppModel: ObservableObject {
     /// The task's "主 AI" for the sidebar: manual 主力 if set, else 現用.
     func mainTeam(_ slug: String) -> String? { derivedCache[slug]?.mainTeam }
 
+    /// Cached last-activity instant — a STABLE sort key for the sidebar.
+    /// (Sorting by silence() embedded a fresh now() in every comparison, so
+    /// keys shifted between comparisons and near-tied rows swapped places on
+    /// every hover re-sort.)
+    func lastActivity(_ slug: String) -> Date? { derivedCache[slug]?.lastActivity }
+
     /// Ground-truth account for a session: which team's CLAUDE_CONFIG_DIR
     /// actually holds its conversation record. Beats the manifest's recorded
     /// team, which is only a guess at creation and wrong whenever the session

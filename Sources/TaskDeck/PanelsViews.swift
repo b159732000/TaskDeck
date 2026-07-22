@@ -39,8 +39,12 @@ struct SidebarView: View {
         let aiRunning = groups[.aiRunning] ?? []
         let idle = groups[.idle] ?? []
         let read = (groups[.read] ?? []).sorted { a, b in
-            let sa = model.silence(a) ?? 0, sb = model.silence(b) ?? 0
-            if sa != sb { return sa < sb } // 最近動的在上
+            // Sort by the cached instant, NOT silence(): silence() embeds a
+            // fresh now() per call, so keys drifted between comparisons and
+            // near-tied rows kept swapping on every hover re-sort.
+            let la = model.lastActivity(a.id) ?? .distantPast
+            let lb = model.lastActivity(b.id) ?? .distantPast
+            if la != lb { return la > lb } // 最近動的在上
             return a.id < b.id
         }
         let waiting = (groups[.waitingExt] ?? []).sorted { a, b in
