@@ -48,7 +48,7 @@ struct SidebarView: View {
         List {
             if !needsYou.isEmpty {
                 Section(isExpanded: $needsYouExpanded) {
-                    ForEach(needsYou) { row($0, needsYou: true) }
+                    ForEach(needsYou) { row($0, group: .needsYou) }
                 } header: {
                     Text("等你（\(needsYou.count)）")
                         .font(.system(size: 11, weight: .bold))
@@ -57,13 +57,13 @@ struct SidebarView: View {
             }
             if !aiRunning.isEmpty {
                 Section(isExpanded: $aiRunningExpanded) {
-                    ForEach(aiRunning) { row($0, needsYou: false) }
+                    ForEach(aiRunning) { row($0, group: .aiRunning) }
                 } header: {
                     Text("AI 執行中（\(aiRunning.count)）")
                 }
             }
             Section(isExpanded: $runningExpanded) {
-                ForEach(idle) { row($0, needsYou: false) }
+                ForEach(idle) { row($0, group: .idle) }
                     .onMove { from, to in
                         model.moveRunningTasks(idle.map(\.id), from: from, to: to)
                     }
@@ -72,28 +72,28 @@ struct SidebarView: View {
             }
             if !read.isEmpty {
                 Section(isExpanded: $readExpanded) {
-                    ForEach(read) { row($0, needsYou: false) }
+                    ForEach(read) { row($0, group: .read) }
                 } header: {
                     Text("已讀（看過待回，\(read.count)）")
                 }
             }
             if !waiting.isEmpty {
                 Section(isExpanded: $waitingExpanded) {
-                    ForEach(waiting) { row($0, needsYou: false) }
+                    ForEach(waiting) { row($0, group: .waitingExt) }
                 } header: {
                     Text("等待外部（\(waiting.count)）")
                 }
             }
             if !semi.isEmpty {
                 Section(isExpanded: $sunkExpanded) {
-                    ForEach(semi) { row($0, needsYou: false) }
+                    ForEach(semi) { row($0, group: .semiArchived) }
                 } header: {
                     Text("半封存 >3 天（\(semi.count)）")
                 }
             }
             if !done.isEmpty {
                 Section(isExpanded: $doneExpanded) {
-                    ForEach(done) { row($0, needsYou: false) }
+                    ForEach(done) { row($0, group: .done) }
                 } header: {
                     Text("已完成（\(done.count)）")
                 }
@@ -181,11 +181,14 @@ struct SidebarView: View {
         return .clear
     }
 
-    // needsYou is passed by the section (which already knows its group) so
-    // the row never recomputes sidebarGroup — that ran per-row per-render and
-    // starved the selection tint's repaint behind the detail-pane rebuild.
-    private func row(_ t: TaskNote, needsYou: Bool) -> some View {
-        HStack(spacing: 8) {
+    // The section passes its group (it already knows it) so the row never
+    // recomputes sidebarGroup — that ran per-row per-render and starved the
+    // selection tint's repaint behind the detail-pane rebuild. The chips also
+    // key off this DISPLAYED group, not the persisted frontmatter `group`: a
+    // 已讀 task resurfaced to 等你 by a fresh AI turn must still offer 已讀.
+    private func row(_ t: TaskNote, group: AppModel.SidebarGroup) -> some View {
+        let needsYou = group == .needsYou
+        return HStack(spacing: 8) {
             VStack(alignment: .leading, spacing: 1) {
                 Text(t.title)
                     .font(.system(size: 12.5 * model.uiScale))
@@ -213,7 +216,7 @@ struct SidebarView: View {
         .overlay(alignment: .trailing) {
             if t.status == "active" {
                 let hovered = hoveredSlug == t.id
-                LifecycleChips(task: t)
+                LifecycleChips(task: t, group: group)
                     .padding(.horizontal, 5)
                     .padding(.vertical, 3)
                     .background(.regularMaterial, in: Capsule())
@@ -531,19 +534,23 @@ struct ColumnDividerHandle: View {
 struct LifecycleChips: View {
     @EnvironmentObject var model: AppModel
     let task: TaskNote
+    /// The section the row is CURRENTLY shown in — chips hide the one matching
+    /// it (not the persisted frontmatter `group`), so a 已讀 task resurfaced to
+    /// 等你 still offers 已讀, and re-picking it re-acks the new AI turn.
+    let group: AppModel.SidebarGroup
 
     var body: some View {
         HStack(spacing: 2) {
             // No 待開工 chip: 待開工 is the no-AI-activity default, not a place
             // you move to. Once a task has an AI signal it belongs in 等你/已讀,
             // so "回到待開工" was semantically empty (and bounced to 已讀).
-            if task.group != "needsyou" {
+            if group != .needsYou {
                 chip("bell", "移到等你（我要 review）") { model.setGroupFlag(task.id, "needsyou") }
             }
-            if task.group != "read" {
+            if group != .read {
                 chip("eye", "標記已讀（看過，先不回）") { model.setGroupFlag(task.id, "read") }
             }
-            if task.group != "waiting" {
+            if group != .waitingExt {
                 chip("hourglass", "移到等待外部（同事 / review / CI）") {
                     model.setGroupFlag(task.id, "waiting")
                 }
