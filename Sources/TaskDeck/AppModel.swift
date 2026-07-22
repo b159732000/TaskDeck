@@ -209,6 +209,7 @@ final class AppModel: ObservableObject {
         list.sort { (index[$0.id] ?? .max) < (index[$1.id] ?? .max) }
         tasks = list
         autoArchiveSweep()
+        refreshDerived()
     }
 
     private func saveOrder() {
@@ -402,6 +403,7 @@ final class AppModel: ObservableObject {
                 ackedAI[s.sid] = entry.ts
             }
         }
+        refreshDerived() // ack changes grouping (等你 → 已讀)
     }
 
     // MARK: - Sidebar grouping
@@ -479,7 +481,35 @@ final class AppModel: ObservableObject {
     /// The strongest unacked "ball is in your court" signal (permission beats
     /// waiting; `since` = oldest, FIFO by how long you've been owed).
     func aiAttention(_ slug: String) -> (permission: Bool, since: Date)? {
-        GroupingRules.attention(sessionSignals(slug))
+        if let d = derivedCache[slug] { return d.attention }
+        return GroupingRules.attention(sessionSignals(slug)) // cold-cache fallback
+    }
+
+    // Per-task derived display values, recomputed OFF the render path (only in
+    // rescan / reloadAIStatus / ackAIStatus). View bodies read this cache, so a
+    // keystroke or a sidebar hover no longer re-runs the disk-touching gather
+    // for every task. The 20s status reload is the freshness backstop.
+    private struct Derived {
+        let group: SidebarGroup
+        let attention: (permission: Bool, since: Date)?
+        let activeTeam: String?
+    }
+    private var derivedCache: [String: Derived] = [:]
+
+    private func refreshDerived() {
+        let now = Date()
+        var cache: [String: Derived] = [:]
+        cache.reserveCapacity(tasks.count)
+        for t in tasks {
+            let signals = sessionSignals(t.id)
+            let group = GroupingRules.classify(status: t.status, group: t.group,
+                                               quiet: quietSeconds(t, signals: signals),
+                                               signals: signals, now: now)
+            cache[t.id] = Derived(group: group,
+                                  attention: GroupingRules.attention(signals),
+                                  activeTeam: computeActiveTeam(t.id))
+        }
+        derivedCache = cache
     }
 
     /// Ground-truth account for a session: which team's CLAUDE_CONFIG_DIR
@@ -563,7 +593,9 @@ final class AppModel: ObservableObject {
     /// location), falling back to the manifest team only when the file can't
     /// be found. Display-only: never rewrites primaryTeam (主力 is the manual
     /// quota home).
-    func activeTeam(_ slug: String) -> String? {
+    func activeTeam(_ slug: String) -> String? { derivedCache[slug]?.activeTeam }
+
+    private func computeActiveTeam(_ slug: String) -> String? {
         var best: (ts: Date, sid: String, team: String?)?
         for s in taskAISessions(slug) {
             guard let entry = statusEntry(sid: s.sid, team: s.team, cwd: s.cwd) else { continue }
@@ -607,6 +639,8 @@ final class AppModel: ObservableObject {
     // Grouping model (260720 v3) now lives in TaskDeckCore.GroupingRules
     // (selftested); this gathers the live snapshot once and delegates.
     func sidebarGroup(_ t: TaskNote) -> SidebarGroup {
+        if let d = derivedCache[t.id] { return d.group }
+        // Cold-cache fallback (before the first refresh); refreshDerived caches it.
         let signals = sessionSignals(t.id)
         return GroupingRules.classify(status: t.status, group: t.group,
                                       quiet: quietSeconds(t, signals: signals),
@@ -714,6 +748,7 @@ final class AppModel: ObservableObject {
         }
         aiStatus = map
         sessionTask = tasks
+        refreshDerived()
     }
 
     func openInObsidian(_ slug: String) {
