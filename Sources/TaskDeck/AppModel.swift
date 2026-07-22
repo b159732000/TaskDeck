@@ -609,17 +609,21 @@ final class AppModel: ObservableObject {
 
         if aiRunningNow(t.id) { return .aiRunning } // live fact, overrides all
 
-        // Parked by hand → sticky. 等你 can be set manually too (no time-sink).
-        switch t.group {
-        case "needsyou": return .needsYou
-        case "waiting": return quiet > Self.sinkAfter ? .semiArchived : .waitingExt
-        case "read": return quiet > Self.sinkAfter ? .semiArchived : .read
-        default: break
+        // 等待外部 is fully sticky: you're blocked on a colleague/CI/review, so
+        // AI output must not drag it back. (Only a running session, above.)
+        if t.group == "waiting" {
+            return quiet > Self.sinkAfter ? .semiArchived : .waitingExt
         }
 
-        // Unparked → AI signals drive.
-        if aiAttention(t.id) != nil { return .needsYou } // finished / awaits review
-        if hasAckedStop(t.id) {
+        // A FRESH (unacked) AI stop resurfaces a task to 等你 — even one marked
+        // 已讀: 已讀 means "seen the output so far"; a new turn's output is
+        // unseen, so it earns your attention again. (Marking 已讀 acks the
+        // then-current signal, so only a genuinely newer turn resurfaces.)
+        if aiAttention(t.id) != nil { return .needsYou }
+
+        // Manual 等你 that outlives its signal; then 已讀 / acked-seen; else idle.
+        if t.group == "needsyou" { return .needsYou }
+        if t.group == "read" || hasAckedStop(t.id) {
             return quiet > Self.sinkAfter ? .semiArchived : .read
         }
         return .idle // new / no manual flag / expired signals
@@ -656,6 +660,10 @@ final class AppModel: ObservableObject {
         } else {
             store.write(slug, transform(store.read(slug)))
         }
+        // Marking 已讀/等待外部 acknowledges the current AI output, so it won't
+        // immediately bounce back to 等你; only a genuinely newer turn will.
+        // (等你/待開工 don't ack — they should keep showing pending signals.)
+        if flag == "read" || flag == "waiting" { ackAIStatus(slug) }
         rescan()
     }
 
