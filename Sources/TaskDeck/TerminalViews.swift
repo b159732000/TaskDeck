@@ -11,6 +11,7 @@ import TaskDeckCore
 /// upstream; only cells with explicit ANSI backgrounds stay solid.
 final class GlassTerminalView: TerminalView {
     override var isOpaque: Bool { false }
+    private var redrawObservers: [NSObjectProtocol] = []
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
@@ -18,6 +19,34 @@ final class GlassTerminalView: TerminalView {
         // Accept dropped files (images, etc.) like iTerm2 — the path is typed
         // into the pane so claude (or any CLI) can read it.
         registerForDraggedTypes([.fileURL])
+
+        // After sleep-wake or an app relaunch the backing store can show a
+        // stale/garbled frame until a manual resize forces a repaint. Force a
+        // full redraw on wake / app-active / (re)attach instead — the emulator
+        // grid is intact, only the pixels are stale, so no resize needed.
+        guard window != nil, redrawObservers.isEmpty else { return }
+        let redraw: (Notification) -> Void = { [weak self] _ in
+            DispatchQueue.main.async { self?.forceRedraw() }
+        }
+        let ws = NSWorkspace.shared.notificationCenter
+        redrawObservers.append(ws.addObserver(
+            forName: NSWorkspace.didWakeNotification, object: nil, queue: .main, using: redraw))
+        redrawObservers.append(NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main, using: redraw))
+        // Catch the replay-then-draw race right after attach.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in self?.forceRedraw() }
+    }
+
+    deinit {
+        redrawObservers.forEach {
+            NotificationCenter.default.removeObserver($0)
+            NSWorkspace.shared.notificationCenter.removeObserver($0)
+        }
+    }
+
+    private func forceRedraw() {
+        guard window != nil else { return }
+        needsDisplay = true
     }
 
     // MARK: - File drag & drop → insert path(s)
