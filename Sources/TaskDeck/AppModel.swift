@@ -486,7 +486,21 @@ final class AppModel: ObservableObject {
     /// said claude, the record lived in claude-team3). The record is stored
     /// per project cwd as either `<sid>.jsonl` (older) or a `<sid>` directory
     /// (this claude version) — match both. nil = unknown.
+    // Short-TTL cache: this enumerates every account's projects/ dir (disk),
+    // and it's called from view bodies that re-render on EVERY keystroke
+    // (detail-pane 現用 chip via activeTeam, AI pane headers, the resume menu).
+    // Un-memoized it meant one multi-dir disk scan per keystroke → typing lag.
+    // Memoizing per sid for a few seconds makes it ~once per few seconds.
+    private var teamFileCache: [String: (team: String?, at: Date)] = [:]
+
     func teamFromSessionFile(_ sid: String) -> String? {
+        if let c = teamFileCache[sid], Date().timeIntervalSince(c.at) < 3 { return c.team }
+        let result = computeTeamFromSessionFile(sid)
+        teamFileCache[sid] = (result, Date())
+        return result
+    }
+
+    private func computeTeamFromSessionFile(_ sid: String) -> String? {
         let fm = FileManager.default
         for team in config.teams {
             guard let dir = team.configDir else { continue }
@@ -506,7 +520,11 @@ final class AppModel: ObservableObject {
     /// Recent conversations on disk for `cwd`, across every team account —
     /// (team, sid, modified). Powers the pane "rebind to the real session"
     /// picker when the app's recorded session drifted from what's running.
+    private var recentCache: [String: (rows: [(team: String, sid: String, at: Date)], at: Date)] = [:]
+
     func recentSessions(cwd: String, limit: Int = 10) -> [(team: String, sid: String, at: Date)] {
+        let ckey = "\(cwd)#\(limit)"
+        if let c = recentCache[ckey], Date().timeIntervalSince(c.at) < 3 { return c.rows }
         let fm = FileManager.default
         let slug = Paths.expand(cwd)
             .replacingOccurrences(of: "/", with: "-").replacingOccurrences(of: ".", with: "-")
@@ -531,8 +549,10 @@ final class AppModel: ObservableObject {
                 best[sid] = (team.id, mt)
             }
         }
-        return best.map { (team: $0.value.team, sid: $0.key, at: $0.value.at) }
+        let rows = best.map { (team: $0.value.team, sid: $0.key, at: $0.value.at) }
             .sorted { $0.at > $1.at }.prefix(limit).map { $0 }
+        recentCache[ckey] = (rows, Date())
+        return rows
     }
 
     /// The account currently working on the task — "現用" in the header chip.
