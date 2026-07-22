@@ -192,6 +192,7 @@ struct TerminalHostView: NSViewRepresentable {
             self.tv = tv
             self.client = client
             self.paneID = paneID
+            nudgeOnNextResize = true // force a SIGWINCH so the TUI redraws (see sizeChanged)
             token = client.subscribe(
                 paneID: paneID,
                 replaySize: { [weak tv] cols, rows in
@@ -220,6 +221,15 @@ struct TerminalHostView: NSViewRepresentable {
 
         private var resizeTimer: Timer?
         private var pendingSize: (cols: Int, rows: Int)?
+        private var nudgeOnNextResize = true
+
+        private func sendResize(cols: Int, rows: Int) {
+            var m = WireMessage(type: "resize")
+            m.paneID = paneID
+            m.cols = cols
+            m.rows = rows
+            client?.fire(m)
+        }
 
         /// Debounced: live-resizing a split fires this per FRAME; forwarding
         /// each one SIGWINCHes the shell dozens of times and zsh/p10k
@@ -233,11 +243,21 @@ struct TerminalHostView: NSViewRepresentable {
             resizeTimer = Timer.scheduledTimer(withTimeInterval: 0.15, repeats: false) { [weak self] _ in
                 guard let self, let size = self.pendingSize else { return }
                 self.pendingSize = nil
-                var m = WireMessage(type: "resize")
-                m.paneID = self.paneID
-                m.cols = size.cols
-                m.rows = size.rows
-                self.client?.fire(m)
+                if self.nudgeOnNextResize {
+                    self.nudgeOnNextResize = false
+                    // First resize after (re)attach: the PTY is often ALREADY
+                    // this exact size, so a plain resize is a kernel no-op and
+                    // sends NO SIGWINCH (TIOCSWINSZ only signals on a real
+                    // change) — a running TUI (claude's sticky footer / scroll
+                    // region) then never redraws and stays garbled until a
+                    // manual resize. Force one genuine change to trigger it.
+                    self.sendResize(cols: size.cols, rows: max(2, size.rows - 1))
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.07) {
+                        self.sendResize(cols: size.cols, rows: size.rows)
+                    }
+                } else {
+                    self.sendResize(cols: size.cols, rows: size.rows)
+                }
             }
         }
 
