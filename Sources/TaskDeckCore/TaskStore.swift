@@ -177,7 +177,7 @@ public final class TaskStore {
         for url in items where url.pathExtension == "md" {
             let slug = url.deletingPathExtension().lastPathComponent
             if slug.uppercased() == "README" { continue }
-            let text = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+            let text = cachedRead(slug) // mtime-cached: unchanged notes cost a stat
             let fm = Self.frontmatter(text)
             out.append(TaskNote(id: slug,
                                 title: Self.h1(text) ?? slug,
@@ -202,12 +202,50 @@ public final class TaskStore {
         (try? String(contentsOf: noteURL(slug), encoding: .utf8)) ?? ""
     }
 
+    // mtime-keyed caches: the 20s status sweep + every rescan used to re-read
+    // and re-parse EVERY note and machine-state file from disk each pass, on
+    // the main thread. A stat() per file replaces a full read when unchanged.
+    private var readCache: [String: (mtime: Date, text: String)] = [:]
+    private var machineCache: [String: (mtime: Date, state: TaskMachineState)] = [:]
+
+    private func mtime(_ url: URL) -> Date {
+        (try? FileManager.default.attributesOfItem(atPath: url.path))?[.modificationDate] as? Date
+            ?? .distantPast
+    }
+
+    /// read(), but served from cache while the file's mtime is unchanged.
+    /// For aggregate/derived paths (scan, session gathering); direct edits
+    /// keep using read() for an always-fresh view.
+    public func cachedRead(_ slug: String) -> String {
+        let m = mtime(noteURL(slug))
+        if let c = readCache[slug], c.mtime == m { return c.text }
+        let t = read(slug)
+        readCache[slug] = (m, t)
+        return t
+    }
+
+    /// machineState(), mtime-cached (same rationale as cachedRead).
+    public func cachedMachineState(_ slug: String) -> TaskMachineState {
+        let url = Paths.machineStateDir.appendingPathComponent(slug + ".json")
+        let m = mtime(url)
+        if let c = machineCache[slug], c.mtime == m { return c.state }
+        let s = machineState(slug)
+        machineCache[slug] = (m, s)
+        return s
+    }
+
+    private func invalidateCaches(_ slug: String) {
+        readCache.removeValue(forKey: slug)
+        machineCache.removeValue(forKey: slug)
+    }
+
     public func write(_ slug: String, _ text: String) {
         // Atomic: the note is the source of truth and lives in a synced vault —
         // a torn/half write here would be propagated to other machines. Better
         // to keep the last good file than emit a truncated one.
         do { try text.data(using: .utf8)?.write(to: noteURL(slug), options: .atomic) }
         catch { NSLog("TaskDeck: note write failed for \(slug): \(error)") }
+        invalidateCaches(slug)
     }
 
     /// Preserve an externally-edited version that would otherwise be
@@ -274,6 +312,8 @@ public final class TaskStore {
         let old = Paths.machineStateDir.appendingPathComponent(slug + ".json")
         let new = Paths.machineStateDir.appendingPathComponent(newSlug + ".json")
         try? FileManager.default.moveItem(at: old, to: new) // best-effort; regenerates if lost
+        invalidateCaches(slug)
+        invalidateCaches(newSlug)
         return newSlug
     }
 
@@ -536,5 +576,6 @@ public final class TaskStore {
         enc.outputFormatting = [.prettyPrinted, .sortedKeys]
         do { try (try? enc.encode(s))?.write(to: url, options: .atomic) }
         catch { NSLog("TaskDeck: machine-state write failed for \(slug): \(error)") }
+        invalidateCaches(slug)
     }
 }

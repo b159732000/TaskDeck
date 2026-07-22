@@ -269,8 +269,8 @@ final class AppModel: ObservableObject {
         let index = Dictionary(uniqueKeysWithValues: taskOrder.enumerated().map { ($1, $0) })
         list.sort { (index[$0.id] ?? .max) < (index[$1.id] ?? .max) }
         tasks = list
+        refreshDerived() // sweep below must judge on FRESH derived state
         autoArchiveSweep()
-        refreshDerived()
     }
 
     private func saveOrder() {
@@ -382,7 +382,7 @@ final class AppModel: ObservableObject {
     private func paneBelongs(_ info: PaneInfo, to slug: String) -> Bool {
         if let s = sessions[slug] {
             if s.machine.panes.contains(where: { $0.id == info.specID }) { return true }
-        } else if store.machineState(slug).panes.contains(where: { $0.id == info.specID }) {
+        } else if store.cachedMachineState(slug).panes.contains(where: { $0.id == info.specID }) {
             return true
         }
         return info.taskID == slug
@@ -413,14 +413,14 @@ final class AppModel: ObservableObject {
     /// ("Session ID: <uuid>") below the manifest divider — as long as the id
     /// is written somewhere in the note. Deduped by session id.
     func taskAISessions(_ slug: String) -> [TaskAISession] {
-        let machine = sessions[slug]?.machine ?? store.machineState(slug)
+        let machine = sessions[slug]?.machine ?? store.cachedMachineState(slug)
         var seen = Set<String>()
         var out: [TaskAISession] = []
         for pane in machine.panes where pane.kind == "ai" {
             guard let sid = pane.sessionID, seen.insert(sid).inserted else { continue }
             out.append(TaskAISession(sid: sid, team: pane.team, cwd: pane.cwd))
         }
-        let text = sessions[slug]?.noteText ?? store.read(slug)
+        let text = sessions[slug]?.noteText ?? store.cachedRead(slug)
         for line in TaskStore.manifestLines(text) where line.hasPrefix("- ") {
             let parts = line.dropFirst(2).split(separator: " ").map(String.init)
             guard parts.count >= 2 else { continue }
@@ -619,7 +619,7 @@ final class AppModel: ObservableObject {
     /// Manually designated 主力 (quota home) from machine state; in-memory for
     /// the open task, else read off disk (only here, off the render path).
     private func primaryTeam(_ slug: String) -> String? {
-        (sessions[slug]?.machine ?? store.machineState(slug)).primaryTeam
+        (sessions[slug]?.machine ?? store.cachedMachineState(slug)).primaryTeam
     }
 
     /// The task's "主 AI" for the sidebar: manual 主力 if set, else 現用.
@@ -817,7 +817,13 @@ final class AppModel: ObservableObject {
         for t in tasks where t.status == "active" {
             guard sidebarGroup(t) == .semiArchived,
                   let quiet = silence(t), quiet > Self.autoDoneAfter else { continue }
+            // A live terminal (dev server ticking along, shell mid-work) means
+            // the task isn't abandoned even if no AI signal moved for a month.
+            guard !taskHasLivePane(t.id) else { continue }
             var text = sessions[t.id]?.noteText ?? store.read(t.id)
+            // Empty read of an existing note = failed read; writing the
+            // archive annotation would clobber the note.
+            if text.isEmpty, FileManager.default.fileExists(atPath: store.noteURL(t.id).path) { continue }
             guard TaskStore.frontmatter(text)["auto_archived"] == nil else { continue }
             let stamp = df.string(from: Date())
             text = TaskStore.setFrontmatterValue(text, key: "status", value: "done")
@@ -871,6 +877,14 @@ final class AppModel: ObservableObject {
                   let state = obj["state"] as? String else { continue }
             let sid = f.deletingPathExtension().lastPathComponent
             let ts = (obj["ts"] as? Double).map { Date(timeIntervalSince1970: $0) } ?? .distantPast
+            // Prune on the way through: signals beyond the window steer nothing
+            // (grouping ignores them), so their files only make this 20s sweep
+            // slower forever. Unbounded before; a few months ≈ hundreds of
+            // stat+read+parse per pass.
+            if Date().timeIntervalSince(ts) > Self.signalWindow {
+                try? FileManager.default.removeItem(at: f)
+                continue
+            }
             map[sid] = (state, ts)
             // Attribution: rename-proof task_key first, then the slug tag.
             if let key = obj["task_key"] as? String, let slug = keyToSlug[key] {
@@ -881,6 +895,9 @@ final class AppModel: ObservableObject {
         }
         aiStatus = map
         sessionTask = taskMap
+        // acked entries whose signal is gone can never matter again; without
+        // pruning this dictionary (persisted to UserDefaults) only grows.
+        ackedAI = ackedAI.filter { map[$0.key] != nil }
         refreshDerived()
     }
 
