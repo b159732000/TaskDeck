@@ -64,8 +64,14 @@ final class Pane {
                  pid: pid, running: running, exitCode: exitCode, cols: cols, rows: rows)
     }
 
+    /// Clamp a terminal dimension into a sane range. `UInt16(v)` traps on a
+    /// negative or >65535 Int, so an unvalidated cols/rows from a client (e.g.
+    /// `taskdeckctl resize p -1 -1`, or a malformed frame) could crash the
+    /// daemon that owns every terminal. Clamp at the syscall boundary instead.
+    static func dim(_ v: Int) -> UInt16 { UInt16(max(1, min(v, 1000))) }
+
     func spawn(extraEnv: [String: String]) throws {
-        var ws = winsize(ws_row: UInt16(rows), ws_col: UInt16(cols), ws_xpixel: 0, ws_ypixel: 0)
+        var ws = winsize(ws_row: Pane.dim(rows), ws_col: Pane.dim(cols), ws_xpixel: 0, ws_ypixel: 0)
 
         var env = ProcessInfo.processInfo.environment
         // A pane must be a fresh login terminal, not inherit the environment
@@ -242,16 +248,26 @@ final class Pane {
             guard let self else { return }
             self.drain()
             self.closeMaster()
+            self.server.dying.removeValue(forKey: self.id) // release the retained ref
         }
         server.broadcastPaneExited(self)
         dlog("pane \(id) (\(title)) exited code=\(exitCode ?? -1)")
     }
 
+    /// Idempotent teardown for a pane removed after it already exited: reap any
+    /// unwaited child and close the master fd / sources. Safe to call twice.
+    func disposeIfNeeded() {
+        procSource?.cancel()
+        procSource = nil
+        if pid > 0 { var s: Int32 = 0; waitpid(pid, &s, WNOHANG) }
+        closeMaster()
+    }
+
     func resize(cols: Int, rows: Int) {
-        self.cols = cols
-        self.rows = rows
+        self.cols = max(1, min(cols, 1000))
+        self.rows = max(1, min(rows, 1000))
         guard master >= 0 else { return }
-        var ws = winsize(ws_row: UInt16(rows), ws_col: UInt16(cols), ws_xpixel: 0, ws_ypixel: 0)
+        var ws = winsize(ws_row: Pane.dim(self.rows), ws_col: Pane.dim(self.cols), ws_xpixel: 0, ws_ypixel: 0)
         _ = ioctl(master, TIOCSWINSZ_VALUE, &ws)
     }
 
@@ -320,6 +336,12 @@ final class Conn {
 final class Server {
     let queue = DispatchQueue(label: "taskdeckd.state")
     var panes: [String: Pane] = [:]
+    // Panes removed while still running are held here (strong ref) until their
+    // child exits and is reaped — otherwise `remove` dropped the only reference,
+    // the Pane deallocated, its [weak self] source handlers stopped, and
+    // childExited() never ran: no waitpid (zombie), no close(master) (leaked
+    // PTY fd), and the 2s SIGKILL escalation saw a nil pane (orphan process).
+    var dying: [String: Pane] = [:]
     var conns: [ObjectIdentifier: Conn] = [:]
     private var listenFD: Int32 = -1
     private var acceptSource: DispatchSourceRead?
@@ -450,10 +472,13 @@ final class Server {
         case "remove":
             if let pid = m.paneID, let pane = panes.removeValue(forKey: pid) {
                 if pane.running {
+                    dying[pid] = pane // retain until childExited reaps + closes fd
                     pane.terminate(force: false)
                     queue.asyncAfter(deadline: .now() + 2.0) { [weak pane] in
                         if let p = pane, p.running { p.terminate(force: true) }
                     }
+                } else {
+                    pane.disposeIfNeeded() // already exited: ensure fd/sources closed
                 }
             }
             reply(c, to: m, "ok")
