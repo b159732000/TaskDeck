@@ -535,7 +535,9 @@ struct LifecycleChips: View {
     var body: some View {
         HStack(spacing: 2) {
             if task.group != nil {
-                chip("play.fill", "回到待開工") { model.setGroupFlag(task.id, nil) }
+                // Not play.fill — that reads as "進行中/run", but you can't
+                // manually move to AI 執行中 (it's signal-driven). tray = backlog.
+                chip("tray", "回到待開工") { model.setGroupFlag(task.id, nil) }
             }
             if task.group != "needsyou" {
                 chip("bell", "移到等你（我要 review）") { model.setGroupFlag(task.id, "needsyou") }

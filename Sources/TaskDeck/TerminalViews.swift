@@ -105,12 +105,12 @@ final class GlassTerminalView: TerminalView {
             return super.performKeyEquivalent(with: event)
         }
         let mods = event.modifierFlags.intersection([.command, .shift, .option, .control])
-        if event.keyCode == 36, mods == .shift { // Shift+Return
-            if terminal?.keyboardEnhancementFlags.isEmpty == false {
-                send(txt: "\u{1b}[13;2u")
-            } else {
-                send([0x1b, 0x0d])
-            }
+        if event.keyCode == 36, mods == .shift { // Shift+Return → newline
+            // Send LF (Ctrl+J, 0x0a): Claude Code documents this as the
+            // universal "insert newline" input, working regardless of the
+            // kitty keyboard protocol. (The earlier kitty CSI-u / ESC+CR
+            // branch regressed whenever kitty negotiation flipped.)
+            send([0x0a])
             return true
         }
         if mods == .command {
