@@ -227,5 +227,50 @@ check("status: replace leaves the other entry", (s3 ?? "").contains("2607221046 
 check("status: replace absent entry → nil",
       TaskStore.replaceStatusLogEntry(s2, old: "9999999999 不存在", new: "x") == nil)
 
+// MARK: grouping rules (260720 v3) — lock behavior before it moved out of AppModel
+
+let gNow = Date()
+func sig(_ state: String, agoSec: TimeInterval, acked: Bool) -> SessionSignal {
+    SessionSignal(state: state, ts: gNow.addingTimeInterval(-agoSec), acked: acked)
+}
+func grp(status: String = "active", group: String? = nil, quiet: TimeInterval = 0,
+         _ signals: [SessionSignal]) -> TaskGroup {
+    GroupingRules.classify(status: status, group: group, quiet: quiet, signals: signals, now: gNow)
+}
+let sink = GroupingRules.sinkAfter
+
+check("grp: done wins over everything",
+      grp(status: "done", group: "needsyou", [sig("running", agoSec: 10, acked: false)]) == .done)
+check("grp: fresh running → aiRunning (overrides manual group)",
+      grp(group: "waiting", [sig("running", agoSec: 60, acked: false)]) == .aiRunning)
+check("grp: STALE running (>30m) is not running",
+      grp([sig("running", agoSec: 2000, acked: true)]) == .idle)
+check("grp: waiting group is sticky vs fresh attention",
+      grp(group: "waiting", [sig("waiting", agoSec: 30, acked: false)]) == .waitingExt)
+check("grp: waiting group sinks when quiet",
+      grp(group: "waiting", quiet: sink + 10, [sig("ended", agoSec: sink + 10, acked: true)]) == .semiArchived)
+check("grp: FRESH unacked stop resurfaces a 已讀 task to 等你",
+      grp(group: "read", [sig("waiting", agoSec: 30, acked: false)]) == .needsYou)
+check("grp: 已讀 with only an ACKED stop stays 已讀",
+      grp(group: "read", [sig("ended", agoSec: 300, acked: true)]) == .read)
+check("grp: 已讀 sinks to 半封存 when quiet",
+      grp(group: "read", quiet: sink + 10, [sig("ended", agoSec: sink + 10, acked: true)]) == .semiArchived)
+check("grp: unparked + unacked waiting → 等你",
+      grp([sig("waiting", agoSec: 30, acked: false)]) == .needsYou)
+check("grp: unparked + acked stop → 已讀",
+      grp([sig("waiting", agoSec: 30, acked: true)]) == .read)
+check("grp: manual 等你 survives with no signal", grp(group: "needsyou", []) == .needsYou)
+check("grp: nothing → 待開工", grp([]) == .idle)
+check("attn: unacked permission beats waiting, since = oldest",
+      {
+          let a = GroupingRules.attention([
+              sig("waiting", agoSec: 100, acked: false),
+              sig("permission", agoSec: 50, acked: false),
+          ])
+          return a?.permission == true && a?.since == gNow.addingTimeInterval(-100)
+      }())
+check("attn: all acked → nil",
+      GroupingRules.attention([sig("waiting", agoSec: 30, acked: true)]) == nil)
+
 print(failures == 0 ? "\nALL PASS" : "\n\(failures) FAILURE(S)")
 exit(failures == 0 ? 0 : 1)

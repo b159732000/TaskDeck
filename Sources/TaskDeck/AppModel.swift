@@ -409,12 +409,12 @@ final class AppModel: ObservableObject {
 
     // aiRunning is signal-driven（AI 執行中）; idle is the default home —
     // new tasks, shell-only work, and expired signals（待開工）.
-    enum SidebarGroup { case needsYou, aiRunning, idle, read, waitingExt, semiArchived, done }
+    // The grouping enum + rules now live in TaskDeckCore (selftested); this
+    // keeps every `AppModel.SidebarGroup` / `.needsYou` reference working.
+    typealias SidebarGroup = TaskGroup
 
-    /// 已讀 / 等待外部 items with 3 days of silence sink into 半封存
-    /// (folded); a month of silence there auto-archives into 已完成 with an
-    /// annotation (`autoArchiveSweep`).
-    static let sinkAfter: TimeInterval = 72 * 3600
+    /// 半封存 threshold (GroupingRules.sinkAfter) then auto-archive into 已完成
+    /// after a month of further silence (`autoArchiveSweep`).
     static let autoDoneAfter: TimeInterval = 30 * 24 * 3600
 
     private static let fmDate: DateFormatter = {
@@ -423,12 +423,6 @@ final class AppModel: ObservableObject {
         return df
     }()
 
-    /// States that mean the ball is in the user's court: output finished
-    /// (waiting), needs permission, or the session ended without ever being
-    /// acknowledged — an unreviewed ended session still owes a review
-    /// (Stop's "waiting" gets overwritten by SessionEnd's "ended" in the
-    /// one-state-per-session file, so excluding "ended" would drop the debt).
-    private static let attentionStates: Set<String> = ["waiting", "permission", "ended"]
     /// Signals older than this stop steering the sidebar either way；the
     /// real clearing mechanism is the ack（已看過）, not time.
     private static let signalWindow: TimeInterval = 7 * 24 * 3600
@@ -459,24 +453,33 @@ final class AppModel: ObservableObject {
             : ("waiting", mtime)
     }
 
-    /// The strongest unacked "ball is in your court" signal for a task:
-    /// permission beats waiting; `since` = when the AI stopped (oldest such
-    /// signal, so the needs-you queue is FIFO by how long you've been owed).
+    /// Impure snapshot feeding the pure GroupingRules: each of the task's AI
+    /// sessions resolved to its live signal (state + ts, only within the signal
+    /// window) plus whether the user has acked it. One gather, reused by the
+    /// classifier / attention / running checks so they can't drift apart.
     /// Sessions count wherever they live (pane spec or note manifest) and
-    /// whether or not their pane still runs — finished output awaits review
-    /// even after the process is gone.
-    func aiAttention(_ slug: String) -> (permission: Bool, since: Date)? {
-        var permission = false
-        var oldest: Date?
-        for s in taskAISessions(slug) {
-            guard let entry = statusEntry(sid: s.sid, team: s.team, cwd: s.cwd),
-                  Self.attentionStates.contains(entry.state),
-                  (ackedAI[s.sid] ?? .distantPast) < entry.ts else { continue }
-            if entry.state == "permission" { permission = true }
-            if oldest == nil || entry.ts < oldest! { oldest = entry.ts }
+    /// whether or not their pane still runs — finished output awaits review.
+    func sessionSignals(_ slug: String) -> [SessionSignal] {
+        taskAISessions(slug).compactMap { s in
+            guard let entry = statusEntry(sid: s.sid, team: s.team, cwd: s.cwd) else { return nil }
+            return SessionSignal(state: entry.state, ts: entry.ts,
+                                 acked: (ackedAI[s.sid] ?? .distantPast) >= entry.ts)
         }
-        guard let oldest else { return nil }
-        return (permission, oldest)
+    }
+
+    /// Seconds since the task last showed life (newest signal / group_since),
+    /// for the sink threshold — computed from an already-gathered snapshot.
+    private func quietSeconds(_ t: TaskNote, signals: [SessionSignal]) -> TimeInterval {
+        var candidates = signals.map(\.ts)
+        if let s = t.groupSince.flatMap({ Self.fmDate.date(from: $0) }) { candidates.append(s) }
+        guard let last = candidates.max() else { return 0 }
+        return Date().timeIntervalSince(last)
+    }
+
+    /// The strongest unacked "ball is in your court" signal (permission beats
+    /// waiting; `since` = oldest, FIFO by how long you've been owed).
+    func aiAttention(_ slug: String) -> (permission: Bool, since: Date)? {
+        GroupingRules.attention(sessionSignals(slug))
     }
 
     /// Ground-truth account for a session: which team's CLAUDE_CONFIG_DIR
@@ -576,28 +579,19 @@ final class AppModel: ObservableObject {
     /// stale review debts from OLDER sessions must not pin the task in
     /// 等你 (the PRO-1268 round two lesson, 260720).
     private func aiRunningNow(_ slug: String) -> Bool {
-        taskAISessions(slug).contains { s in
-            guard let entry = statusEntry(sid: s.sid, team: s.team, cwd: s.cwd) else { return false }
-            return entry.state == "running" && Date().timeIntervalSince(entry.ts) < 1800
-        }
+        GroupingRules.runningNow(sessionSignals(slug), now: Date())
     }
 
     /// Newest signal across the task's AI sessions (acked or not) —
     /// "last activity" for the sink rule.
     private func lastAIActivity(_ slug: String) -> Date? {
-        taskAISessions(slug)
-            .compactMap { statusEntry(sid: $0.sid, team: $0.team, cwd: $0.cwd)?.ts }
-            .max()
+        sessionSignals(slug).map(\.ts).max()
     }
 
     /// Does the task have an AI stop signal the user already acknowledged
     /// (= "已讀"：看過了、還沒給下一步)?
     private func hasAckedStop(_ slug: String) -> Bool {
-        taskAISessions(slug).contains { s in
-            guard let entry = statusEntry(sid: s.sid, team: s.team, cwd: s.cwd),
-                  Self.attentionStates.contains(entry.state) else { return false }
-            return (ackedAI[s.sid] ?? .distantPast) >= entry.ts
-        }
+        GroupingRules.hasAckedStop(sessionSignals(slug))
     }
 
     /// Seconds since the task last showed any sign of life（hook 訊號 or
@@ -610,41 +604,13 @@ final class AppModel: ObservableObject {
         return Date().timeIntervalSince(last)
     }
 
-    // Grouping model (260720 v3): MANUAL PLACEMENT STICKS; a running session
-    // is the only thing that overrides it. Rationale from real use: while you
-    // chat with a task, every finished turn emits a fresh "waiting" signal, so
-    // a recency rule ("newest event wins") could never let you park an
-    // actively-used task — each turn re-stole it to 等你. So:
-    //   • actively running → AI 執行中 (a live fact, always shown)
-    //   • parked (group set) → honor the manual group; a finished turn does
-    //     NOT bounce it to 等你 (you took control — it stays until you move it)
-    //   • not parked → AI signals drive: waiting/ended/permission → 等你
-    // This satisfies all three asks: unparked tasks auto-surface when the AI
-    // finishes, parked tasks stay put, and running always shows.
+    // Grouping model (260720 v3) now lives in TaskDeckCore.GroupingRules
+    // (selftested); this gathers the live snapshot once and delegates.
     func sidebarGroup(_ t: TaskNote) -> SidebarGroup {
-        if t.status == "done" { return .done }
-        let quiet = silence(t) ?? 0
-
-        if aiRunningNow(t.id) { return .aiRunning } // live fact, overrides all
-
-        // 等待外部 is fully sticky: you're blocked on a colleague/CI/review, so
-        // AI output must not drag it back. (Only a running session, above.)
-        if t.group == "waiting" {
-            return quiet > Self.sinkAfter ? .semiArchived : .waitingExt
-        }
-
-        // A FRESH (unacked) AI stop resurfaces a task to 等你 — even one marked
-        // 已讀: 已讀 means "seen the output so far"; a new turn's output is
-        // unseen, so it earns your attention again. (Marking 已讀 acks the
-        // then-current signal, so only a genuinely newer turn resurfaces.)
-        if aiAttention(t.id) != nil { return .needsYou }
-
-        // Manual 等你 that outlives its signal; then 已讀 / acked-seen; else idle.
-        if t.group == "needsyou" { return .needsYou }
-        if t.group == "read" || hasAckedStop(t.id) {
-            return quiet > Self.sinkAfter ? .semiArchived : .read
-        }
-        return .idle // new / no manual flag / expired signals
+        let signals = sessionSignals(t.id)
+        return GroupingRules.classify(status: t.status, group: t.group,
+                                      quiet: quietSeconds(t, signals: signals),
+                                      signals: signals, now: Date())
     }
 
     /// Manual move targets (frontmatter `group`): the value to store and the
