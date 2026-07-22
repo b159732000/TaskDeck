@@ -27,5 +27,9 @@ let package = Package(
         // are a plain executable: `swift run taskdeck-selftest` (exit ≠ 0 on
         // failure).
         .executableTarget(name: "taskdeck-selftest", dependencies: ["TaskDeckCore"]),
+        // Integration tests: spawns an ISOLATED taskdeckd on a temp socket
+        // (never the production one) and exercises the wire protocol + pane
+        // lifecycle. `swift run taskdeck-itest`, or Scripts/test.sh for all.
+        .executableTarget(name: "taskdeck-itest", dependencies: ["TaskDeckCore"]),
     ]
 )

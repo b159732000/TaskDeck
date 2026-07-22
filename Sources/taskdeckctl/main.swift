@@ -16,9 +16,13 @@ func flag(_ name: String) -> String? {
     return rawArgs[i + 1]
 }
 
+// --socket <path>: talk to an isolated (test) daemon instead of the real one.
+// Applied via env so Wire.socketPath() picks it up everywhere.
+if let sock = flag("--socket") { setenv("TASKDECK_SOCKET", sock, 1) }
+
 guard let cmd = rawArgs.first else {
     die("""
-    usage: taskdeckctl <command>
+    usage: taskdeckctl <command> [--socket <path>]
       ping
       list
       new <taskID> [--title t] [--cwd path] [--cmd 'command']

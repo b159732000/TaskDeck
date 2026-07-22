@@ -9,7 +9,13 @@ import TaskDeckCore
 // _IOW('t', 103, struct winsize) — the TIOCSWINSZ macro doesn't import into Swift.
 private let TIOCSWINSZ_VALUE: UInt = 0x8008_7467
 
-private let logFile: UnsafeMutablePointer<FILE>? = fopen(Paths.daemonLog.path, "a")
+// Opened by main AFTER flag parsing (tests pass --log so an isolated daemon
+// never appends to the production log).
+private var logFile: UnsafeMutablePointer<FILE>?
+
+func initLog(path: String) {
+    logFile = fopen(path, "a")
+}
 
 func dlog(_ s: String) {
     let df = DateFormatter()
@@ -511,6 +517,17 @@ final class Server {
 }
 
 // MARK: - main
+
+// Isolation flags for tests: `--socket <path>` (also honored via the
+// TASKDECK_SOCKET env by Wire.socketPath()) and `--log <path>`. Production
+// runs with no flags and keeps the App Support socket/log.
+let dArgs = CommandLine.arguments
+func dFlag(_ name: String) -> String? {
+    guard let i = dArgs.firstIndex(of: name), i + 1 < dArgs.count else { return nil }
+    return dArgs[i + 1]
+}
+if let sock = dFlag("--socket") { setenv("TASKDECK_SOCKET", sock, 1) }
+initLog(path: dFlag("--log") ?? Paths.daemonLog.path)
 
 setsid() // detach from whoever spawned us (usually the GUI); best-effort
 signal(SIGPIPE, SIG_IGN)

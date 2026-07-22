@@ -9,8 +9,15 @@ public enum Wire {
     /// a daemon restart kills every live terminal session the user has.
     public static let version = 1
 
+    /// Production socket lives in App Support. Tests inject TASKDECK_SOCKET
+    /// (or `taskdeckd/ctl --socket`) to run an ISOLATED daemon on a temp
+    /// socket without ever touching the real one — required because a daemon
+    /// restart kills every live terminal.
     public static func socketPath() -> String {
-        Paths.appSupport.appendingPathComponent("daemon.sock").path
+        if let env = ProcessInfo.processInfo.environment["TASKDECK_SOCKET"], !env.isEmpty {
+            return env
+        }
+        return Paths.appSupport.appendingPathComponent("daemon.sock").path
     }
 }
 
