@@ -926,11 +926,21 @@ final class TaskSession: ObservableObject {
             flushNote(); app.rescan()
             return
         }
-        // Dedupe on the text (ignoring stamp) so a re-commit doesn't re-log.
-        guard TaskStore.statusText(raw) != TaskStore.statusText(cur) else { return }
+        // No-op only when the WHOLE entry (stamp included) is unchanged, so a
+        // blur/re-open re-commit doesn't re-log — but editing just the stamp
+        // (39→46) still goes through, which comparing stamp-stripped text wrongly blocked.
+        guard raw != cur else { return }
         let entry = TaskStore.statusHasStamp(raw) ? raw : TaskStore.statusStamp() + " " + raw
+        guard entry != cur else { return }
         noteText = TaskStore.setFrontmatterValue(noteText, key: "latest", value: entry)
-        noteText = TaskStore.prependStatusLog(noteText, entry: entry)
+        // Same message, only the stamp/wording changed → edit that log line in
+        // place (no duplicate). A genuinely new message prepends a fresh line.
+        if !cur.isEmpty, TaskStore.statusText(entry) == TaskStore.statusText(cur),
+           let edited = TaskStore.replaceStatusLogEntry(noteText, old: cur, new: entry) {
+            noteText = edited
+        } else {
+            noteText = TaskStore.prependStatusLog(noteText, entry: entry)
+        }
         flushNote()
         app.rescan() // refresh the sidebar row immediately
     }

@@ -359,6 +359,26 @@ public final class TaskStore {
         return t
     }
 
+    /// Replace the first `- old` bullet in the `## 狀態` log with `- new` —
+    /// used to edit a status in place (e.g. correcting its timestamp) instead
+    /// of stacking a near-duplicate entry. Returns nil if `old` isn't a whole
+    /// bullet line in the log (caller then falls back to prepending).
+    public static func replaceStatusLogEntry(_ text: String, old: String, new: String) -> String? {
+        guard let h = text.range(of: "(?mi)^##[ \\t]+狀態[ \\t]*$", options: .regularExpression) else {
+            return nil
+        }
+        let start = h.upperBound
+        let end = text.range(of: "(?m)^#{1,6}[ \\t]", options: .regularExpression,
+                             range: start ..< text.endIndex)?.lowerBound ?? text.endIndex
+        guard let r = text.range(of: "- " + old, range: start ..< end) else { return nil }
+        // Whole-line match: preceded by a newline, followed by newline or EOF.
+        guard r.lowerBound == text.startIndex || text[text.index(before: r.lowerBound)] == "\n",
+              r.upperBound == text.endIndex || text[r.upperBound] == "\n" else { return nil }
+        var t = text
+        t.replaceSubrange(r, with: "- " + new)
+        return t
+    }
+
     /// All status entries from the `## 狀態` log, newest first (as stored).
     public static func statusHistory(_ text: String) -> [String] {
         guard let h = text.range(of: "(?mi)^##[ \\t]+狀態[ \\t]*$", options: .regularExpression) else {

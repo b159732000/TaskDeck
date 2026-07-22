@@ -209,5 +209,14 @@ check("status: history parses newest-first",
       TaskStore.statusHistory(s2) == ["2607221100 第二則", "2607221046 第一則"])
 check("status: Resources still intact after log", ResourceOps.parse(s2).isEmpty == false || s2.contains("### Chrome"))
 
+// MARK: status line — editing just the timestamp edits in place, no dup line
+let s3 = TaskStore.replaceStatusLogEntry(s2, old: "2607221100 第二則", new: "2607221146 第二則")
+check("status: replace edits the entry in place",
+      s3 != nil && s3!.contains("- 2607221146 第二則") && !s3!.contains("- 2607221100 第二則"))
+check("status: replace keeps entry count", TaskStore.statusHistory(s3 ?? s2).count == 2)
+check("status: replace leaves the other entry", (s3 ?? "").contains("2607221046 第一則"))
+check("status: replace absent entry → nil",
+      TaskStore.replaceStatusLogEntry(s2, old: "9999999999 不存在", new: "x") == nil)
+
 print(failures == 0 ? "\nALL PASS" : "\n\(failures) FAILURE(S)")
 exit(failures == 0 ? 0 : 1)
