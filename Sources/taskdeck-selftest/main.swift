@@ -272,5 +272,39 @@ check("attn: unacked permission beats waiting, since = oldest",
 check("attn: all acked → nil",
       GroupingRules.attention([sig("waiting", agoSec: 30, acked: true)]) == nil)
 
+// MARK: ByteQueue — FIFO semantics survive consume/compaction/trim
+
+var bq = ByteQueue()
+bq.append([1, 2, 3, 4, 5])
+bq.consume(2)
+check("bq: count after consume", bq.count == 3)
+check("bq: logical indexing", bq[0] == 3 && bq[2] == 5)
+check("bq: snapshot", bq.snapshot() == [3, 4, 5])
+bq.append([6, 7])
+check("bq: append after consume", bq.snapshot() == [3, 4, 5, 6, 7])
+bq.trimFront(toCount: 2)
+check("bq: trimFront keeps newest", bq.snapshot() == [6, 7])
+bq.consume(99)
+check("bq: over-consume empties", bq.isEmpty && bq.count == 0)
+// Compaction path: push enough through to trigger the head reset.
+var big = ByteQueue()
+let chunk = [UInt8](repeating: 0xAB, count: 32 * 1024)
+for _ in 0 ..< 8 { big.append(chunk) }
+big.consume(6 * 32 * 1024 + 5)
+check("bq: compaction keeps content", big.count == 2 * 32 * 1024 - 5 && big[0] == 0xAB)
+big.append([0xCD])
+check("bq: append after compaction", big.snapshot().last == 0xCD)
+// Frame reader still parses across chunked appends (offset-based buffer).
+let frMsg = { () -> WireMessage in var m = WireMessage(type: "ping"); m.id = "x"; return m }()
+let frData = FrameCodec.encode(frMsg)
+let fr = FrameCodec.Reader()
+fr.append(frData.prefix(3))
+check("bq-reader: partial frame → nil", fr.next() == nil)
+fr.append(frData.dropFirst(3))
+fr.append(frData) // second whole frame
+check("bq-reader: first frame parses", fr.next()?.type == "ping")
+check("bq-reader: second frame parses", fr.next()?.id == "x")
+check("bq-reader: drained", fr.next() == nil)
+
 print(failures == 0 ? "\nALL PASS" : "\n\(failures) FAILURE(S)")
 exit(failures == 0 ? 0 : 1)

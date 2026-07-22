@@ -79,6 +79,58 @@ public struct WireMessage: Codable {
     }
 }
 
+/// Growable FIFO byte buffer with an amortized-O(1) head: `consume` advances
+/// an offset and the storage is compacted only occasionally. Replaces the
+/// `Array.removeFirst(n)` pattern (an O(count) memmove per chunk) in the hot
+/// paths: pane ring buffers, pending PTY writes, per-connection output
+/// queues and the frame reader.
+public struct ByteQueue {
+    private var storage: [UInt8] = []
+    private var head = 0
+
+    public init() {}
+
+    public var count: Int { storage.count - head }
+    public var isEmpty: Bool { head >= storage.count }
+
+    public mutating func append<S: Sequence>(_ bytes: S) where S.Element == UInt8 {
+        storage.append(contentsOf: bytes)
+    }
+
+    /// Drop `n` bytes from the front (amortized O(1)).
+    public mutating func consume(_ n: Int) {
+        head = min(storage.count, head + n)
+        // Compact once the dead prefix dominates — keeps memory bounded
+        // without paying a memmove per consume.
+        if head > 64 * 1024, head * 2 > storage.count {
+            storage.removeFirst(head)
+            head = 0
+        }
+    }
+
+    /// Keep only the newest `n` bytes (ring-buffer trim).
+    public mutating func trimFront(toCount n: Int) {
+        if count > n { consume(count - n) }
+    }
+
+    public mutating func removeAll() {
+        storage.removeAll()
+        head = 0
+    }
+
+    /// Contiguous view of the unconsumed bytes.
+    public func withUnsafeBytes<R>(_ body: (UnsafeRawBufferPointer) throws -> R) rethrows -> R {
+        try storage.withUnsafeBytes { raw in
+            try body(UnsafeRawBufferPointer(rebasing: raw[head...]))
+        }
+    }
+
+    public func snapshot() -> [UInt8] { Array(storage[head...]) }
+
+    /// Byte at logical index (0 = oldest unconsumed).
+    public subscript(_ i: Int) -> UInt8 { storage[head + i] }
+}
+
 public enum FrameCodec {
     public static func encode(_ m: WireMessage) -> Data {
         let body = (try? JSONEncoder().encode(m)) ?? Data()
@@ -92,19 +144,19 @@ public enum FrameCodec {
     /// Incremental frame parser. Feed raw socket bytes with `append`, pull
     /// complete messages with `next()`.
     public final class Reader {
-        private var buffer = [UInt8]()
+        private var buffer = ByteQueue()
 
         public init() {}
 
-        public func append(_ d: Data) { buffer.append(contentsOf: d) }
+        public func append(_ d: Data) { buffer.append(d) }
 
         public func next() -> WireMessage? {
             while buffer.count >= 4 {
                 let len = Int(buffer[0]) << 24 | Int(buffer[1]) << 16 | Int(buffer[2]) << 8 | Int(buffer[3])
                 guard len >= 0, len < 64 * 1024 * 1024 else { buffer.removeAll(); return nil }
                 guard buffer.count >= 4 + len else { return nil }
-                let body = Data(buffer[4 ..< 4 + len])
-                buffer.removeSubrange(0 ..< 4 + len)
+                let body = buffer.withUnsafeBytes { raw in Data(raw[4 ..< 4 + len]) }
+                buffer.consume(4 + len)
                 if let m = try? JSONDecoder().decode(WireMessage.self, from: body) { return m }
                 // Undecodable frame: skip it and keep parsing.
             }

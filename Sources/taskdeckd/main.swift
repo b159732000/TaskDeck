@@ -41,15 +41,19 @@ final class Pane {
     var master: Int32 = -1
     var running = false
     var exitCode: Int32?
-    private(set) var ring = [UInt8]()
+    private(set) var ring = ByteQueue()
     private var readSource: DispatchSourceRead?
     private var procSource: DispatchSourceProcess?
     // Output that couldn't be written yet (PTY buffer full). Flushed by an
     // event-driven write source — never by spinning, which would wedge the
     // shared state queue (see writeBytes).
-    private var pendingWrite = [UInt8]()
+    private var pendingWrite = ByteQueue()
     private var writeSource: DispatchSourceWrite?
     private static let pendingCap = 4 * 1024 * 1024
+    // One drain pass stops after this many bytes and reschedules itself, so a
+    // firehose pane can't monopolize the shared state queue (input/resize for
+    // quiet panes stays responsive).
+    private static let drainBudget = 256 * 1024
     unowned let server: Server
 
     static let ringCap = 512 * 1024
@@ -183,10 +187,10 @@ final class Pane {
     }
 
     private func appendPending(_ slice: ArraySlice<UInt8>) {
-        pendingWrite.append(contentsOf: slice)
+        pendingWrite.append(slice)
         if pendingWrite.count > Pane.pendingCap {
             // Child isn't draining; cap the backlog rather than grow forever.
-            pendingWrite.removeFirst(pendingWrite.count - Pane.pendingCap)
+            pendingWrite.trimFront(toCount: Pane.pendingCap)
             dlog("pane \(id) write backlog capped (child not reading?)")
         }
     }
@@ -203,7 +207,7 @@ final class Pane {
         while !pendingWrite.isEmpty {
             let n = pendingWrite.withUnsafeBytes { Darwin.write(master, $0.baseAddress, $0.count) }
             if n > 0 {
-                pendingWrite.removeFirst(n)
+                pendingWrite.consume(n)
             } else if errno == EINTR {
                 continue
             } else if errno == EAGAIN || errno == EWOULDBLOCK {
@@ -219,13 +223,22 @@ final class Pane {
 
     private func drain() {
         var buf = [UInt8](repeating: 0, count: 65536)
+        var drained = 0
         while true {
             let n = read(master, &buf, buf.count)
             if n > 0 {
                 let chunk = Array(buf[0 ..< n])
-                ring.append(contentsOf: chunk)
-                if ring.count > Pane.ringCap { ring.removeFirst(ring.count - Pane.ringCap) }
+                ring.append(chunk)
+                ring.trimFront(toCount: Pane.ringCap)
                 server.broadcastOutput(pane: self, bytes: chunk)
+                drained += n
+                if drained >= Pane.drainBudget {
+                    // Yield the shared state queue; continue in a fresh block
+                    // so other panes' input/resize aren't starved by one
+                    // firehose (`yes`, huge build logs).
+                    server.queue.async { [weak self] in self?.drain() }
+                    return
+                }
             } else if n == 0 {
                 closeMaster()
                 return
@@ -294,18 +307,31 @@ final class Conn {
     let fd: Int32
     let reader = FrameCodec.Reader()
     var subs = Set<String>()
-    var alive = true
-    private let writeQ: DispatchQueue
     private var readSource: DispatchSourceRead?
+    // Outbound: buffered on the server's state queue and drained by an
+    // event-driven write source. The old design did BLOCKING writes on a
+    // per-conn queue, which (a) buffered without bound for a reader that
+    // stopped draining (yes/cat-bigfile → daemon RSS blowup), (b) on EAGAIN
+    // dropped the REST of a frame, permanently desyncing the length-prefixed
+    // stream, and (c) raced close(fd) on another queue — after fd recycling
+    // the tail bytes could land in an unrelated fd (even a PTY).
+    private var outBuf = ByteQueue()
+    private var writeSource: DispatchSourceWrite?
+    private var writeFD: Int32 = -1 // dup(fd); the write source owns this copy
+    private(set) var closed = false
+    /// A subscriber this far behind isn't reading: disconnect it rather than
+    /// buffer forever or drop mid-stream bytes. It can reconnect and get a
+    /// fresh ring replay.
+    static let highWater = 4 * 1024 * 1024
     unowned let server: Server
 
     init(fd: Int32, server: Server) {
         self.fd = fd
         self.server = server
-        writeQ = DispatchQueue(label: "taskdeckd.conn.write.\(fd)")
     }
 
     func start(on queue: DispatchQueue) {
+        _ = fcntl(fd, F_SETFL, O_NONBLOCK)
         let rs = DispatchSource.makeReadSource(fileDescriptor: fd, queue: queue)
         rs.setEventHandler { [weak self] in self?.readable() }
         rs.setCancelHandler { [fd] in close(fd) }
@@ -313,10 +339,15 @@ final class Conn {
         readSource = rs
     }
 
+    /// Full teardown; server.queue only.
     func stop() {
-        alive = false
-        readSource?.cancel()
+        guard !closed else { return }
+        closed = true
+        outBuf.removeAll()
+        readSource?.cancel() // its cancel handler closes fd
         readSource = nil
+        writeSource?.cancel() // its cancel handler closes writeFD
+        writeSource = nil
     }
 
     private func readable() {
@@ -330,19 +361,71 @@ final class Conn {
         }
     }
 
-    func send(_ m: WireMessage) {
-        guard alive else { return }
-        let data = FrameCodec.encode(m)
-        writeQ.async { [weak self] in
-            guard let self, self.alive else { return }
+    func send(_ m: WireMessage) { sendEncoded(FrameCodec.encode(m)) }
+
+    /// server.queue only. Fast path writes inline (non-blocking); leftovers
+    /// are buffered whole — never a partial frame drop — and flushed by the
+    /// write source when the socket drains.
+    func sendEncoded(_ data: Data) {
+        guard !closed else { return }
+        if outBuf.count + data.count > Conn.highWater {
+            dlog("conn fd=\(fd) output backlog over high-water; dropping subscriber")
+            server.drop(self)
+            return
+        }
+        if outBuf.isEmpty {
+            var off = 0
             data.withUnsafeBytes { raw in
-                var off = 0
                 while off < raw.count {
-                    let n = Darwin.write(self.fd, raw.baseAddress!.advanced(by: off), raw.count - off)
-                    if n > 0 { off += n } else if errno == EINTR { continue } else { return }
+                    let n = Darwin.write(fd, raw.baseAddress!.advanced(by: off), raw.count - off)
+                    if n > 0 { off += n } else if errno == EINTR { continue } else { break }
                 }
             }
+            if off >= data.count { return }
+            outBuf.append(data.dropFirst(off))
+        } else {
+            outBuf.append(data)
         }
+        armWriteSource()
+    }
+
+    private func armWriteSource() {
+        guard writeSource == nil, !closed else { return }
+        // The write source gets its own dup so each source owns exactly one
+        // fd copy and closes it in its cancel handler — no double-close races.
+        if writeFD < 0 {
+            writeFD = dup(fd)
+            guard writeFD >= 0 else { return }
+            setCloseOnExec(writeFD)
+        }
+        let ws = DispatchSource.makeWriteSource(fileDescriptor: writeFD, queue: server.queue)
+        ws.setEventHandler { [weak self] in self?.flushOut() }
+        ws.setCancelHandler { [writeFD] in close(writeFD) }
+        ws.activate()
+        writeSource = ws
+    }
+
+    private func flushOut() {
+        guard !closed else { return }
+        while !outBuf.isEmpty {
+            let n = outBuf.withUnsafeBytes { raw in
+                Darwin.write(writeFD, raw.baseAddress, raw.count)
+            }
+            if n > 0 {
+                outBuf.consume(n)
+            } else if errno == EINTR {
+                continue
+            } else if errno == EAGAIN || errno == EWOULDBLOCK {
+                return // still subscribed; fires again when writable
+            } else {
+                server.drop(self)
+                return
+            }
+        }
+        // Drained: disarm (cancel closes writeFD; next burst dups again).
+        writeSource?.cancel()
+        writeSource = nil
+        writeFD = -1
     }
 }
 
@@ -469,7 +552,7 @@ final class Server {
             c.subs.insert(pid)
             reply(c, to: m, "replay") {
                 $0.paneID = pid
-                $0.setData(pane.ring)
+                $0.setData(pane.ring.snapshot())
                 $0.cols = pane.cols
                 $0.rows = pane.rows
             }
@@ -525,7 +608,12 @@ final class Server {
         var m = WireMessage(type: "output")
         m.paneID = pane.id
         m.setData(bytes)
-        for c in conns.values where c.subs.contains(pane.id) { c.send(m) }
+        // Encode once, share across subscribers; snapshot the conns because a
+        // send can drop an over-backlog subscriber mid-iteration.
+        let encoded = FrameCodec.encode(m)
+        for c in Array(conns.values) where c.subs.contains(pane.id) {
+            c.sendEncoded(encoded)
+        }
     }
 
     func broadcastPaneExited(_ pane: Pane) {
@@ -533,7 +621,8 @@ final class Server {
         m.paneID = pane.id
         m.exitCode = pane.exitCode
         m.panes = [pane.infoStruct]
-        for c in conns.values { c.send(m) }
+        let encoded = FrameCodec.encode(m)
+        for c in Array(conns.values) { c.sendEncoded(encoded) }
     }
 }
 

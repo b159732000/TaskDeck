@@ -271,6 +271,75 @@ check("remove: daemon healthy after reap", req(conn, "ping")?.type == "pong")
 let list = req(conn, "list")
 check("list: removed pane absent", list?.panes?.contains { $0.id == sleeper } == false)
 
+// ---- backpressure -------------------------------------------------------------
+// A subscriber that stops reading must not balloon the daemon (bounded outBuf,
+// over-high-water disconnect), and a firehose pane must not starve control
+// traffic on other connections (drain budget).
+
+let flood = req(conn, "newPane") {
+    $0.taskID = "itest"
+    $0.specID = "flood"
+    $0.title = "flood"
+    $0.cwd = workDir
+    $0.shell = "/bin/sh"
+    $0.cols = 80
+    $0.rows = 24
+    $0.command = "yes taskdeck-flood-line | head -c 20000000; echo FLOOD-DONE"
+}
+let floodID = flood?.paneID ?? ""
+check("flood: pane created", flood?.type == "ok" && !floodID.isEmpty)
+
+// Stalled subscriber: subscribes, then never reads.
+let stalled = BlockingConn(path: sockPath)
+if let stalled {
+    var sub = WireMessage(type: "subscribe")
+    sub.paneID = floodID
+    sub.id = UUID().uuidString
+    stalled.send(sub)
+}
+check("flood: stalled subscriber attached", stalled != nil)
+
+// While the flood runs, the control connection must stay responsive.
+var maxPingMs = 0.0
+var pings = 0
+let floodDeadline = Date().addingTimeInterval(6)
+while Date() < floodDeadline {
+    let t0 = Date()
+    guard req(conn, "ping")?.type == "pong" else { break }
+    maxPingMs = max(maxPingMs, Date().timeIntervalSince(t0) * 1000)
+    pings += 1
+    usleep(200_000)
+}
+check("flood: control pings kept flowing (\(pings)x, max \(Int(maxPingMs))ms)",
+      pings >= 20 && maxPingMs < 2000)
+
+// Daemon memory must stay bounded (20MB flood vs 4MiB high-water).
+func rssKB(_ pid: Int32) -> Int {
+    let p = Process()
+    p.executableURL = URL(fileURLWithPath: "/bin/ps")
+    p.arguments = ["-o", "rss=", "-p", "\(pid)"]
+    let pipe = Pipe()
+    p.standardOutput = pipe
+    try? p.run()
+    let d = pipe.fileHandleForReading.readDataToEndOfFile()
+    p.waitUntilExit()
+    return Int(String(data: d, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "") ?? -1
+}
+let rss = rssKB(daemon.processIdentifier)
+check("flood: daemon RSS bounded (\(rss / 1024)MB)", rss > 0 && rss < 300_000)
+
+// The stalled subscriber should have been dropped once its backlog crossed
+// the high-water mark — its next request sees EOF after the buffered frames.
+if let stalled {
+    var p = WireMessage(type: "ping")
+    p.id = UUID().uuidString
+    stalled.send(p)
+    let dropped = stalled.request(WireMessage(type: "ping")) == nil
+    check("flood: stalled subscriber was disconnected", dropped)
+}
+check("flood: daemon healthy after flood", req(conn, "ping")?.type == "pong")
+_ = req(conn, "remove") { $0.paneID = floodID }
+
 // ---- singleton ---------------------------------------------------------------
 
 let second = spawnDaemon(socket: sockPath, log: tmpRoot + "/d2.log")

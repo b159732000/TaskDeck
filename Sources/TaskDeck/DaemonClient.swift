@@ -100,19 +100,45 @@ final class DaemonClient {
         onDisconnect?()
     }
 
+    // Output frames are coalesced per pane and delivered at most once per
+    // main-loop pass. The old per-frame `main.async` queued one closure per
+    // chunk — a firehose pane grew the main queue without bound and starved
+    // UI events behind thousands of tiny feed() calls.
+    private var outPending: [String: [UInt8]] = [:]
+    private var outFlushScheduled = false
+
     private func route(_ m: WireMessage) {
         if let id = m.id, let cb = pending.removeValue(forKey: id) {
             cb(m)
             return
         }
         if m.type == "output", let paneID = m.paneID, let bytes = m.dataBytes {
-            if let handlers = paneHandlers[paneID], !handlers.isEmpty {
-                let hs = Array(handlers.values)
-                DispatchQueue.main.async { for h in hs { h(bytes) } }
+            guard let handlers = paneHandlers[paneID], !handlers.isEmpty else { return }
+            outPending[paneID, default: []].append(contentsOf: bytes)
+            if !outFlushScheduled {
+                outFlushScheduled = true
+                DispatchQueue.main.async { [weak self] in self?.flushOutputs() }
             }
             return
         }
         onEvent?(m)
+    }
+
+    /// Main thread: hand each pane its accumulated bytes in one feed.
+    private func flushOutputs() {
+        let batch: [(handlers: [([UInt8]) -> Void], bytes: [UInt8])] = queue.sync {
+            defer {
+                outPending.removeAll(keepingCapacity: true)
+                outFlushScheduled = false
+            }
+            return outPending.compactMap { paneID, bytes in
+                guard let hs = paneHandlers[paneID], !hs.isEmpty, !bytes.isEmpty else { return nil }
+                return (Array(hs.values), bytes)
+            }
+        }
+        for entry in batch {
+            for h in entry.handlers { h(entry.bytes) }
+        }
     }
 
     // MARK: - API
