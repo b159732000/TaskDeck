@@ -5,6 +5,14 @@ import TaskDeckCore
 final class AppDelegate: NSObject, NSApplicationDelegate {
     static weak var model: AppModel?
 
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        // Writing to the daemon socket after taskdeckd dies (crash, or a dev
+        // restart) delivers SIGPIPE, which would kill the GUI outright. The
+        // daemon already ignores it; the GUI must too — a dead socket should
+        // surface as a write error, not a process death.
+        signal(SIGPIPE, SIG_IGN)
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
         MainActor.assumeIsolated {
             AppDelegate.model?.flushEverything()

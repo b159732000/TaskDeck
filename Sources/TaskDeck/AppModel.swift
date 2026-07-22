@@ -279,7 +279,10 @@ final class AppModel: ObservableObject {
         do {
             try FileManager.default.trashItem(at: note, resultingItemURL: nil)
         } catch {
-            try? FileManager.default.removeItem(at: note)
+            // The UI promises the note goes to the Trash (recoverable). If
+            // trashing fails, do NOT silently permanent-delete — keep the file
+            // (rescan re-lists it) so a transient failure can't destroy a note.
+            NSLog("TaskDeck: trash \(slug) failed, keeping note on disk: \(error)")
         }
         taskOrder.removeAll { $0 == slug }
         saveOrder()
@@ -347,23 +350,6 @@ final class AppModel: ObservableObject {
             out.append(TaskAISession(sid: sid, team: nil, cwd: nil))
         }
         return out
-    }
-
-    /// Sidebar badge for a task's AI sessions: 🔴 needs permission,
-    /// 🟢 running, 🟡 output finished（等你看）— including sessions that
-    /// already ended without being acknowledged. Acknowledged entries
-    /// (badge clicked) stay hidden until the state changes again.
-    func aiBadge(_ slug: String) -> String? {
-        var states: Set<String> = []
-        for s in taskAISessions(slug) {
-            guard let entry = statusEntry(sid: s.sid, team: s.team, cwd: s.cwd),
-                  (ackedAI[s.sid] ?? .distantPast) < entry.ts else { continue }
-            states.insert(entry.state)
-        }
-        if states.contains("permission") { return "🔴" }
-        if states.contains("running") { return "🟢" }
-        if states.contains("waiting") || states.contains("ended") { return "🟡" }
-        return nil
     }
 
     // MARK: - Accent theme
@@ -813,8 +799,15 @@ final class AppModel: ObservableObject {
             var status: Int32 = -1
             do {
                 try p.run()
+                // Watchdog: a hung quota CLI must not pin quotaBusy=true forever
+                // (which would block every later refresh until the GUI restarts).
+                let watchdog = Task {
+                    try? await Task.sleep(nanoseconds: 30_000_000_000)
+                    if p.isRunning { p.terminate() }
+                }
                 let data = pipe.fileHandleForReading.readDataToEndOfFile()
                 p.waitUntilExit()
+                watchdog.cancel()
                 status = p.terminationStatus
                 out = String(data: data, encoding: .utf8) ?? ""
             } catch {
