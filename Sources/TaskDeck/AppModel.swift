@@ -527,7 +527,15 @@ final class AppModel: ObservableObject {
     private var teamFileCache: [String: (team: String?, at: Date)] = [:]
 
     func teamFromSessionFile(_ sid: String) -> String? {
-        if let c = teamFileCache[sid], Date().timeIntervalSince(c.at) < 3 { return c.team }
+        if let c = teamFileCache[sid] {
+            // A session's account is immutable — its transcript is created in
+            // one account's dir and never moves — so once resolved, cache it
+            // for the whole run and NEVER re-scan (the old 3s TTL re-scanned
+            // disk every 3s on the main thread → periodic hitch). Keep retrying
+            // only while still unresolved (nil), with a short backoff.
+            if c.team != nil { return c.team }
+            if Date().timeIntervalSince(c.at) < 5 { return nil }
+        }
         let result = computeTeamFromSessionFile(sid)
         teamFileCache[sid] = (result, Date())
         return result
