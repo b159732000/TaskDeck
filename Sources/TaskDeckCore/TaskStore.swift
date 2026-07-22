@@ -210,6 +210,24 @@ public final class TaskStore {
         catch { NSLog("TaskDeck: note write failed for \(slug): \(error)") }
     }
 
+    /// Preserve an externally-edited version that would otherwise be
+    /// overwritten by an in-app save (both sides changed since the last sync).
+    /// Lands in `<tasksDir>/conflicts/` — inside the synced vault so it's
+    /// findable in Obsidian, but not scanned as a sidebar task.
+    public func writeConflictCopy(_ slug: String, _ diskText: String) {
+        let df = DateFormatter()
+        df.dateFormat = "yyMMdd-HHmmss"
+        let d = dir.appendingPathComponent("conflicts", isDirectory: true)
+        try? FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
+        let url = d.appendingPathComponent("\(slug)-\(df.string(from: Date())).md")
+        do {
+            try diskText.data(using: .utf8)?.write(to: url, options: .atomic)
+            NSLog("TaskDeck: concurrent edit on \(slug) — external version preserved at conflicts/\(url.lastPathComponent)")
+        } catch {
+            NSLog("TaskDeck: FAILED to preserve conflict copy for \(slug): \(error)")
+        }
+    }
+
     public func create(named name: String?) -> String {
         var slug = sanitize(name ?? "")
         if slug.isEmpty {
@@ -236,8 +254,15 @@ public final class TaskStore {
     public func rename(_ slug: String, to newNameRaw: String) -> String? {
         let newSlug = sanitize(newNameRaw)
         guard !newSlug.isEmpty, newSlug != slug else { return nil }
+        guard newSlug.uppercased() != "README", newSlug != "conflicts" else { return nil } // reserved
         guard !FileManager.default.fileExists(atPath: noteURL(newSlug).path) else { return nil }
         var text = read(slug)
+        // An empty read of an EXISTING note = failed read; renaming would
+        // recreate the note as empty. Bail out instead.
+        guard !text.isEmpty || !FileManager.default.fileExists(atPath: noteURL(slug).path) else {
+            NSLog("TaskDeck: rename aborted — could not read \(slug)")
+            return nil
+        }
         if let r = text.range(of: "(?m)^# .*$", options: .regularExpression) {
             text = text.replacingCharacters(in: r, with: "# \(newSlug)")
         }
@@ -491,10 +516,17 @@ public final class TaskStore {
 
     public func machineState(_ slug: String) -> TaskMachineState {
         let url = Paths.machineStateDir.appendingPathComponent(slug + ".json")
-        if let d = try? Data(contentsOf: url),
-           let s = try? JSONDecoder().decode(TaskMachineState.self, from: d) {
-            return s
-        }
+        guard let d = try? Data(contentsOf: url) else { return TaskMachineState() }
+        if let s = try? JSONDecoder().decode(TaskMachineState.self, from: d) { return s }
+        // Corrupt state file: preserve it for forensics BEFORE the next save
+        // overwrites it with a fresh empty state (pane specs/layout otherwise
+        // vanish untraceably).
+        let df = DateFormatter()
+        df.dateFormat = "yyMMdd-HHmmss"
+        let backup = url.deletingPathExtension()
+            .appendingPathExtension("corrupt-\(df.string(from: Date())).json")
+        try? FileManager.default.copyItem(at: url, to: backup)
+        NSLog("TaskDeck: machine state for \(slug) undecodable — backed up as \(backup.lastPathComponent)")
         return TaskMachineState()
     }
 

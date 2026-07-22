@@ -135,20 +135,39 @@ public struct AppConfig: Codable, Equatable {
         ansiColors = try c.decodeIfPresent([String].self, forKey: .ansiColors)
     }
 
+    /// Set when load() found an existing config it could not parse — the app
+    /// runs on in-memory defaults, the user's file is backed up and UNTOUCHED.
+    public private(set) static var lastLoadError: String?
+
     public static func load() -> AppConfig {
-        if let d = try? Data(contentsOf: Paths.configFile),
+        lastLoadError = nil
+        let path = Paths.configFile
+        guard FileManager.default.fileExists(atPath: path.path) else {
+            let c = AppConfig.fallback
+            try? c.save() // first run: materialize a template to edit
+            return c
+        }
+        if let d = try? Data(contentsOf: path),
            let c = try? JSONDecoder().decode(AppConfig.self, from: d) {
             return c
         }
-        let c = AppConfig.fallback
-        try? c.save()
-        return c
+        // Existing but unparsable (a JSON typo mid-edit): the old behavior
+        // silently overwrote it with defaults, permanently losing teams/paths.
+        // Preserve the file, keep a timestamped backup, run on defaults.
+        let df = DateFormatter()
+        df.dateFormat = "yyMMdd-HHmmss"
+        let backup = path.deletingLastPathComponent()
+            .appendingPathComponent("config.json.corrupt-\(df.string(from: Date()))")
+        try? FileManager.default.copyItem(at: path, to: backup)
+        lastLoadError = "config.json 解析失敗——原檔未動（另存 \(backup.lastPathComponent)），本次以預設值執行"
+        NSLog("TaskDeck: %@", lastLoadError!)
+        return AppConfig.fallback
     }
 
     public func save() throws {
         let enc = JSONEncoder()
         enc.outputFormatting = [.prettyPrinted, .sortedKeys]
-        try enc.encode(self).write(to: Paths.configFile)
+        try enc.encode(self).write(to: Paths.configFile, options: .atomic)
     }
 
     public var tasksDirURL: URL { URL(fileURLWithPath: Paths.expand(tasksDir)) }

@@ -63,6 +63,7 @@ final class AppModel: ObservableObject {
     init() {
         config = AppConfig.load()
         store = TaskStore(dir: config.tasksDirURL)
+        if let e = AppConfig.lastLoadError { daemonNote = e } // surfaced in DaemonStatusView
         let storedScale = UserDefaults.standard.double(forKey: "uiScale")
         uiScale = storedScale == 0 ? 1.0 : min(1.6, max(0.7, storedScale))
         taskOrder = (try? JSONDecoder().decode([String].self,
@@ -213,7 +214,7 @@ final class AppModel: ObservableObject {
         } else if reply == nil {
             daemonNote = "daemon 未回應握手"
         } else {
-            daemonNote = nil
+            daemonNote = AppConfig.lastLoadError // healthy daemon: keep config warning if any
         }
         await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
             client.request(WireMessage(type: "list")) { [weak self] resp in
@@ -293,6 +294,18 @@ final class AppModel: ObservableObject {
         if selection == slug { selection = newSlug }
     }
 
+    /// Read-modify-write on a CLOSED task's note. Aborts when the note exists
+    /// but the read failed — transforming "" and writing it back would clobber
+    /// the real note with a near-empty file.
+    private func mutateNoteOnDisk(_ slug: String, _ transform: (String) -> String) {
+        let text = store.read(slug)
+        if text.isEmpty, FileManager.default.fileExists(atPath: store.noteURL(slug).path) {
+            NSLog("TaskDeck: note mutation skipped for \(slug) — read failed")
+            return
+        }
+        store.write(slug, transform(text))
+    }
+
     func archiveTask(_ slug: String) {
         sessions[slug]?.flushAll()
         for info in paneRuntime.values where paneBelongs(info, to: slug) {
@@ -304,7 +317,7 @@ final class AppModel: ObservableObject {
         if let s = sessions[slug] {
             s.setNoteStatus("done")
         } else {
-            store.write(slug, TaskStore.setFrontmatterValue(store.read(slug), key: "status", value: "done"))
+            mutateNoteOnDisk(slug) { TaskStore.setFrontmatterValue($0, key: "status", value: "done") }
         }
         rescan()
         if selection == slug {
@@ -316,7 +329,7 @@ final class AppModel: ObservableObject {
         if let s = sessions[slug] {
             s.setNoteStatus("active")
         } else {
-            store.write(slug, TaskStore.setFrontmatterValue(store.read(slug), key: "status", value: "active"))
+            mutateNoteOnDisk(slug) { TaskStore.setFrontmatterValue($0, key: "status", value: "active") }
         }
         rescan()
     }
@@ -327,24 +340,32 @@ final class AppModel: ObservableObject {
     /// worth keeping at all.
     func deleteTask(_ slug: String) {
         sessions[slug]?.flushAll()
+        // Transaction order: trash the note FIRST. If trashing fails we abort
+        // with everything intact — the old order killed the panes and deleted
+        // the machine state before attempting the trash, so a failed trash
+        // left a half-dead task (terminals gone, layout gone, note stranded).
+        let note = store.noteURL(slug)
+        if FileManager.default.fileExists(atPath: note.path) {
+            do {
+                try FileManager.default.trashItem(at: note, resultingItemURL: nil)
+            } catch {
+                NSLog("TaskDeck: trash \(slug) failed — delete aborted, nothing touched: \(error)")
+                return
+            }
+        }
+        // Note is safely in the Trash; now clean up the rest.
         for info in paneRuntime.values where paneBelongs(info, to: slug) {
             var k = WireMessage(type: "remove")
             k.paneID = info.id
             client.fire(k)
         }
         paneRuntime = paneRuntime.filter { !paneBelongs($0.value, to: slug) }
+        // Tombstone before dropping our reference: a popout window may still
+        // hold this TaskSession, and its timers must not resurrect the note.
+        sessions[slug]?.markDeleted()
         sessions.removeValue(forKey: slug)
         try? FileManager.default.removeItem(
             at: Paths.machineStateDir.appendingPathComponent(slug + ".json"))
-        let note = store.noteURL(slug)
-        do {
-            try FileManager.default.trashItem(at: note, resultingItemURL: nil)
-        } catch {
-            // The UI promises the note goes to the Trash (recoverable). If
-            // trashing fails, do NOT silently permanent-delete — keep the file
-            // (rescan re-lists it) so a transient failure can't destroy a note.
-            NSLog("TaskDeck: trash \(slug) failed, keeping note on disk: \(error)")
-        }
         taskOrder.removeAll { $0 == slug }
         saveOrder()
         rescan()
@@ -778,7 +799,7 @@ final class AppModel: ObservableObject {
             s.noteText = transform(s.noteText)
             s.flushNote()
         } else {
-            store.write(slug, transform(store.read(slug)))
+            mutateNoteOnDisk(slug, transform)
         }
         // Marking 已讀/等待外部 acknowledges the current AI output, so it won't
         // immediately bounce back to 等你; only a genuinely newer turn will.
@@ -999,14 +1020,36 @@ final class TaskSession: ObservableObject {
 
     private var noteTimer: Timer?
     private var machineTimer: Timer?
+    /// The note content we last synced with disk (loaded, saved, or reloaded).
+    /// Lets flushNote detect a concurrent external edit: disk ≠ base = someone
+    /// (Obsidian, vault sync) wrote since we last looked.
+    private var baseText: String
+    /// Tombstone: the task was deleted while this session object may still be
+    /// referenced (popout window, timers). All saves become no-ops so a stray
+    /// flush can't resurrect the trashed note.
+    private(set) var deleted = false
+    /// The initial disk read failed on an EXISTING file (permissions, vault
+    /// lock, encoding). Saving would overwrite the real note with emptiness —
+    /// suppress all note saves until a later reload succeeds.
+    private var noteLoadFailed = false
 
     init(slug: String, app: AppModel) {
         self.slug = slug
         self.app = app
-        noteText = app.store.read(slug)
+        let loaded = app.store.read(slug)
+        if loaded.isEmpty,
+           FileManager.default.fileExists(atPath: app.store.noteURL(slug).path) {
+            // Existing note but empty read = failed read until proven otherwise.
+            noteLoadFailed = true
+            NSLog("TaskDeck: note read failed for \(slug); saves suppressed until a reload succeeds")
+        }
+        noteText = loaded
+        baseText = loaded
         machine = app.store.machineState(slug)
         autoStartPanes()
     }
+
+    func markDeleted() { deleted = true }
 
     func renamed(to newSlug: String) {
         slug = newSlug
@@ -1032,15 +1075,24 @@ final class TaskSession: ObservableObject {
     func flushNote() {
         noteTimer?.invalidate()
         noteTimer = nil
+        guard !deleted, !noteLoadFailed else { return } // tombstone / failed load
         let disk = app.store.read(slug)
         // Never let a stale in-memory copy destroy session ids that are
         // already on disk (vault sync / second instance / crash races) —
         // James lost a claude-eng id to exactly this class of race.
         let merged = TaskStore.mergeManifestLines(disk: disk, into: noteText)
         if merged != noteText { noteText = merged }
+        // Concurrent-edit guard: disk moved since our last sync AND we hold
+        // local edits. The manifest merge above rescues session ids, but the
+        // external BODY edit would be silently overwritten — keep a recovery
+        // copy in the vault (visible in Obsidian, not scanned as a task).
+        if !disk.isEmpty, disk != baseText, disk != merged {
+            app.store.writeConflictCopy(slug, disk)
+        }
         if disk != merged {
             app.store.write(slug, merged)
         }
+        baseText = merged
     }
 
     /// User-typed one-line status (frontmatter `latest`), shown under the
@@ -1090,12 +1142,16 @@ final class TaskSession: ObservableObject {
     /// itself doesn't schedule a save-back. Re-deriving noteText refreshes
     /// grouping / 現用 / the 續上 list, since taskAISessions reads it.
     func reloadFromDiskIfChanged() {
+        guard !deleted else { return }
         guard noteTimer == nil else { return } // pending in-app edit wins
         let disk = app.store.read(slug)
-        guard disk != noteText, !disk.isEmpty else { return }
+        guard !disk.isEmpty else { return }
+        noteLoadFailed = false // a successful read lifts the failed-load latch
+        guard disk != noteText else { baseText = disk; return }
         suppressSave = true
         noteText = disk
         suppressSave = false
+        baseText = disk
     }
 
     private func scheduleMachineSave() {
@@ -1108,6 +1164,7 @@ final class TaskSession: ObservableObject {
     func flushMachine() {
         machineTimer?.invalidate()
         machineTimer = nil
+        guard !deleted else { return }
         app.store.saveMachineState(slug, machine)
     }
 
@@ -1209,6 +1266,11 @@ final class TaskSession: ObservableObject {
             }
         }
         focusedSpecID = spec.id
+        // Persist BEFORE spawning: the note manifest (AI session id) and the
+        // machine spec used to sit in 0.8s/0.5s save debounces while the pane
+        // started immediately — a GUI crash in that window left a live
+        // conversation no note or spec knew about.
+        flushAll()
         startPane(spec)
     }
 
