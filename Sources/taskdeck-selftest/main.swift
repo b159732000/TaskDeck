@@ -158,6 +158,15 @@ check("fm: other keys survive", TaskStore.frontmatter(unparked)["created"] == "2
 check("fm: remove absent key is no-op",
       TaskStore.removeFrontmatterKey(fmNote, key: "group") == fmNote)
 
+// setFrontmatterValue must scope to frontmatter, never rewrite a body line
+let bodyLookalike = "---\nstatus: active\n---\n\n# t\n\n正文 group: 設計討論 這行不能被動\n"
+let setG = TaskStore.setFrontmatterValue(bodyLookalike, key: "group", value: "waiting")
+check("fm-set: body look-alike line untouched", setG.contains("正文 group: 設計討論 這行不能被動"))
+check("fm-set: key inserted into frontmatter", TaskStore.frontmatter(setG)["group"] == "waiting")
+let setG2 = TaskStore.setFrontmatterValue(setG, key: "group", value: "read")
+check("fm-set: update existing key stays in frontmatter", TaskStore.frontmatter(setG2)["group"] == "read")
+check("fm-set: update didn't touch body", setG2.contains("正文 group: 設計討論 這行不能被動"))
+
 // MARK: manifest merge-guard — stale flush must not drop session ids
 
 let diskNote = "---\nstatus: active\n---\n\n# t\n\n- claude-eng old-123\n- claude3 keep-456\n\n---\n\n內文"

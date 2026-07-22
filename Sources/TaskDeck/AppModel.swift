@@ -212,7 +212,7 @@ final class AppModel: ObservableObject {
     }
 
     private func saveOrder() {
-        try? (try? JSONEncoder().encode(taskOrder))?.write(to: Self.orderFile)
+        try? (try? JSONEncoder().encode(taskOrder))?.write(to: Self.orderFile, options: .atomic)
     }
 
     func newTask() {
@@ -460,9 +460,13 @@ final class AppModel: ObservableObject {
         let cwdPath = Paths.expand(cwd ?? config.defaultCwd)
         let projectSlug = cwdPath.replacingOccurrences(of: "/", with: "-")
             .replacingOccurrences(of: ".", with: "-")
-        let file = URL(fileURLWithPath: Paths.expand(dir))
-            .appendingPathComponent("projects/\(projectSlug)/\(sid).jsonl")
-        guard let mtime = (try? FileManager.default.attributesOfItem(atPath: file.path))?[.modificationDate] as? Date,
+        // The record is `<sid>.jsonl` (older) OR a `<sid>` directory (this
+        // claude version) — same dual-format teamFromSessionFile handles.
+        let proj = URL(fileURLWithPath: Paths.expand(dir)).appendingPathComponent("projects/\(projectSlug)")
+        let jsonl = proj.appendingPathComponent("\(sid).jsonl").path
+        let asDir = proj.appendingPathComponent(sid).path
+        let recPath = FileManager.default.fileExists(atPath: jsonl) ? jsonl : asDir
+        guard let mtime = (try? FileManager.default.attributesOfItem(atPath: recPath))?[.modificationDate] as? Date,
               Date().timeIntervalSince(mtime) < Self.signalWindow else { return nil }
         return Date().timeIntervalSince(mtime) < 600
             ? ("running", mtime)
@@ -520,21 +524,29 @@ final class AppModel: ObservableObject {
         let fm = FileManager.default
         let slug = Paths.expand(cwd)
             .replacingOccurrences(of: "/", with: "-").replacingOccurrences(of: ".", with: "-")
-        var out: [(String, String, Date)] = []
+        // Keyed by sid: a session can appear as BOTH `<sid>.jsonl` and a
+        // `<sid>` directory — collapse to one, newest mtime wins. Older code
+        // only matched `.jsonl` and silently missed directory-format records.
+        var best: [String: (team: String, at: Date)] = [:]
         for team in config.teams {
             guard let dir = team.configDir else { continue }
             let proj = URL(fileURLWithPath: Paths.expand(dir))
                 .appendingPathComponent("projects/\(slug)")
             guard let items = try? fm.contentsOfDirectory(
-                at: proj, includingPropertiesForKeys: [.contentModificationDateKey]) else { continue }
-            for f in items where f.pathExtension == "jsonl" {
-                let sid = f.deletingPathExtension().lastPathComponent
-                let mt = (try? f.resourceValues(forKeys: [.contentModificationDateKey]))?
-                    .contentModificationDate ?? .distantPast
-                out.append((team.id, sid, mt))
+                at: proj, includingPropertiesForKeys: [.contentModificationDateKey, .isDirectoryKey]) else { continue }
+            for f in items {
+                let vals = try? f.resourceValues(forKeys: [.contentModificationDateKey, .isDirectoryKey])
+                let isDir = vals?.isDirectory ?? false
+                guard f.pathExtension == "jsonl" || isDir else { continue }
+                let sid = f.pathExtension == "jsonl" ? f.deletingPathExtension().lastPathComponent
+                                                     : f.lastPathComponent
+                let mt = vals?.contentModificationDate ?? .distantPast
+                if let cur = best[sid], cur.at >= mt { continue }
+                best[sid] = (team.id, mt)
             }
         }
-        return out.sorted { $0.2 > $1.2 }.prefix(limit).map { $0 }
+        return best.map { (team: $0.value.team, sid: $0.key, at: $0.value.at) }
+            .sorted { $0.at > $1.at }.prefix(limit).map { $0 }
     }
 
     /// The account currently working on the task — "現用" in the header chip.

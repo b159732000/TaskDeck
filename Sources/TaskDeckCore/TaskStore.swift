@@ -199,7 +199,11 @@ public final class TaskStore {
     }
 
     public func write(_ slug: String, _ text: String) {
-        try? text.data(using: .utf8)?.write(to: noteURL(slug))
+        // Atomic: the note is the source of truth and lives in a synced vault —
+        // a torn/half write here would be propagated to other machines. Better
+        // to keep the last good file than emit a truncated one.
+        do { try text.data(using: .utf8)?.write(to: noteURL(slug), options: .atomic) }
+        catch { NSLog("TaskDeck: note write failed for \(slug): \(error)") }
     }
 
     public func create(named name: String?) -> String {
@@ -233,11 +237,14 @@ public final class TaskStore {
         if let r = text.range(of: "(?m)^# .*$", options: .regularExpression) {
             text = text.replacingCharacters(in: r, with: "# \(newSlug)")
         }
-        try? FileManager.default.moveItem(at: noteURL(slug), to: noteURL(newSlug))
+        // If the note move fails (vault lock, permissions, sync race), do NOT
+        // switch app state to a slug with no backing file — report failure.
+        do { try FileManager.default.moveItem(at: noteURL(slug), to: noteURL(newSlug)) }
+        catch { NSLog("TaskDeck: rename \(slug)→\(newSlug) failed: \(error)"); return nil }
         write(newSlug, text)
         let old = Paths.machineStateDir.appendingPathComponent(slug + ".json")
         let new = Paths.machineStateDir.appendingPathComponent(newSlug + ".json")
-        try? FileManager.default.moveItem(at: old, to: new)
+        try? FileManager.default.moveItem(at: old, to: new) // best-effort; regenerates if lost
         return newSlug
     }
 
@@ -302,7 +309,13 @@ public final class TaskStore {
     }
 
     public static func setFrontmatterValue(_ text: String, key: String, value: String) -> String {
-        if let r = text.range(of: "(?m)^\(NSRegularExpression.escapedPattern(for: key)): .*$", options: .regularExpression) {
+        // Only rewrite an existing key INSIDE the frontmatter block, never a
+        // look-alike line in the free-text body (mirrors removeFrontmatterKey).
+        let pattern = "(?m)^\(NSRegularExpression.escapedPattern(for: key)): .*$"
+        if text.hasPrefix("---\n"),
+           let close = text.range(of: "\n---", range: text.index(text.startIndex, offsetBy: 4) ..< text.endIndex),
+           let r = text.range(of: pattern, options: .regularExpression,
+                              range: text.startIndex ..< close.upperBound) {
             return text.replacingCharacters(in: r, with: "\(key): \(value)")
         }
         if text.hasPrefix("---\n") {
@@ -485,6 +498,7 @@ public final class TaskStore {
         let url = Paths.machineStateDir.appendingPathComponent(slug + ".json")
         let enc = JSONEncoder()
         enc.outputFormatting = [.prettyPrinted, .sortedKeys]
-        try? (try? enc.encode(s))?.write(to: url)
+        do { try (try? enc.encode(s))?.write(to: url, options: .atomic) }
+        catch { NSLog("TaskDeck: machine-state write failed for \(slug): \(error)") }
     }
 }
