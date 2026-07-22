@@ -27,8 +27,10 @@ const HOME = process.env.HOME || ""
 const DIR = join(HOME, "Library", "Application Support", "TaskDeck", "status")
 const DEBUG = !!process.env.TASKDECK_PLUGIN_DEBUG
 
-let lastState = null
-let lastRunningWrite = 0
+// Per-session throttle state: one opencode process can host several sessions,
+// so a shared scalar let session A's write suppress session B's.
+const lastState = new Map()
+const lastRunningWrite = new Map()
 
 function dbg(...a) {
   if (!DEBUG) return
@@ -39,9 +41,10 @@ function write(sid, state) {
   if (!TASK || !sid || String(sid).includes("/")) { dbg("skip", state, "sid=", sid); return }
   const now = Date.now() / 1000
   // Throttle repeated "running" writes; a state change always writes through.
-  if (state === "running" && lastState === "running" && now - lastRunningWrite < 2) return
-  if (state === "running") lastRunningWrite = now
-  lastState = state
+  if (state === "running" && lastState.get(sid) === "running"
+      && now - (lastRunningWrite.get(sid) || 0) < 2) return
+  if (state === "running") lastRunningWrite.set(sid, now)
+  lastState.set(sid, state)
   try {
     mkdirSync(DIR, { recursive: true })
     const rec = JSON.stringify({ session_id: sid, state, ts: now, task: TASK })

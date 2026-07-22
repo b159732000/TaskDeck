@@ -29,6 +29,7 @@ if not sid or "/" in sid:
 
 state = {
     "UserPromptSubmit": "running",
+    "PreToolUse": "running",
     "Stop": "waiting",
     "SessionEnd": "ended",
 }.get(event)
@@ -37,6 +38,19 @@ if event == "Notification":
     state = "permission" if "permission" in msg else "waiting"
 if not state:
     sys.exit(0)
+
+# PreToolUse fires on EVERY tool call — it exists to keep long turns visibly
+# "running" past the 30-min freshness window. Skip the rewrite when the file
+# is already a fresh "running" (<60s), so busy turns don't churn writes.
+if event == "PreToolUse":
+    try:
+        out = f"{out_dir}/{sid}.json"
+        if time.time() - os.stat(out).st_mtime < 60:
+            with open(out) as f:
+                if json.load(f).get("state") == "running":
+                    sys.exit(0)
+    except Exception:
+        pass
 
 # Atomic tmp+rename, NOT an in-place rewrite: the GUI watches the directory
 # with kqueue, which only fires on create/delete/RENAME — truncating the

@@ -34,7 +34,9 @@ with open(path) as f:
 
 hooks = settings.setdefault("hooks", {})
 changed = False
-for event in ["UserPromptSubmit", "Stop", "Notification", "SessionEnd"]:
+# PreToolUse keeps long turns visibly "running" (UserPromptSubmit alone goes
+# stale after the 30-min freshness window); the hook script self-throttles.
+for event in ["UserPromptSubmit", "PreToolUse", "Stop", "Notification", "SessionEnd"]:
     groups = hooks.setdefault(event, [])
     already = any(
         "taskdeck-ai-status" in (h.get("command") or "")
@@ -42,10 +44,13 @@ for event in ["UserPromptSubmit", "Stop", "Notification", "SessionEnd"]:
     )
     if already:
         continue
-    groups.append({"hooks": [{
+    entry = {"hooks": [{
         "type": "command",
         "command": f'"{hook}" {event}',
-    }]})
+    }]}
+    if event == "PreToolUse":
+        entry["matcher"] = "*"  # all tools
+    groups.append(entry)
     changed = True
 
 if changed:

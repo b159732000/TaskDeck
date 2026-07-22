@@ -540,10 +540,10 @@ final class AppModel: ObservableObject {
         // The record is `<sid>.jsonl` (older) OR a `<sid>` directory (this
         // claude version) — same dual-format teamFromSessionFile handles.
         let proj = URL(fileURLWithPath: Paths.expand(dir)).appendingPathComponent("projects/\(projectSlug)")
-        let jsonl = proj.appendingPathComponent("\(sid).jsonl").path
-        let asDir = proj.appendingPathComponent(sid).path
-        let recPath = FileManager.default.fileExists(atPath: jsonl) ? jsonl : asDir
-        guard let mtime = (try? FileManager.default.attributesOfItem(atPath: recPath))?[.modificationDate] as? Date,
+        let jsonl = proj.appendingPathComponent("\(sid).jsonl")
+        let asDir = proj.appendingPathComponent(sid)
+        let rec = FileManager.default.fileExists(atPath: jsonl.path) ? jsonl : asDir
+        guard let mtime = Self.transcriptMtime(rec),
               Date().timeIntervalSince(mtime) < Self.signalWindow else { return nil }
         return Date().timeIntervalSince(mtime) < 600
             ? ("running", mtime)
@@ -631,6 +631,24 @@ final class AppModel: ObservableObject {
     /// every hover re-sort.)
     func lastActivity(_ slug: String) -> Date? { derivedCache[slug]?.lastActivity }
 
+    /// Last-write instant of a conversation record. A `<sid>.jsonl` file is
+    /// its own mtime; a `<sid>/` DIRECTORY's mtime only changes when entries
+    /// are added/removed — appends to files inside don't touch it, so use the
+    /// newest content mtime (shallow) or the transcript looks idle mid-turn.
+    static func transcriptMtime(_ url: URL) -> Date? {
+        let fm = FileManager.default
+        var isDir: ObjCBool = false
+        guard fm.fileExists(atPath: url.path, isDirectory: &isDir) else { return nil }
+        let own = (try? fm.attributesOfItem(atPath: url.path))?[.modificationDate] as? Date
+        guard isDir.boolValue else { return own }
+        let kids = (try? fm.contentsOfDirectory(
+            at: url, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
+        let kidMax = kids.compactMap {
+            try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate
+        }.max()
+        return [own, kidMax].compactMap { $0 }.max()
+    }
+
     /// Ground-truth account for a session: which team's CLAUDE_CONFIG_DIR
     /// actually holds its conversation record. Beats the manifest's recorded
     /// team, which is only a guess at creation and wrong whenever the session
@@ -704,7 +722,10 @@ final class AppModel: ObservableObject {
                 guard f.pathExtension == "jsonl" || isDir else { continue }
                 let sid = f.pathExtension == "jsonl" ? f.deletingPathExtension().lastPathComponent
                                                      : f.lastPathComponent
-                let mt = vals?.contentModificationDate ?? .distantPast
+                // Directory records: the dir's own mtime misses appends to
+                // files inside — use the newest content mtime.
+                let mt = isDir ? (Self.transcriptMtime(f) ?? .distantPast)
+                               : (vals?.contentModificationDate ?? .distantPast)
                 if let cur = best[sid], cur.at >= mt { continue }
                 best[sid] = (team.id, mt)
             }
@@ -956,7 +977,11 @@ final class AppModel: ObservableObject {
         if force { cmd += " --max-age 0" }
         quotaBusy = true
         Task.detached(priority: .utility) {
-            let errPath = "/tmp/taskdeck-quota.err"
+            // Unique per invocation: a fixed /tmp path collided across
+            // instances and could serve another run's stale error text.
+            let errPath = FileManager.default.temporaryDirectory
+                .appendingPathComponent("taskdeck-quota-\(UUID().uuidString).err").path
+            defer { try? FileManager.default.removeItem(atPath: errPath) }
             let p = Process()
             p.executableURL = URL(fileURLWithPath: "/bin/zsh")
             // GUI apps get launchd's minimal PATH (no ~/.local/bin, no
