@@ -8,7 +8,9 @@ final class DaemonClient {
     private var fd: Int32 = -1
     private let queue = DispatchQueue(label: "taskdeck.client")
     private var readSource: DispatchSourceRead?
-    private let reader = FrameCodec.Reader()
+    // Fresh per connection: a half-received frame from a dropped connection
+    // must not desync parsing of the next one.
+    private var reader = FrameCodec.Reader()
     private var pending: [String: (WireMessage?) -> Void] = [:]
     private var paneHandlers: [String: [UUID: ([UInt8]) -> Void]] = [:]
 
@@ -49,13 +51,15 @@ final class DaemonClient {
             return false
         }
         fd = s
+        reader = FrameCodec.Reader() // never inherit a previous connection's half-frame
+        outPending.removeAll()
+        outFlushScheduled = false
         let src = DispatchSource.makeReadSource(fileDescriptor: s, queue: queue)
         src.setEventHandler { [weak self] in self?.readable() }
         src.activate()
         readSource = src
-        var hello = WireMessage(type: "hello")
-        hello.version = Wire.version
-        sendRaw(hello)
+        // Handshake (hello + version check) is driven by AppModel as a real
+        // request so drift is detected, not fired blind from here.
         return true
     }
 

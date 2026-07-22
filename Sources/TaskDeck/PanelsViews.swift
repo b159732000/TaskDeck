@@ -333,15 +333,22 @@ struct DaemonStatusView: View {
     var body: some View {
         HStack(spacing: 5) {
             Circle()
-                .fill(model.daemonOK ? Color(hex: 0x8FCF7F) : Color(hex: 0xE8646E))
+                .fill(model.daemonOK
+                    ? (model.daemonNote == nil ? Color(hex: 0x8FCF7F) : Color(hex: 0xE8B34B))
+                    : Color(hex: 0xE8646E))
                 .frame(width: 7, height: 7)
+            if let note = model.daemonNote, model.daemonOK {
+                Text(note).font(.system(size: 9)).foregroundStyle(.secondary).lineLimit(1)
+            }
             if !model.daemonOK {
                 Button("重連") { model.reconnectDaemon() }
                     .font(.caption)
                     .buttonStyle(.borderless)
             }
         }
-        .help(model.daemonOK ? "taskdeckd 連線中（GUI 重開不影響終端）" : "daemon 未連線")
+        .help(model.daemonOK
+            ? (model.daemonNote ?? "taskdeckd 連線中（GUI 重開不影響終端）")
+            : "daemon 未連線")
     }
 }
 

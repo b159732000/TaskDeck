@@ -226,6 +226,37 @@ let fdB = fdCount(specID: "fd-B", marker: "fdchk2")
 check("cloexec: pane sees its own fds only (≤5)", (fdA ?? 99) <= 5)
 check("cloexec: fd count does not grow with pane index", fdA != nil && fdB != nil && fdB! <= fdA!)
 
+// newPane is idempotent on (taskID, specID): a duplicate request (GUI racing
+// its own reconciliation, double-click) adopts the live pane instead of
+// spawning an invisible twin.
+let dupA = req(conn, "newPane") {
+    $0.taskID = "itest"
+    $0.specID = "dup-spec"
+    $0.title = "dup"
+    $0.cwd = workDir
+    $0.shell = "/bin/sh"
+    $0.cols = 80
+    $0.rows = 24
+    $0.command = "sleep 120"
+}
+let dupB = req(conn, "newPane") {
+    $0.taskID = "itest"
+    $0.specID = "dup-spec"
+    $0.title = "dup"
+    $0.cwd = workDir
+    $0.shell = "/bin/sh"
+    $0.cols = 80
+    $0.rows = 24
+    $0.command = "sleep 120"
+}
+check("newPane dedupe: same (task,spec) adopts the live pane",
+      dupA?.type == "ok" && dupB?.type == "ok"
+      && dupA?.paneID != nil && dupA?.paneID == dupB?.paneID)
+let dupList = req(conn, "list")
+check("newPane dedupe: exactly one pane for the spec",
+      dupList?.panes?.filter { $0.specID == "dup-spec" }.count == 1)
+if let dupID = dupA?.paneID { _ = req(conn, "remove") { $0.paneID = dupID } }
+
 // Invalid cwd must be rejected before fork, not silently run in /.
 let badCwd = req(conn, "newPane") {
     $0.taskID = "itest"

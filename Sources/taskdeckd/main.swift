@@ -524,6 +524,21 @@ final class Server {
                 reply(c, to: m, "error") { $0.message = "cwd is not a directory: \(cwd)" }
                 return
             }
+            // Idempotence on (taskID, specID): a GUI relaunch racing its own
+            // reconciliation (or a double-click) must adopt the live pane, not
+            // spawn an invisible duplicate. A restart flow removes the old
+            // pane first, so it never matches here.
+            if let sid = m.specID,
+               let existing = panes.values.first(where: {
+                   $0.specID == sid && $0.taskID == (m.taskID ?? "") && $0.running
+               }) {
+                dlog("newPane dedupe: adopting live pane \(existing.id) for spec \(sid)")
+                reply(c, to: m, "ok") {
+                    $0.paneID = existing.id
+                    $0.panes = [existing.infoStruct]
+                }
+                return
+            }
             let pane = Pane(taskID: m.taskID ?? "", specID: m.specID ?? UUID().uuidString,
                             title: m.title ?? "terminal", cwd: cwd,
                             shell: m.shell ?? "/bin/zsh",

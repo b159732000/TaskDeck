@@ -76,12 +76,14 @@ final class AppModel: ObservableObject {
             Task { @MainActor in self?.handleEvent(m) }
         }
         client.onDisconnect = { [weak self] in
-            Task { @MainActor in self?.daemonOK = false }
+            Task { @MainActor in
+                self?.daemonOK = false
+                self?.daemonReady = false
+            }
         }
 
         Task { @MainActor in
-            self.daemonOK = await self.client.connectOrSpawn()
-            if self.daemonOK { self.refreshPaneList() }
+            await self.establishDaemon()
             if self.selection == nil {
                 self.selection = self.tasks.first(where: { $0.status == "active" })?.id
             }
@@ -164,17 +166,75 @@ final class AppModel: ObservableObject {
     private func handleEvent(_ m: WireMessage) {
         switch m.type {
         case "paneExited":
-            if let info = m.panes?.first { paneRuntime[info.specID] = info }
+            // Idempotence: apply only to the pane we CURRENTLY track for that
+            // spec. After a restart, the old pane's exit event must not
+            // overwrite the fresh runtime entry (which left an invisible live
+            // pane); after closePane it must not resurrect a ghost entry.
+            if let info = m.panes?.first, paneRuntime[info.specID]?.id == info.id {
+                paneRuntime[info.specID] = info
+            }
         default:
             break
         }
     }
 
-    func reconnectDaemon() {
-        Task { @MainActor in
-            self.daemonOK = await self.client.connectOrSpawn()
-            if self.daemonOK { self.refreshPaneList() }
+    /// Ordered startup handshake: connect → verify protocol version → apply
+    /// the daemon's pane list → only then is `daemonReady` true and auto-start
+    /// allowed. Auto-starting before reconciliation spawned duplicates of
+    /// panes that were in fact alive in the daemon.
+    @Published private(set) var daemonReady = false
+    /// One-line connection warning surfaced in DaemonStatusView (e.g. protocol
+    /// version drift after updating the GUI while an old daemon keeps running).
+    @Published var daemonNote: String?
+    private var readyCallbacks: [() -> Void] = []
+
+    func onDaemonReady(_ cb: @escaping () -> Void) {
+        if daemonReady { cb() } else { readyCallbacks.append(cb) }
+    }
+
+    private func requestAsync(_ m: WireMessage) async -> WireMessage? {
+        await withCheckedContinuation { cont in
+            client.request(m) { cont.resume(returning: $0) }
         }
+    }
+
+    private func establishDaemon() async {
+        daemonReady = false
+        daemonOK = await client.connectOrSpawn()
+        guard daemonOK else { return }
+        var hello = WireMessage(type: "hello")
+        hello.version = Wire.version
+        let reply = await requestAsync(hello)
+        if let v = reply?.version, v != Wire.version {
+            // Additive protocol: keep working, but surface the drift — the
+            // running daemon predates this GUI. Never auto-restart it.
+            daemonNote = "daemon 協定 v\(v) ≠ GUI v\(Wire.version)——功能可能受限，請擇時重啟 daemon"
+            NSLog("TaskDeck: protocol version drift daemon=\(v) gui=\(Wire.version)")
+        } else if reply == nil {
+            daemonNote = "daemon 未回應握手"
+        } else {
+            daemonNote = nil
+        }
+        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+            client.request(WireMessage(type: "list")) { [weak self] resp in
+                Task { @MainActor in
+                    if let self, let panes = resp?.panes {
+                        var map: [String: PaneInfo] = [:]
+                        for p in panes { map[p.specID] = p }
+                        self.paneRuntime = map
+                    }
+                    cont.resume()
+                }
+            }
+        }
+        daemonReady = true
+        let cbs = readyCallbacks
+        readyCallbacks.removeAll()
+        for cb in cbs { cb() }
+    }
+
+    func reconnectDaemon() {
+        Task { @MainActor in await self.establishDaemon() }
     }
 
     func refreshPaneList() {
@@ -1142,8 +1202,15 @@ final class TaskSession: ObservableObject {
         startPane(spec)
     }
 
+    /// Spec IDs with an in-flight newPane request — a second click / a racing
+    /// auto-start must coalesce instead of spawning a duplicate.
+    private var pendingCreate: Set<String> = []
+
     func startPane(_ spec: PaneSpec) {
-        guard app.daemonOK else { return }
+        guard app.daemonReady else { return } // wait for hello + reconciliation
+        guard !pendingCreate.contains(spec.id) else { return }
+        if app.paneRuntime[spec.id]?.running == true { return } // already live
+        pendingCreate.insert(spec.id)
         var m = WireMessage(type: "newPane")
         m.taskID = slug
         m.specID = spec.id
@@ -1156,9 +1223,18 @@ final class TaskSession: ObservableObject {
         app.client.request(m) { [weak self] resp in
             Task { @MainActor in
                 guard let self else { return }
-                if let info = resp?.panes?.first {
-                    self.app.paneRuntime[info.specID] = info
+                self.pendingCreate.remove(spec.id)
+                guard let info = resp?.panes?.first else { return }
+                // Closed/deleted while the request was in flight → the fresh
+                // pane has no home; remove it instead of leaving an invisible
+                // live terminal in the daemon.
+                guard self.machine.panes.contains(where: { $0.id == spec.id }) else {
+                    var k = WireMessage(type: "remove")
+                    k.paneID = info.id
+                    self.app.client.fire(k)
+                    return
                 }
+                self.app.paneRuntime[info.specID] = info
             }
         }
     }
@@ -1209,7 +1285,13 @@ final class TaskSession: ObservableObject {
     }
 
     private func autoStartPanes() {
-        guard app.daemonOK else { return }
+        // Gate on full reconciliation (hello + list applied): auto-starting
+        // against an empty paneRuntime duplicated panes that were actually
+        // alive in the daemon. If not ready yet, run once it is.
+        guard app.daemonReady else {
+            app.onDaemonReady { [weak self] in self?.autoStartPanes() }
+            return
+        }
         for spec in machine.panes where spec.autoStart && app.paneRuntime[spec.id] == nil {
             startPane(spec)
         }
