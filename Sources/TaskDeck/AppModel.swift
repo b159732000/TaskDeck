@@ -630,10 +630,9 @@ final class AppModel: ObservableObject {
     }
 
     /// Manual move targets (frontmatter `group`): the value to store and the
-    /// section it lands in. `nil` value = clear flag → 待開工. AI 執行中 and
-    /// 半封存 are excluded (live/derived, not hand-settable).
+    /// section it lands in. AI 執行中 / 半封存 are live/derived (not hand-set),
+    /// and 待開工 is the no-activity default you fall into, not a target.
     static let manualMoveTargets: [(label: String, value: String?, group: SidebarGroup)] = [
-        ("待開工", nil, .idle),
         ("等你（我要 review）", "needsyou", .needsYou),
         ("已讀（看過先不回）", "read", .read),
         ("等待外部（同事 / review / CI）", "waiting", .waitingExt),

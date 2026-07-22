@@ -534,11 +534,9 @@ struct LifecycleChips: View {
 
     var body: some View {
         HStack(spacing: 2) {
-            if task.group != nil {
-                // Not play.fill — that reads as "進行中/run", but you can't
-                // manually move to AI 執行中 (it's signal-driven). tray = backlog.
-                chip("tray", "回到待開工") { model.setGroupFlag(task.id, nil) }
-            }
+            // No 待開工 chip: 待開工 is the no-AI-activity default, not a place
+            // you move to. Once a task has an AI signal it belongs in 等你/已讀,
+            // so "回到待開工" was semantically empty (and bounced to 已讀).
             if task.group != "needsyou" {
                 chip("bell", "移到等你（我要 review）") { model.setGroupFlag(task.id, "needsyou") }
             }
@@ -643,7 +641,6 @@ struct NewPaneMenu: View {
 struct NotesColumn: View {
     @EnvironmentObject var model: AppModel
     @EnvironmentObject var session: TaskSession
-    @FocusState private var noteFocused: Bool
 
     var body: some View {
         VStack(spacing: 0) {
@@ -668,21 +665,14 @@ struct NotesColumn: View {
             .frame(height: 30)
             .background(Theme.paneHeaderBG)
 
-            TextEditor(text: Binding(
-                get: { session.noteText },
-                set: { session.noteText = $0 }
-            ))
-            .font(.system(size: 13 * model.uiScale, design: .monospaced))
-            .lineSpacing(2.5)
-            .scrollContentBackground(.hidden)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 6)
-            // TextEditor（NSTextView）會吞掉點擊，tap gesture 收不到——用
-            // 「編輯器取得鍵盤焦點」當「筆記成為焦點區」的訊號最可靠。
-            .focused($noteFocused)
-            .onChange(of: noteFocused) { _, isFocused in
-                if isFocused { session.focusZone = .notes }
-            }
+            // NSTextView-backed: gives us ⌘B / ⌘I / ⌘⇧X markdown wrapping and a
+            // reliable "became focus zone" signal (becomeFirstResponder).
+            MarkdownNotesEditor(
+                text: Binding(get: { session.noteText },
+                              set: { session.noteText = $0 }),
+                fontSize: 13 * model.uiScale,
+                onFocus: { session.focusZone = .notes }
+            )
 
             // Small side terminals: stacked under the notes, out of the main
             // grid so they never steal split space from the big panes.
