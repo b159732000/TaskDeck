@@ -39,14 +39,24 @@ unix socket ↔ `taskdeckd` (owns every PTY). Public, source-available repo
 
 - Code comments in English. Design tokens live in
   `Sources/TaskDeck/Theme.swift` (dark-first).
-- **Task notes are free-form user documents.** The only structure the app
-  (or you) may maintain is (a) the top session-manifest block: a `- <team>
-  <session-id>` list right after the H1, closed by a `---` rule
-  (`TaskStore.appendSessionLine`); and (b) the `## Resources` section — URL
-  bullets the "open resources" button launches (`ResourceOps.parse`), where
-  tab snapshots rewrite ONLY the `### Chrome` / `### Safari` subsections
-  (`ResourceOps.setSnapshot`). Never add other template sections or
-  reformat the rest of a note.
+- **Task notes are free-form user documents.** The app (or you) may maintain
+  ONLY these structured pieces, and must never reformat the rest of a note:
+  - **frontmatter** lifecycle keys: `id` (permanent uuid), `status`,
+    `created`, `group`, `group_since`, `latest`, `auto_archived`
+    (`TaskStore.setFrontmatterValue` — scoped to the frontmatter block);
+  - the top **session-manifest block**: a `- <team> <session-id>` list right
+    after the H1, closed by a `---` rule (`TaskStore.appendSessionLine`);
+  - the **`## 狀態` log**: newest-first status-history bullets
+    (`TaskStore.prependStatusLog` / `replaceStatusLogEntry`) — James chose
+    keeping status history IN the note (Obsidian-visible) over a sidecar
+    file (decision 260721);
+  - the **`## Resources`** section — URL bullets the "open resources" button
+    launches (`ResourceOps.parse`); tab snapshots rewrite ONLY the
+    `### Chrome` / `### Safari` subsections (`ResourceOps.setSnapshot`);
+  - the **auto-archive annotation**: one trailing `> 🗄 …` blockquote when a
+    task auto-archives after 30d of silence (`autoArchiveSweep`).
+  Concurrent-edit safety: if an external (Obsidian) edit raced an in-app
+  save, the external version is preserved under `<tasksDir>/conflicts/`.
 - AI pane resume: uuid is written to the note first, then the session
   starts with `--session-id`; restart uses `-r <uuid> || --session-id
   <uuid>` (single line, resumes or creates). `TeamDef.args` are captured
