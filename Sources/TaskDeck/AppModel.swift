@@ -901,14 +901,29 @@ final class TaskSession: ObservableObject {
     /// sidebar title. Free text; empty clears it.
     var latestStatus: String { TaskStore.frontmatter(noteText)["latest"] ?? "" }
 
+    /// Full status history (newest first) from the note's `## 狀態` log.
+    var statusHistory: [String] { TaskStore.statusHistory(noteText) }
+
+    /// Record a status update. Smart timestamp: if the text already starts
+    /// with a manual stamp (e.g. "2607221046 …") it's kept as-is; otherwise
+    /// `statusStamp()` is prepended. Updates the sidebar `latest` and prepends
+    /// a history line to `## 狀態`. Empty clears `latest` (history untouched).
+    /// Re-committing the same text (blur/re-open) is a no-op, so no dup logs.
     func setLatestStatus(_ s: String) {
-        let v = s.replacingOccurrences(of: "\n", with: " ")
+        let raw = s.replacingOccurrences(of: "\n", with: " ")
             .trimmingCharacters(in: .whitespaces)
         let cur = TaskStore.frontmatter(noteText)["latest"] ?? ""
-        guard v != cur else { return }
-        noteText = v.isEmpty
-            ? TaskStore.removeFrontmatterKey(noteText, key: "latest")
-            : TaskStore.setFrontmatterValue(noteText, key: "latest", value: v)
+        if raw.isEmpty {
+            guard !cur.isEmpty else { return }
+            noteText = TaskStore.removeFrontmatterKey(noteText, key: "latest")
+            flushNote(); app.rescan()
+            return
+        }
+        // Dedupe on the text (ignoring stamp) so a re-commit doesn't re-log.
+        guard TaskStore.statusText(raw) != TaskStore.statusText(cur) else { return }
+        let entry = TaskStore.statusHasStamp(raw) ? raw : TaskStore.statusStamp() + " " + raw
+        noteText = TaskStore.setFrontmatterValue(noteText, key: "latest", value: entry)
+        noteText = TaskStore.prependStatusLog(noteText, entry: entry)
         flushNote()
         app.rescan() // refresh the sidebar row immediately
     }

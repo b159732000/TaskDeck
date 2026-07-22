@@ -191,5 +191,23 @@ check("slack: no team id → nil",
 check("slack: non-permalink → nil",
       ResourceOps.slackDeepLink("https://example.com/x", teamID: "T1") == nil)
 
+// MARK: status line — smart stamp, history log, dedupe
+
+check("status: manual stamp detected", TaskStore.statusHasStamp("2607221046 等 QA"))
+check("status: no stamp → not detected", !TaskStore.statusHasStamp("等 QA"))
+check("status: strip stamp", TaskStore.statusText("2607221046 等 QA") == "等 QA")
+check("status: strip no-op when no stamp", TaskStore.statusText("等 QA") == "等 QA")
+
+let s0 = "---\nstatus: active\n---\n\n# t\n\n- claude x\n\n---\n\n## Resources\n\n### Chrome\n"
+let s1 = TaskStore.prependStatusLog(s0, entry: "2607221046 第一則")
+check("status: log section created", s1.contains("## 狀態") && s1.contains("- 2607221046 第一則"))
+check("status: log sits above Resources", ordered(s1, "## 狀態", "## Resources"))
+let s2 = TaskStore.prependStatusLog(s1, entry: "2607221100 第二則")
+check("status: newest prepended on top",
+      ordered(s2, "第二則", "第一則"))
+check("status: history parses newest-first",
+      TaskStore.statusHistory(s2) == ["2607221100 第二則", "2607221046 第一則"])
+check("status: Resources still intact after log", ResourceOps.parse(s2).isEmpty == false || s2.contains("### Chrome"))
+
 print(failures == 0 ? "\nALL PASS" : "\n\(failures) FAILURE(S)")
 exit(failures == 0 ? 0 : 1)

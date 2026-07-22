@@ -323,21 +323,58 @@ struct StatusLineField: View {
     @EnvironmentObject var session: TaskSession
     @State private var text = ""
     @FocusState private var focused: Bool
+    @State private var showHistory = false
 
     var body: some View {
         HStack(spacing: 6) {
             Image(systemName: "text.line.first.and.arrowtriangle.forward")
                 .font(.system(size: 9))
                 .foregroundStyle(.tertiary)
-            TextField("最新狀態…（例：07201822 等 QA）", text: $text)
+            TextField("最新狀態…（例：等 QA；不打時間會自動加）", text: $text)
                 .textFieldStyle(.plain)
                 .font(.system(size: 11))
                 .foregroundStyle(Theme.accent)
                 .focused($focused)
-                .onSubmit { session.setLatestStatus(text) }
-                .onChange(of: focused) { f in if !f { session.setLatestStatus(text) } }
+                .onSubmit { commit() }
+                .onChange(of: focused) { f in if !f { commit() } }
                 .task(id: session.slug) { text = session.latestStatus }
+            // History disclosure — the full ## 狀態 log, newest first.
+            let history = session.statusHistory
+            if !history.isEmpty {
+                Button { showHistory.toggle() } label: {
+                    Image(systemName: "clock.arrow.circlepath").font(.system(size: 10))
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .help("狀態歷史（\(history.count)）")
+                .popover(isPresented: $showHistory, arrowEdge: .bottom) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("狀態歷史").font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                        Divider()
+                        ScrollView {
+                            VStack(alignment: .leading, spacing: 3) {
+                                ForEach(Array(history.enumerated()), id: \.offset) { _, e in
+                                    Text(e).font(.system(size: 11.5, design: .monospaced))
+                                        .textSelection(.enabled)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                }
+                            }
+                        }
+                        .frame(maxHeight: 280)
+                    }
+                    .padding(12)
+                    .frame(width: 360)
+                }
+            }
         }
+    }
+
+    /// Sync the field back to the (possibly re-stamped) stored value after a
+    /// commit, so an auto-added timestamp shows and re-commits dedupe cleanly.
+    private func commit() {
+        session.setLatestStatus(text)
+        text = session.latestStatus
     }
 }
 

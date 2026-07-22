@@ -311,6 +311,69 @@ public final class TaskStore {
         return "---\n\(key): \(value)\n---\n\n" + text
     }
 
+    // MARK: - Status line & history
+
+    /// Timestamp for an auto-stamped status entry, matching James's manual
+    /// habit "YYMMDDHHmm" (e.g. 2607221046). `now` injected for testability.
+    public static func statusStamp(_ now: Date = Date()) -> String {
+        let df = DateFormatter()
+        df.dateFormat = "yyMMddHHmm"
+        return df.string(from: now)
+    }
+
+    /// A status entry already carrying a leading timestamp token (8–14
+    /// digits, like a manually typed "2607221046 …")? Then it's used as-is;
+    /// otherwise the caller auto-prepends `statusStamp()`.
+    public static func statusHasStamp(_ raw: String) -> Bool {
+        raw.range(of: "^\\d{8,14}(\\s|$)", options: .regularExpression) != nil
+    }
+
+    /// The text of a status entry with any leading timestamp stripped — used
+    /// to dedupe re-commits (same text, ignore the stamp).
+    public static func statusText(_ entry: String) -> String {
+        entry.replacingOccurrences(of: "^\\d{8,14}\\s+", with: "", options: .regularExpression)
+            .trimmingCharacters(in: .whitespaces)
+    }
+
+    /// Prepend a status entry (newest on top) to the note's `## 狀態` log,
+    /// creating the section in the structured top area (below the manifest,
+    /// before free-form notes) when absent.
+    public static func prependStatusLog(_ text: String, entry: String) -> String {
+        let bullet = "- " + entry
+        if let h = text.range(of: "(?mi)^##[ \\t]+狀態[ \\t]*$", options: .regularExpression) {
+            let afterHeading = text.range(of: "\n", range: h.upperBound ..< text.endIndex)?.upperBound
+                ?? text.endIndex
+            var t = text
+            t.insert(contentsOf: "\n" + bullet, at: afterHeading)
+            return t
+        }
+        let anchor = ResourceOps.resourcesInsertionPoint(text)
+        var t = text
+        var block = "\n## 狀態\n\n\(bullet)\n"
+        if anchor == t.startIndex {
+            block.removeFirst()
+        } else if t[t.index(before: anchor)] != "\n" {
+            block = "\n" + block
+        }
+        t.insert(contentsOf: block, at: anchor)
+        return t
+    }
+
+    /// All status entries from the `## 狀態` log, newest first (as stored).
+    public static func statusHistory(_ text: String) -> [String] {
+        guard let h = text.range(of: "(?mi)^##[ \\t]+狀態[ \\t]*$", options: .regularExpression) else {
+            return []
+        }
+        let start = h.upperBound
+        let end = text.range(of: "(?m)^#{1,6}[ \\t]", options: .regularExpression,
+                             range: start ..< text.endIndex)?.lowerBound ?? text.endIndex
+        return text[start ..< end]
+            .split(separator: "\n")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { $0.hasPrefix("- ") }
+            .map { String($0.dropFirst(2)) }
+    }
+
     /// Record a session line in the note's top manifest block: right after
     /// the H1 (or frontmatter), a run of `- …` list lines closed by a `---`
     /// rule, with free-form notes below. Creates the block when absent:
