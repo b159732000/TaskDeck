@@ -132,7 +132,9 @@ final class DaemonClient {
 
     /// Subscribe to a pane's output. The daemon replies with a ring-buffer
     /// replay which is delivered through the same handler, then live output.
-    func subscribe(paneID: String, handler: @escaping ([UInt8]) -> Void) -> UUID {
+    func subscribe(paneID: String,
+                   replaySize: ((_ cols: Int, _ rows: Int) -> Void)? = nil,
+                   handler: @escaping ([UInt8]) -> Void) -> UUID {
         let token = UUID()
         queue.async {
             self.paneHandlers[paneID, default: [:]][token] = handler
@@ -140,8 +142,15 @@ final class DaemonClient {
             m.paneID = paneID
             m.id = UUID().uuidString
             self.pending[m.id!] = { resp in
+                let size: (Int, Int)? = {
+                    if let c = resp?.cols, let r = resp?.rows { return (c, r) }
+                    return nil
+                }()
                 if let bytes = resp?.dataBytes {
-                    DispatchQueue.main.async { handler(bytes) }
+                    DispatchQueue.main.async {
+                        if let size { replaySize?(size.0, size.1) } // size buffer before feeding
+                        handler(bytes)
+                    }
                 }
             }
             self.sendRaw(m)

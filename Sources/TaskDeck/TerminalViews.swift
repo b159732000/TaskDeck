@@ -49,6 +49,18 @@ final class GlassTerminalView: TerminalView {
         needsDisplay = true
     }
 
+    /// Size the buffer to the width the replayed scrollback was produced at
+    /// (the daemon's PTY size) BEFORE the view lays out to its own size.
+    /// Otherwise, re-attaching on a task switch feeds the replay into a view
+    /// still at its transient initial frame, so history re-wraps at the wrong
+    /// column and looks garbled until a manual resize. Feeding at the true
+    /// production width means the only reflow is the (usually small) step to
+    /// the view's real width, done once on layout.
+    func applyReplaySize(cols: Int, rows: Int) {
+        guard cols > 1, rows > 1 else { return }
+        terminal?.resize(cols: cols, rows: rows)
+    }
+
     // MARK: - File drag & drop → insert path(s)
 
     override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
@@ -180,9 +192,14 @@ struct TerminalHostView: NSViewRepresentable {
             self.tv = tv
             self.client = client
             self.paneID = paneID
-            token = client.subscribe(paneID: paneID) { [weak tv] bytes in
-                tv?.feed(byteArray: bytes[...])
-            }
+            token = client.subscribe(
+                paneID: paneID,
+                replaySize: { [weak tv] cols, rows in
+                    (tv as? GlassTerminalView)?.applyReplaySize(cols: cols, rows: rows)
+                },
+                handler: { [weak tv] bytes in
+                    tv?.feed(byteArray: bytes[...])
+                })
         }
 
         func detach() {

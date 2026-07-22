@@ -193,11 +193,23 @@ struct SidebarView: View {
                 Text(t.title)
                     .font(.system(size: 12.5 * model.uiScale))
                     .lineLimit(1)
-                if let created = t.created {
-                    Text(created)
-                        .font(.system(size: 9.5 * model.uiScale))
-                        .foregroundStyle(.tertiary)
-                        .lineLimit(1)
+                HStack(spacing: 5) {
+                    if let created = t.created {
+                        Text(created)
+                            .font(.system(size: 9.5 * model.uiScale))
+                            .foregroundStyle(.tertiary)
+                            .lineLimit(1)
+                    }
+                    // 主 AI（主力 if set, else 現用）— cached, no per-render disk.
+                    if let team = model.mainTeam(t.id) {
+                        Text(team)
+                            .font(.system(size: 8.5 * model.uiScale, weight: .medium))
+                            .foregroundStyle(Theme.accent.opacity(0.9))
+                            .lineLimit(1)
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 0.5)
+                            .background(Theme.accent.opacity(0.12), in: Capsule())
+                    }
                 }
                 // User-typed latest status（詳情頁頂端可編輯；設定檔案 frontmatter latest）
                 if let s = t.statusLine, !s.isEmpty {

@@ -493,6 +493,7 @@ final class AppModel: ObservableObject {
         let group: SidebarGroup
         let attention: (permission: Bool, since: Date)?
         let activeTeam: String?
+        let mainTeam: String?   // 主力 (manual) ?? 現用 — the sidebar's "主 AI"
     }
     private var derivedCache: [String: Derived] = [:]
 
@@ -505,12 +506,23 @@ final class AppModel: ObservableObject {
             let group = GroupingRules.classify(status: t.status, group: t.group,
                                                quiet: quietSeconds(t, signals: signals),
                                                signals: signals, now: now)
+            let active = computeActiveTeam(t.id)
             cache[t.id] = Derived(group: group,
                                   attention: GroupingRules.attention(signals),
-                                  activeTeam: computeActiveTeam(t.id))
+                                  activeTeam: active,
+                                  mainTeam: primaryTeam(t.id) ?? active)
         }
         derivedCache = cache
     }
+
+    /// Manually designated 主力 (quota home) from machine state; in-memory for
+    /// the open task, else read off disk (only here, off the render path).
+    private func primaryTeam(_ slug: String) -> String? {
+        (sessions[slug]?.machine ?? store.machineState(slug)).primaryTeam
+    }
+
+    /// The task's "主 AI" for the sidebar: manual 主力 if set, else 現用.
+    func mainTeam(_ slug: String) -> String? { derivedCache[slug]?.mainTeam }
 
     /// Ground-truth account for a session: which team's CLAUDE_CONFIG_DIR
     /// actually holds its conversation record. Beats the manifest's recorded
