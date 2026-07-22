@@ -493,7 +493,9 @@ final class AppModel: ObservableObject {
         let group: SidebarGroup
         let attention: (permission: Bool, since: Date)?
         let activeTeam: String?
-        let mainTeam: String?   // 主力 (manual) ?? 現用 — the sidebar's "主 AI"
+        let mainTeam: String?          // 主力 (manual) ?? 現用 — the sidebar's "主 AI"
+        let lastActivity: Date?        // for silence(); cached so the sidebar sort
+                                       // (re-run on every hover) does zero disk I/O
     }
     private var derivedCache: [String: Derived] = [:]
 
@@ -503,14 +505,18 @@ final class AppModel: ObservableObject {
         cache.reserveCapacity(tasks.count)
         for t in tasks {
             let signals = sessionSignals(t.id)
+            var when = signals.map(\.ts)
+            if let s = t.groupSince.flatMap({ Self.fmDate.date(from: $0) }) { when.append(s) }
+            let lastActivity = when.max()
             let group = GroupingRules.classify(status: t.status, group: t.group,
-                                               quiet: quietSeconds(t, signals: signals),
+                                               quiet: lastActivity.map { now.timeIntervalSince($0) } ?? 0,
                                                signals: signals, now: now)
             let active = computeActiveTeam(t.id)
             cache[t.id] = Derived(group: group,
                                   attention: GroupingRules.attention(signals),
                                   activeTeam: active,
-                                  mainTeam: primaryTeam(t.id) ?? active)
+                                  mainTeam: primaryTeam(t.id) ?? active,
+                                  lastActivity: lastActivity)
         }
         derivedCache = cache
     }
@@ -634,12 +640,6 @@ final class AppModel: ObservableObject {
         GroupingRules.runningNow(sessionSignals(slug), now: Date())
     }
 
-    /// Newest signal across the task's AI sessions (acked or not) —
-    /// "last activity" for the sink rule.
-    private func lastAIActivity(_ slug: String) -> Date? {
-        sessionSignals(slug).map(\.ts).max()
-    }
-
     /// Does the task have an AI stop signal the user already acknowledged
     /// (= "已讀"：看過了、還沒給下一步)?
     private func hasAckedStop(_ slug: String) -> Bool {
@@ -649,11 +649,14 @@ final class AppModel: ObservableObject {
     /// Seconds since the task last showed any sign of life（hook 訊號 or
     /// entering its manual group）。nil = can't tell (treat as fresh).
     func silence(_ t: TaskNote) -> TimeInterval? {
-        var candidates: [Date] = []
-        if let ai = lastAIActivity(t.id) { candidates.append(ai) }
+        // Read the cached last-activity (recomputed off the render path) and
+        // subtract now — cheap + always fresh. The sidebar's 已讀 sort calls
+        // this per comparison on every hover; hitting disk here delayed the
+        // hover highlight until the sort finished.
+        if let d = derivedCache[t.id] { return d.lastActivity.map { Date().timeIntervalSince($0) } }
+        var candidates = sessionSignals(t.id).map(\.ts) // cold-cache fallback
         if let s = t.groupSince.flatMap({ Self.fmDate.date(from: $0) }) { candidates.append(s) }
-        guard let last = candidates.max() else { return nil }
-        return Date().timeIntervalSince(last)
+        return candidates.max().map { Date().timeIntervalSince($0) }
     }
 
     // Grouping model (260720 v3) now lives in TaskDeckCore.GroupingRules
