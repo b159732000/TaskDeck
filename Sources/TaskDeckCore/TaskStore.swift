@@ -19,6 +19,9 @@ public struct TaskNote: Identifiable, Equatable {
     /// User-typed one-line status shown under the sidebar title (frontmatter
     /// `latest`), e.g. "07201822 等 QA". Free text, single line.
     public var statusLine: String? = nil
+    /// Rename-proof identity (frontmatter `id`, a uuid stamped at creation).
+    /// Panes/hooks tag sessions with this so attribution survives renames.
+    public var permanentID: String? = nil
 }
 
 public struct PaneSpec: Codable, Identifiable, Equatable {
@@ -183,7 +186,8 @@ public final class TaskStore {
                                 path: url,
                                 group: fm["group"],
                                 groupSince: fm["group_since"] ?? fm["waiting_since"],
-                                statusLine: fm["latest"]))
+                                statusLine: fm["latest"],
+                                permanentID: fm["id"]))
         }
         out.sort { a, b in
             if a.status != b.status { return a.status == "active" }

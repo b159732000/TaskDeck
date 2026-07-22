@@ -42,11 +42,15 @@ if not state:
 # with kqueue, which only fires on create/delete/RENAME — truncating the
 # existing file in place updates silently and the sidebar goes stale.
 rec = {"session_id": sid, "state": state, "ts": time.time()}
-# The pane (via taskdeckd) exports TASKDECK_TASK; record it so the app can
-# attribute this session to its task regardless of how it was started.
+# The pane (via taskdeckd) exports TASKDECK_TASK (slug — stale after rename)
+# and TASKDECK_TASK_KEY (permanent note uuid — rename-proof); record both so
+# the app can attribute this session to its task no matter how it started.
 task = os.environ.get("TASKDECK_TASK")
 if task:
     rec["task"] = task
+task_key = os.environ.get("TASKDECK_TASK_KEY")
+if task_key:
+    rec["task_key"] = task_key
 tmp = f"{out_dir}/.{sid}.json.tmp"
 with open(tmp, "w") as f:
     json.dump(rec, f)

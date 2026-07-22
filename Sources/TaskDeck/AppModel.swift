@@ -295,12 +295,12 @@ final class AppModel: ObservableObject {
 
     func archiveTask(_ slug: String) {
         sessions[slug]?.flushAll()
-        for info in paneRuntime.values where info.taskID == slug {
+        for info in paneRuntime.values where paneBelongs(info, to: slug) {
             var k = WireMessage(type: "remove")
             k.paneID = info.id
             client.fire(k)
         }
-        paneRuntime = paneRuntime.filter { $0.value.taskID != slug }
+        paneRuntime = paneRuntime.filter { !paneBelongs($0.value, to: slug) }
         if let s = sessions[slug] {
             s.setNoteStatus("done")
         } else {
@@ -327,12 +327,12 @@ final class AppModel: ObservableObject {
     /// worth keeping at all.
     func deleteTask(_ slug: String) {
         sessions[slug]?.flushAll()
-        for info in paneRuntime.values where info.taskID == slug {
+        for info in paneRuntime.values where paneBelongs(info, to: slug) {
             var k = WireMessage(type: "remove")
             k.paneID = info.id
             client.fire(k)
         }
-        paneRuntime = paneRuntime.filter { $0.value.taskID != slug }
+        paneRuntime = paneRuntime.filter { !paneBelongs($0.value, to: slug) }
         sessions.removeValue(forKey: slug)
         try? FileManager.default.removeItem(
             at: Paths.machineStateDir.appendingPathComponent(slug + ".json"))
@@ -353,13 +353,27 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Does this runtime pane belong to the task? Primary match is the spec id
+    /// recorded in the task's machine state — pane specs are task-scoped and
+    /// rename-proof. The daemon-side PaneInfo.taskID is the slug AT SPAWN TIME
+    /// and goes stale on rename (archive/delete then missed every live pane);
+    /// it stays only as a fallback for panes created outside the app (ctl).
+    private func paneBelongs(_ info: PaneInfo, to slug: String) -> Bool {
+        if let s = sessions[slug] {
+            if s.machine.panes.contains(where: { $0.id == info.specID }) { return true }
+        } else if store.machineState(slug).panes.contains(where: { $0.id == info.specID }) {
+            return true
+        }
+        return info.taskID == slug
+    }
+
     func taskHasLivePane(_ slug: String) -> Bool {
-        paneRuntime.values.contains { $0.taskID == slug && $0.running }
+        paneRuntime.values.contains { $0.running && paneBelongs($0, to: slug) }
     }
 
     /// How many live terminals the delete confirmation should warn about.
     func livePaneCount(_ slug: String) -> Int {
-        paneRuntime.values.filter { $0.taskID == slug && $0.running }.count
+        paneRuntime.values.filter { $0.running && paneBelongs($0, to: slug) }.count
     }
 
     // MARK: - AI status badges
@@ -822,7 +836,12 @@ final class AppModel: ObservableObject {
 
     private func reloadAIStatus() {
         var map: [String: (state: String, ts: Date)] = [:]
-        var tasks: [String: String] = [:]
+        var taskMap: [String: String] = [:]
+        // task_key (permanent frontmatter uuid) → CURRENT slug; the slug tag
+        // alone goes stale when a task is renamed mid-session.
+        let keyToSlug = Dictionary(uniqueKeysWithValues: tasks.compactMap { t in
+            t.permanentID.map { ($0, t.id) }
+        })
         let files = (try? FileManager.default.contentsOfDirectory(
             at: Paths.statusDir, includingPropertiesForKeys: nil)) ?? []
         for f in files where f.pathExtension == "json" {
@@ -832,12 +851,15 @@ final class AppModel: ObservableObject {
             let sid = f.deletingPathExtension().lastPathComponent
             let ts = (obj["ts"] as? Double).map { Date(timeIntervalSince1970: $0) } ?? .distantPast
             map[sid] = (state, ts)
-            // Task tag written by the hook (pane's TASKDECK_TASK) — lets us
-            // attribute a session to its task no matter how it was started.
-            if let task = obj["task"] as? String, !task.isEmpty { tasks[sid] = task }
+            // Attribution: rename-proof task_key first, then the slug tag.
+            if let key = obj["task_key"] as? String, let slug = keyToSlug[key] {
+                taskMap[sid] = slug
+            } else if let task = obj["task"] as? String, !task.isEmpty {
+                taskMap[sid] = task
+            }
         }
         aiStatus = map
-        sessionTask = tasks
+        sessionTask = taskMap
         refreshDerived()
     }
 
@@ -1220,6 +1242,10 @@ final class TaskSession: ObservableObject {
         m.cols = 100
         m.rows = 28
         m.command = spec.startCommand
+        // Rename-proof attribution: TASKDECK_TASK (slug) goes stale when the
+        // task is renamed; the permanent frontmatter uuid doesn't. The status
+        // hook records both; the GUI prefers the key when resolving.
+        m.env = ["TASKDECK_TASK_KEY": permanentID()]
         app.client.request(m) { [weak self] resp in
             Task { @MainActor in
                 guard let self else { return }
