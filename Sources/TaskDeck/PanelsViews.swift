@@ -25,19 +25,28 @@ struct SidebarView: View {
         //（手動）→ 半封存（>3 天沒動靜，預設折疊；滿 30 天自動歸入已完成）
         // → 已完成（封存）。規則見 AppModel.sidebarGroup / autoArchiveSweep。
         let groups = Dictionary(grouping: model.tasks, by: { model.sidebarGroup($0) })
+        // Every group sort ends in `a.id < b.id`: Swift's sort isn't stable, so
+        // two rows with an equal primary key (e.g. two 已讀 tasks parked at the
+        // same group_since) would otherwise swap places on every hover re-sort
+        // — a jittering list. The id tiebreaker makes each a total order.
         let needsYou = (groups[.needsYou] ?? []).sorted { a, b in
             let ia = model.aiAttention(a.id) ?? (false, .distantFuture)
             let ib = model.aiAttention(b.id) ?? (false, .distantFuture)
             if ia.permission != ib.permission { return ia.permission } // 🔴 first
-            return ia.since < ib.since // owed longest on top
+            if ia.since != ib.since { return ia.since < ib.since }      // owed longest on top
+            return a.id < b.id
         }
         let aiRunning = groups[.aiRunning] ?? []
         let idle = groups[.idle] ?? []
-        let read = (groups[.read] ?? []).sorted {
-            (model.silence($0) ?? 0) < (model.silence($1) ?? 0) // 最近動的在上
+        let read = (groups[.read] ?? []).sorted { a, b in
+            let sa = model.silence(a) ?? 0, sb = model.silence(b) ?? 0
+            if sa != sb { return sa < sb } // 最近動的在上
+            return a.id < b.id
         }
-        let waiting = (groups[.waitingExt] ?? []).sorted {
-            ($0.groupSince ?? "") > ($1.groupSince ?? "")
+        let waiting = (groups[.waitingExt] ?? []).sorted { a, b in
+            let ga = a.groupSince ?? "", gb = b.groupSince ?? ""
+            if ga != gb { return ga > gb }
+            return a.id < b.id
         }
         let semi = groups[.semiArchived] ?? []
         let done = groups[.done] ?? []
