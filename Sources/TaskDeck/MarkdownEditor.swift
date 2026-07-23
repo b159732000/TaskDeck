@@ -50,6 +50,15 @@ struct MarkdownNotesEditor: NSViewRepresentable {
     func updateNSView(_ scroll: NSScrollView, context: Context) {
         context.coordinator.parent = self // keep the binding fresh across rebuilds
         guard let tv = scroll.documentView as? MarkdownTextView else { return }
+        // NEVER touch the document while an IME composition (marked text) is
+        // in progress. Replacing the string mid-composition kills the 注音
+        // being typed AND leaves the input method holding a stale marked
+        // range, so following keys chew up neighbouring text. This fired when
+        // the previous (English) keystrokes' 0.8s save → dir kqueue → rescan
+        // re-render landed exactly while composing right after an
+        // input-source switch. External edits simply wait for the next
+        // update pass after the composition ends.
+        if tv.hasMarkedText() { return }
         if tv.string != text { // external edit (e.g. Obsidian) — reload
             let sel = tv.selectedRange()
             tv.string = text
@@ -82,6 +91,11 @@ struct MarkdownNotesEditor: NSViewRepresentable {
         init(_ p: MarkdownNotesEditor) { parent = p }
         func textDidChange(_ notification: Notification) {
             guard let tv = notification.object as? NSTextView else { return }
+            // Mid-composition the storage contains uncommitted 注音 — keep it
+            // out of the binding (it would get debounce-saved to disk and
+            // trigger re-renders during the composition). Committing fires
+            // another change with no marked text; we sync then.
+            if tv.hasMarkedText() { return }
             parent.text = tv.string // equal on the way back → updateNSView no-ops
         }
     }
