@@ -25,6 +25,7 @@ final class GlassTerminalView: TerminalView {
         // into the pane so claude (or any CLI) can read it.
         registerForDraggedTypes([.fileURL])
         updateKeyWindowObservation()
+        Self.installShiftReturnMonitor()
 
         // After sleep-wake or an app relaunch the backing store can show a
         // stale/garbled frame until a manual resize forces a repaint. Force a
@@ -86,6 +87,50 @@ final class GlassTerminalView: TerminalView {
     private func forceRedraw() {
         guard window != nil else { return }
         needsDisplay = true
+    }
+
+    /// Shift+Return inserts a newline instead of submitting the prompt.
+    ///
+    /// This has to be a local key-down monitor. AppKit runs the key-equivalent
+    /// phase only for ⌘/⌃-modified keys, so `performKeyEquivalent` never sees
+    /// Shift+Return — verified by dispatch test: ⌘← and ⌃⇧↩ arrive there,
+    /// plain ↩ and ⇧↩ go straight to `keyDown`. That is why the natural-text
+    /// -editing keys below work while a Shift+Return branch there could not.
+    /// SwiftTerm declares `keyDown` and `doCommand(by:)` as `public` rather
+    /// than `open`, so neither can be overridden from this subclass either. A
+    /// local monitor runs before window dispatch and is the one hook that
+    /// reliably sees the key.
+    ///
+    /// Deliberately independent of the kitty keyboard protocol. Claude Code
+    /// enables it once at startup (`CSI > 1 u`), and while SwiftTerm does
+    /// encode Shift+Return as `CSI 13;2u` once those flags are set, this view's
+    /// terminal only holds them if it actually observed that byte. A truncated
+    /// replay or a daemon-owned surface that never restores the input modes
+    /// silently drops it back to legacy mode, where Shift+Return is encoded as
+    /// a bare CR and the prompt submits. Sending LF ourselves is correct in
+    /// both modes.
+    private static var shiftReturnMonitor: Any?
+
+    static func installShiftReturnMonitor() {
+        guard shiftReturnMonitor == nil else { return }
+        shiftReturnMonitor = NSEvent.addLocalMonitorForEvents(
+            matching: .keyDown
+        ) { event in
+            guard let view = event.window?.firstResponder as? GlassTerminalView,
+                  // Never disturb an active IME composition.
+                  !view.hasMarkedText() else { return event }
+            let mods = event.modifierFlags.intersection(
+                [.command, .shift, .option, .control])
+            guard let sequence = TerminalInputEncoding.multilineShiftReturn(
+                keyCode: event.keyCode,
+                shift: mods.contains(.shift),
+                command: mods.contains(.command),
+                option: mods.contains(.option),
+                control: mods.contains(.control)
+            ) else { return event }
+            view.send(sequence)
+            return nil
+        }
     }
 
     /// SwiftTerm's macOS mouseDown handles selection/mouse reporting but does
@@ -203,17 +248,13 @@ final class GlassTerminalView: TerminalView {
         return out
     }
 
-    /// Key interception. TerminalView overrides `keyDown` as non-open so we
-    /// can't subclass it; `performKeyEquivalent` (open on NSView, called
-    /// before keyDown for the key window) is where we intercept.
-    /// Only when this terminal is first responder — never steals keys from
-    /// the notes editor.
-    ///   • Shift+Return → newline, not submit. SwiftTerm sends a bare CR for
-    ///     both plain and shifted Return (main Return isn't a kitty functional
-    ///     key upstream), so Claude Code sees Shift+Enter as Enter unless the
-    ///     host emits the distinct Meta+Return sequence used by its own
-    ///     terminal-setup command.
-    ///   • iTerm2 "natural text editing": ⌘← ^A, ⌘→ ^E, ⌘⌫ ^U.
+    /// Key interception for iTerm2 "natural text editing": ⌘← ^A, ⌘→ ^E,
+    /// ⌘⌫ ^U. Only when this terminal is first responder — never steals keys
+    /// from the notes editor.
+    ///
+    /// AppKit only runs the key-equivalent phase for ⌘/⌃-modified keys, so
+    /// Shift+Return goes straight to `keyDown` and can never arrive here; it is
+    /// handled by `installShiftReturnMonitor` instead.
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         guard window?.firstResponder === self else {
             return super.performKeyEquivalent(with: event)
@@ -244,19 +285,6 @@ final class GlassTerminalView: TerminalView {
                 if key == "b" { send(EscapeSequences.cmdPageUp); return true }
                 if key == "f" { send(EscapeSequences.cmdPageDown); return true }
             }
-        }
-        if let sequence = TerminalInputEncoding.multilineShiftReturn(
-            keyCode: event.keyCode,
-            shift: mods.contains(.shift),
-            command: mods.contains(.command),
-            option: mods.contains(.option),
-            control: mods.contains(.control)
-        ) {
-            // Use the same Meta+Return sequence Claude Code installs for
-            // non-native terminals. It does not depend on kitty negotiation,
-            // and unlike LF it remains distinct from submit in current Claude.
-            send(sequence)
-            return true
         }
         if mods == .command {
             switch event.keyCode {

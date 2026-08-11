@@ -372,8 +372,8 @@ if !explicitEnvPaneID.isEmpty {
     _ = req(conn, "remove") { $0.paneID = explicitEnvPaneID }
 }
 
-// The application maps Shift+Enter to two raw bytes. Verify the wire and PTY
-// path preserve them exactly rather than translating CR/LF or swallowing ESC.
+// The application maps Shift+Enter to LF (Claude Code's Ctrl+J newline input).
+// Verify the wire and PTY path preserve that byte without translating it to CR.
 let shiftReturnPane = req(conn, "newPane") {
     $0.taskID = "itest"
     $0.specID = "shift-return-input"
@@ -382,7 +382,7 @@ let shiftReturnPane = req(conn, "newPane") {
     $0.shell = "/bin/sh"
     $0.cols = 80
     $0.rows = 24
-    $0.command = "stty raw -echo; hex=$(dd bs=1 count=2 2>/dev/null "
+    $0.command = "stty raw -echo; hex=$(dd bs=1 count=1 2>/dev/null "
         + "| hexdump -ve '1/1 \"%02x\"'); stty sane; "
         + "printf '\\r\\nSHIFT-RETURN:%s\\r\\n' \"$hex\""
 }
@@ -392,11 +392,11 @@ check("terminal input: controlled PTY pane created",
 usleep(400_000)
 var shiftReturnInput = WireMessage(type: "input")
 shiftReturnInput.paneID = shiftReturnPaneID
-shiftReturnInput.setData([0x1b, 0x0d])
+shiftReturnInput.setData([0x0a])
 conn.send(shiftReturnInput)
-check("terminal input: Meta+Return survives socket and PTY unchanged",
+check("terminal input: Shift+Return LF survives socket and PTY unchanged",
       collectOutput(paneID: shiftReturnPaneID,
-                    until: "SHIFT-RETURN:1b0d", within: 6))
+                    until: "SHIFT-RETURN:0a", within: 6))
 if !shiftReturnPaneID.isEmpty {
     _ = req(conn, "remove") { $0.paneID = shiftReturnPaneID }
 }

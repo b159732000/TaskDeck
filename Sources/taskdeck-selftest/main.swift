@@ -32,11 +32,15 @@ func multilineShiftReturn(
 }
 
 check("terminal input: main Shift+Return stays distinct from submit",
-      multilineShiftReturn(36, shift: true) == [0x1b, 0x0d])
+      multilineShiftReturn(36, shift: true) == [0x0a])
 check("terminal input: keypad Shift+Enter uses the same mapping",
-      multilineShiftReturn(76, shift: true) == [0x1b, 0x0d])
+      multilineShiftReturn(76, shift: true) == [0x0a])
 check("terminal input: plain Return remains on SwiftTerm's normal path",
       multilineShiftReturn(36) == nil)
+// A lone LF cannot be mistaken for the Escape key; an ESC-prefixed sequence
+// can be, if the reader tokenizes the two bytes separately.
+check("terminal input: Shift+Return carries no splittable ESC prefix",
+      multilineShiftReturn(36, shift: true)?.first != 0x1b)
 check("terminal input: modified Shift+Return is not stolen",
       multilineShiftReturn(36, shift: true, option: true) == nil
       && multilineShiftReturn(36, shift: true, command: true) == nil
