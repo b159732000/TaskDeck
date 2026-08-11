@@ -22,9 +22,31 @@ public struct TaskNote: Identifiable, Equatable {
     /// Rename-proof identity (frontmatter `id`, a uuid stamped at creation).
     /// Panes/hooks tag sessions with this so attribution survives renames.
     public var permanentID: String? = nil
+    /// High-priority lane marker (frontmatter `priority`). `main` means this
+    /// is one of the user's current mainline tasks and should raise a prominent
+    /// alert when its AI turn finishes.
+    public var priority: String? = nil
+    /// When this task entered `done`. New notes use frontmatter `archived_at`;
+    /// `auto_archived` is accepted for compatibility. Legacy done notes had no
+    /// archive stamp, so scan() supplies the file mtime as a best-effort
+    /// fallback without rewriting the user's note.
+    public var archivedAt: Date? = nil
+
+    public var isMainline: Bool { priority == "main" }
 }
 
-public struct PaneSpec: Codable, Identifiable, Equatable {
+public enum TaskSortRules {
+    /// Completed tasks are newest-archived first. The id tiebreaker makes the
+    /// order deterministic when two tasks are archived in the same second.
+    public static func archivedNewestFirst(_ lhs: TaskNote, _ rhs: TaskNote) -> Bool {
+        let left = lhs.archivedAt ?? .distantPast
+        let right = rhs.archivedAt ?? .distantPast
+        if left != right { return left > right }
+        return lhs.id < rhs.id
+    }
+}
+
+public struct PaneSpec: Codable, Identifiable, Equatable, Sendable {
     public var id: String
     public var title: String
     public var kind: String // "shell" | "ai" | "command"
@@ -76,7 +98,7 @@ public struct PaneSpec: Codable, Identifiable, Equatable {
     }
 }
 
-public indirect enum LayoutNode: Codable, Equatable {
+public indirect enum LayoutNode: Codable, Equatable, Sendable {
     case pane(String) // specID
     case split(axis: String, ratio: Double, a: LayoutNode, b: LayoutNode) // axis: "h" side-by-side | "v" stacked
 }
@@ -133,7 +155,7 @@ public enum LayoutOps {
     }
 }
 
-public struct TaskMachineState: Codable, Equatable {
+public struct TaskMachineState: Codable, Equatable, Sendable {
     public var panes: [PaneSpec]
     public var layout: LayoutNode?
     public var primaryTeam: String?
@@ -162,6 +184,15 @@ public struct TaskMachineState: Codable, Equatable {
 public final class TaskStore {
     public let dir: URL
 
+    private static let archiveDateFormatters: [DateFormatter] = {
+        ["yyyy-MM-dd HH:mm:ss", "yyyy-MM-dd HH:mm"].map { format in
+            let df = DateFormatter()
+            df.locale = Locale(identifier: "en_US_POSIX")
+            df.dateFormat = format
+            return df
+        }
+    }()
+
     public init(dir: URL) {
         self.dir = dir
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -179,15 +210,23 @@ public final class TaskStore {
             if slug.uppercased() == "README" { continue }
             let text = cachedRead(slug) // mtime-cached: unchanged notes cost a stat
             let fm = Self.frontmatter(text)
+            let status = fm["status"] ?? "active"
+            let archiveStamp = fm["archived_at"] ?? fm["auto_archived"]
+            let exactArchiveDate = archiveStamp.flatMap { stamp in
+                Self.archiveDateFormatters.lazy.compactMap { $0.date(from: stamp) }.first
+            }
             out.append(TaskNote(id: slug,
                                 title: Self.h1(text) ?? slug,
-                                status: fm["status"] ?? "active",
+                                status: status,
                                 created: fm["created"],
                                 path: url,
                                 group: fm["group"],
                                 groupSince: fm["group_since"] ?? fm["waiting_since"],
                                 statusLine: fm["latest"],
-                                permanentID: fm["id"]))
+                                permanentID: fm["id"],
+                                priority: fm["priority"],
+                                archivedAt: exactArchiveDate
+                                    ?? (status == "done" ? mtime(url) : nil)))
         }
         out.sort { a, b in
             if a.status != b.status { return a.status == "active" }
@@ -391,6 +430,35 @@ public final class TaskStore {
             return text.replacingOccurrences(of: "---\n", with: "---\n\(key): \(value)\n", range: text.startIndex ..< text.index(text.startIndex, offsetBy: 4))
         }
         return "---\n\(key): \(value)\n---\n\n" + text
+    }
+
+    /// Canonical lifecycle mutation shared by open/closed and manual/automatic
+    /// archive paths. A manual archive clears a stale automatic marker so the
+    /// frontmatter keeps describing the current archive event.
+    public static func markArchived(_ text: String, at stamp: String,
+                                    automatic: Bool = false) -> String {
+        var updated = setFrontmatterValue(text, key: "status", value: "done")
+        updated = setFrontmatterValue(updated, key: "archived_at", value: stamp)
+        if automatic {
+            updated = setFrontmatterValue(updated, key: "auto_archived", value: stamp)
+        } else {
+            updated = removeFrontmatterKey(updated, key: "auto_archived")
+        }
+        return updated
+    }
+
+    /// Reactivate a completed task. For a formerly auto-archived task, also
+    /// clear the stale parking state that made it >30d quiet; otherwise the
+    /// next sweep would archive it again immediately.
+    public static func markActive(_ text: String) -> String {
+        let wasAutoArchived = frontmatter(text)["auto_archived"] != nil
+        var updated = setFrontmatterValue(text, key: "status", value: "active")
+        updated = removeFrontmatterKey(updated, key: "archived_at")
+        guard wasAutoArchived else { return updated }
+        updated = removeFrontmatterKey(updated, key: "auto_archived")
+        updated = removeFrontmatterKey(updated, key: "group")
+        updated = removeFrontmatterKey(updated, key: "group_since")
+        return removeFrontmatterKey(updated, key: "waiting_since")
     }
 
     // MARK: - Status line & history

@@ -3,7 +3,7 @@ import Foundation
 // Pure sidebar-grouping rules (260720 v3), extracted from AppModel so they can
 // be locked down by selftests — this classifier had 3 regressions while it
 // lived inline in a view-driven path. The IMPURE parts (resolving each
-// session's live signal from hook status files / file mtimes, and the acked
+// session's live signal from hook status files / transcript events, and the acked
 // set) stay in AppModel, which builds the `[SessionSignal]` snapshot and calls
 // `classify`. Everything here is a deterministic function of its inputs.
 
@@ -61,8 +61,8 @@ public enum GroupingRules {
     /// (max signal ts / group_since), used only for the sink threshold.
     ///
     ///   • running now → AI 執行中 (live fact, overrides all)
-    ///   • group "waiting" (等待外部) → sticky; only a running session overrides
-    ///   • a FRESH unacked stop → 等你 (resurfaces even a 已讀 task: a new turn is unseen)
+    ///   • a FRESH unacked stop → 等你 (new AI output overrides manual waiting/read)
+    ///   • group "waiting" (等待外部) → sticky while there is no new AI output
     ///   • manual 等你 that outlived its signal → 等你
     ///   • group "read" / an acked stop → 已讀 (sinks to 半封存 when quiet)
     ///   • else → 待開工
@@ -70,12 +70,39 @@ public enum GroupingRules {
                                 signals: [SessionSignal], now: Date) -> TaskGroup {
         if status == "done" { return .done }
         if runningNow(signals, now: now) { return .aiRunning }
-        if group == "waiting" { return quiet > sinkAfter ? .semiArchived : .waitingExt }
         if attention(signals) != nil { return .needsYou }
+        if group == "waiting" { return quiet > sinkAfter ? .semiArchived : .waitingExt }
         if group == "needsyou" { return .needsYou }
         if group == "read" || hasAckedStop(signals) {
             return quiet > sinkAfter ? .semiArchived : .read
         }
         return .idle
+    }
+}
+
+/// Keeps the persisted "seen" markers bounded without coupling them to hook
+/// status files. Legacy sessions can be resolved from transcript events
+/// alone, so deleting their acknowledgement merely because no hook row exists
+/// makes the same fallback signal repeatedly surface as unread.
+public enum AIStatusAcknowledgementRules {
+    public static func prune(_ acknowledgements: [String: Date], now: Date,
+                             signalWindow: TimeInterval) -> [String: Date] {
+        acknowledgements.filter {
+            now.timeIntervalSince($0.value) < signalWindow
+        }
+    }
+}
+
+/// Rising-edge rule for the high-visibility mainline-task alert. Keeping this
+/// separate from grouping prevents periodic status reloads or merely tagging
+/// an already-waiting task from replaying the alert.
+public enum PriorityAlertRules {
+    public static func shouldTrigger(isMainline: Bool, previous: TaskGroup,
+                                     current: TaskGroup,
+                                     isCurrentlyViewed: Bool) -> Bool {
+        isMainline
+            && previous == .aiRunning
+            && current == .needsYou
+            && !isCurrentlyViewed
     }
 }

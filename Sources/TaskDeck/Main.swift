@@ -20,6 +20,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
+private struct SidebarSearchCommands: Commands {
+    @FocusedValue(\.focusSidebarSearch) private var focusSidebarSearch
+
+    var body: some Commands {
+        CommandGroup(after: .sidebar) {
+            Button("搜尋任務標題") {
+                focusSidebarSearch?()
+            }
+            .keyboardShortcut("f", modifiers: [.command, .shift])
+            .disabled(focusSidebarSearch == nil)
+        }
+    }
+}
+
 @main
 struct TaskDeckApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var delegate
@@ -67,6 +81,7 @@ struct TaskDeckApp: App {
                     SettingsLink { Text("外觀設定（透明度／明暗）…") }
                 }
             }
+            SidebarSearchCommands()
         }
 
         WindowGroup("任務", id: "task", for: String.self) { $slug in
@@ -81,6 +96,7 @@ struct TaskDeckApp: App {
         Settings {
             AppearanceSettingsView()
                 .environmentObject(model)
+                .priorityAlertChrome()
         }
     }
 }
@@ -206,6 +222,7 @@ struct ContentView: View {
         // over a dark desktop (the "opaque titlebar" that survived every
         // titlebar-view sweep).
         .background(Theme.windowBG.ignoresSafeArea())
+        .priorityAlertChrome()
         .glassWindow(autosave: "JamesDesk.main")
         .preferredColorScheme(.dark)
     }
@@ -222,6 +239,7 @@ struct PopoutRoot: View {
             .frame(minWidth: 800, minHeight: 480)
             .tint(Theme.accent) // see ContentView
             .background(Theme.windowBG.ignoresSafeArea()) // see ContentView
+            .priorityAlertChrome()
             .glassWindow(autosave: "JamesDesk.task.\(slug)") // 每個任務各記各的位置
             .preferredColorScheme(.dark)
     }

@@ -9,6 +9,12 @@ public enum Wire {
     /// a daemon restart kills every live terminal session the user has.
     public static let version = 1
 
+    /// Version of the optional daemon-owned remote-terminal surface protocol.
+    /// This is independent of `version`: old peers ignore the additive fields,
+    /// while a new GUI can fall back to raw replay when a daemon does not echo
+    /// this capability or provide a surface snapshot.
+    public static let remoteSurfaceVersion = 1
+
     /// Production socket lives in App Support. Tests inject TASKDECK_SOCKET
     /// (or `taskdeckd/ctl --socket`) to run an ISOLATED daemon on a temp
     /// socket without ever touching the real one — required because a daemon
@@ -19,6 +25,18 @@ public enum Wire {
         }
         return Paths.appSupport.appendingPathComponent("daemon.sock").path
     }
+}
+
+/// String constants for semantic events emitted by the daemon-owned terminal
+/// parser. Kept as strings on the wire so a newer event kind never makes an
+/// older decoder reject the whole frame.
+public enum TerminalSurfaceEventKind {
+    public static let bell = "bell"
+    public static let clipboardCopy = "clipboardCopy"
+    public static let title = "title"
+    public static let cwd = "cwd"
+    public static let notification = "notification"
+    public static let progress = "progress"
 }
 
 public struct PaneInfo: Codable, Identifiable, Equatable {
@@ -67,6 +85,46 @@ public struct WireMessage: Codable {
     public var exitCode: Int32?
     public var panes: [PaneInfo]?
 
+    // MARK: Optional daemon-owned terminal surface (additive v1)
+
+    /// Highest remote-surface protocol version understood by the sender. A GUI
+    /// sets this on `subscribeSurface`; a supporting daemon echoes the selected
+    /// value on `surfaceSnapshot`. Absence means the legacy raw-byte protocol.
+    public var surfaceVersion: Int?
+    /// Per-view identity used for resize-lease ownership. It is deliberately
+    /// distinct from the socket connection because one GUI connection can host
+    /// multiple windows showing the same pane.
+    public var surfaceClientID: String?
+    /// A pane-lifetime identifier used to bind resize leases. This is not the
+    /// SwiftTerm surface payload's render epoch: RIS/ED3 may replace the latter
+    /// without creating a new PTY or invalidating the active resize owner.
+    public var paneEpoch: String?
+    /// Revision produced by applying this snapshot/patch.
+    public var surfaceRevision: UInt64?
+    /// Revision a patch must be applied to. Nil for a full snapshot.
+    public var surfaceBaseRevision: UInt64?
+    /// Opaque, base64-encoded SwiftTerm native remote-surface snapshot.
+    public var surfaceSnapshot: String?
+    /// Opaque, base64-encoded SwiftTerm native remote-surface patch.
+    public var surfacePatch: String?
+    /// Semantic event kind for a `surfaceEvent` frame. Event payloads
+    /// reuse the existing additive fields: clipboard bytes in `data`, terminal
+    /// title/notification title in `title`, notification body in `message`, and
+    /// working directory in `cwd`.
+    public var surfaceEvent: String?
+    public var surfaceProgressState: Int?
+    public var surfaceProgressValue: UInt8?
+
+    // MARK: Optional resize lease (additive v1)
+
+    /// Opaque lease credential returned by `acquireResizeLease`.
+    public var resizeLeaseToken: String?
+    /// Monotonic ownership generation; prevents a stale token from a previous
+    /// owner from resizing after a lease expires and is re-granted.
+    public var resizeLeaseGeneration: UInt64?
+    /// Lease lifetime advertised by the daemon.
+    public var resizeLeaseTTLMS: UInt64?
+
     public init(type: String) { self.type = type }
 
     public var dataBytes: [UInt8]? {
@@ -76,6 +134,27 @@ public struct WireMessage: Codable {
 
     public mutating func setData(_ bytes: [UInt8]) {
         data = Data(bytes).base64EncodedString()
+    }
+
+    public var surfaceSnapshotBytes: [UInt8]? {
+        Self.decodeBase64(surfaceSnapshot)
+    }
+
+    public mutating func setSurfaceSnapshot(_ bytes: [UInt8]) {
+        surfaceSnapshot = Data(bytes).base64EncodedString()
+    }
+
+    public var surfacePatchBytes: [UInt8]? {
+        Self.decodeBase64(surfacePatch)
+    }
+
+    public mutating func setSurfacePatch(_ bytes: [UInt8]) {
+        surfacePatch = Data(bytes).base64EncodedString()
+    }
+
+    private static func decodeBase64(_ encoded: String?) -> [UInt8]? {
+        guard let encoded, let decoded = Data(base64Encoded: encoded) else { return nil }
+        return [UInt8](decoded)
     }
 }
 

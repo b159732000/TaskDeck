@@ -2,14 +2,21 @@ import AppKit
 import Foundation
 import SwiftUI
 import TaskDeckCore
+import UserNotifications
 
 @MainActor
 final class AppModel: ObservableObject {
+    private static let priorityAlertNotificationID = "taskdeck-mainline-ready"
+
     @Published var tasks: [TaskNote] = []
     @Published var selection: String?
     /// specID → live pane info (across all tasks).
     @Published var paneRuntime: [String: PaneInfo] = [:]
     @Published var daemonOK = false
+    /// Successful socket generations. TerminalHostView keys include this so a
+    /// reconnect dismantles stale subscription tokens and negotiates the new
+    /// connection even when the daemon preserved the same pane IDs.
+    @Published private(set) var daemonConnectionGeneration: UInt64 = 0
     /// Raw CLI table output (ANSI codes included) from `quotaCommand`.
     /// One shared fetcher for the whole app — the quota tool rate-limits,
     /// so per-task/per-window fetching would be wrong.
@@ -18,6 +25,20 @@ final class AppModel: ObservableObject {
     @Published var quotaBusy = false
     /// Last refresh failed; `quotaText` still shows the previous good table.
     @Published var quotaStale = false
+    /// Rename-proof task keys whose mainline completion alert has not yet
+    /// been explicitly viewed. Persisted so relaunch keeps the quiet reminder,
+    /// but the transient pulse / notification is never replayed on launch.
+    @Published private(set) var priorityAlertKeys =
+        Set(UserDefaults.standard.stringArray(forKey: "priorityAlertTaskKeys") ?? []) {
+        didSet {
+            UserDefaults.standard.set(priorityAlertKeys.sorted(),
+                                      forKey: "priorityAlertTaskKeys")
+            clearPriorityAlertSystemNotification()
+            updatePriorityAlertDockBadge()
+        }
+    }
+    /// Monotonic edge token consumed by the FPS-style vignette.
+    @Published private(set) var priorityAlertPulse = 0
 
     let config: AppConfig
     let store: TaskStore
@@ -39,18 +60,22 @@ final class AppModel: ObservableObject {
     private var dirFD: Int32 = -1
     private var quotaTimer: Timer?
     private var statusTimer: Timer?
+    private var rescanTimer: Timer?
 
     /// AI session states from the Claude Code hook script
     /// (`Scripts/taskdeck-ai-status.sh` → `Paths.statusDir/<session>.json`):
     /// sessionID → (running | waiting | permission | ended, written-at).
-    @Published var aiStatus: [String: (state: String, ts: Date)] = [:]
-    /// session id → task slug, from the hook's `task` field (pane's
-    /// TASKDECK_TASK). Auto-attributes sessions to tasks however they started.
-    @Published var sessionTask: [String: String] = [:]
+    private var aiStatus: [String: AIStatusEntry] = [:]
+    /// Reverse index of the hook's task attribution. Building it once per
+    /// status load avoids scanning every status row once for every task.
+    private var hookSessionsByTask: [String: Set<String>] = [:]
+    /// Native Claude background tasks still active in each session. This is a
+    /// secondary activity badge only; it never changes the sidebar group.
+    private var backgroundTasksBySession: [String: Int] = [:]
     /// "已看過"：sessionID → the status timestamp the user acknowledged by
     /// clicking the badge. Entries at or before this ts stop showing; the
     /// next state change (newer ts) lights the badge again.
-    @Published var ackedAI: [String: Date] = [:] {
+    private var ackedAI: [String: Date] = [:] {
         didSet {
             let raw = ackedAI.mapValues { $0.timeIntervalSince1970 }
             UserDefaults.standard.set(raw, forKey: "ackedAI")
@@ -59,6 +84,16 @@ final class AppModel: ObservableObject {
 
     private var statusWatcher: DispatchSourceFileSystemObject?
     private var statusFD: Int32 = -1
+    private let statusLoader = AIStatusLoader()
+    private var statusReloadTask: Task<Void, Never>?
+    private var statusReloadGeneration = 0
+    /// Prevent a cold launch's first status snapshot from being mistaken for a
+    /// new completion. It may restore a persisted quiet reminder, never pulse.
+    private var hasLoadedAIStatusSnapshot = false
+    /// Stable-key snapshot used only for the alert edge. Unlike derivedCache
+    /// (slug-keyed for the rest of the UI), this survives a rename that lands
+    /// in the same refresh as AI completion.
+    private var priorityAlertGroupCache: [String: SidebarGroup] = [:]
 
     init() {
         config = AppConfig.load()
@@ -72,14 +107,23 @@ final class AppModel: ObservableObject {
             ackedAI = raw.mapValues { Date(timeIntervalSince1970: $0) }
         }
         rescan()
+        Task { @MainActor [weak self] in
+            self?.clearPriorityAlertSystemNotification()
+            self?.updatePriorityAlertDockBadge()
+        }
 
         client.onEvent = { [weak self] m in
             Task { @MainActor in self?.handleEvent(m) }
         }
         client.onDisconnect = { [weak self] in
             Task { @MainActor in
-                self?.daemonOK = false
-                self?.daemonReady = false
+                guard let self else { return }
+                // Invalidate an in-flight hello/list transaction. Its nil
+                // callbacks must never commit a ready generation after this
+                // disconnect has already been observed.
+                self.daemonEstablishSerial &+= 1
+                self.daemonOK = false
+                self.daemonReady = false
             }
         }
 
@@ -93,7 +137,7 @@ final class AppModel: ObservableObject {
 
         watchTasksDir()
         watchStatusDir()
-        reloadAIStatus()
+        scheduleAIStatusReload(includeTaskSources: true)
 
         quotaTimer = Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.refreshQuota() }
@@ -106,7 +150,7 @@ final class AppModel: ObservableObject {
         // tasks dir doesn't fire on a file's content change.
         statusTimer = Timer.scheduledTimer(withTimeInterval: 20, repeats: true) { [weak self] _ in
             Task { @MainActor in
-                self?.reloadAIStatus()
+                self?.scheduleAIStatusReload(includeTaskSources: true)
                 self?.reloadOpenNotes()
             }
         }
@@ -174,7 +218,53 @@ final class AppModel: ObservableObject {
             if let info = m.panes?.first, paneRuntime[info.specID]?.id == info.id {
                 paneRuntime[info.specID] = info
             }
+        case "surfaceEvent":
+            handleTerminalSurfaceEvent(m)
         default:
+            break
+        }
+    }
+
+    /// Canonical terminal parsing happens once in taskdeckd, so semantic side
+    /// effects must also happen once here. Per-view rendering callbacks would
+    /// duplicate bells and OSC-52 clipboard writes when a pane is open in two
+    /// windows.
+    private func handleTerminalSurfaceEvent(_ message: WireMessage) {
+        switch message.surfaceEvent {
+        case TerminalSurfaceEventKind.bell:
+            NSSound.beep()
+
+        case TerminalSurfaceEventKind.clipboardCopy:
+            guard let bytes = message.dataBytes,
+                  let text = String(bytes: bytes, encoding: .utf8) else { return }
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(text, forType: .string)
+
+        case TerminalSurfaceEventKind.notification:
+            // Shell OSC notifications never trigger a permission prompt. If
+            // the user already authorized JamesDesk notifications (for the
+            // mainline reminder), preserve the terminal notification too.
+            NSApp?.requestUserAttention(.informationalRequest)
+            let notificationTitle = message.title.flatMap { $0.isEmpty ? nil : $0 }
+                ?? "Terminal"
+            let notificationBody = message.message ?? ""
+            UNUserNotificationCenter.current().getNotificationSettings { settings in
+                guard settings.authorizationStatus == .authorized
+                        || settings.authorizationStatus == .provisional else { return }
+                let content = UNMutableNotificationContent()
+                content.title = notificationTitle
+                content.body = notificationBody
+                UNUserNotificationCenter.current().add(UNNotificationRequest(
+                    identifier: "taskdeck-terminal-\(UUID().uuidString)",
+                    content: content,
+                    trigger: nil)) { error in
+                    if let error { NSLog("TaskDeck: terminal notification failed: \(error)") }
+                }
+            }
+
+        default:
+            // title/cwd are already carried in and applied from the surface
+            // state. Progress is fanned out to each visible TerminalView.
             break
         }
     }
@@ -188,6 +278,9 @@ final class AppModel: ObservableObject {
     /// version drift after updating the GUI while an old daemon keeps running).
     @Published var daemonNote: String?
     private var readyCallbacks: [() -> Void] = []
+    /// Main-actor transaction id. Reconnect clicks can overlap at await points;
+    /// only the newest complete hello+list handshake may publish readiness.
+    private var daemonEstablishSerial: UInt64 = 0
 
     func onDaemonReady(_ cb: @escaping () -> Void) {
         if daemonReady { cb() } else { readyCallbacks.append(cb) }
@@ -200,34 +293,54 @@ final class AppModel: ObservableObject {
     }
 
     private func establishDaemon() async {
+        daemonEstablishSerial &+= 1
+        let establishSerial = daemonEstablishSerial
         daemonReady = false
-        daemonOK = await client.connectOrSpawn()
-        guard daemonOK else { return }
+        let connected = await client.connectOrSpawn()
+        guard daemonEstablishSerial == establishSerial else { return }
+        daemonOK = connected
+        guard connected else {
+            daemonNote = "無法連線 taskdeckd"
+            return
+        }
+
         var hello = WireMessage(type: "hello")
         hello.version = Wire.version
         let reply = await requestAsync(hello)
-        if let v = reply?.version, v != Wire.version {
+        guard daemonEstablishSerial == establishSerial else { return }
+        guard let reply, reply.type == "hello", let daemonVersion = reply.version else {
+            daemonOK = false
+            daemonNote = reply == nil ? "daemon 未回應握手" : "daemon 握手格式無效"
+            return
+        }
+
+        let healthyNote: String?
+        if daemonVersion != Wire.version {
             // Additive protocol: keep working, but surface the drift — the
             // running daemon predates this GUI. Never auto-restart it.
-            daemonNote = "daemon 協定 v\(v) ≠ GUI v\(Wire.version)——功能可能受限，請擇時重啟 daemon"
-            NSLog("TaskDeck: protocol version drift daemon=\(v) gui=\(Wire.version)")
-        } else if reply == nil {
-            daemonNote = "daemon 未回應握手"
+            healthyNote = "daemon 協定 v\(daemonVersion) ≠ GUI v\(Wire.version)——功能可能受限，請擇時重啟 daemon"
+            NSLog("TaskDeck: protocol version drift daemon=\(daemonVersion) gui=\(Wire.version)")
         } else {
-            daemonNote = AppConfig.lastLoadError // healthy daemon: keep config warning if any
+            healthyNote = AppConfig.lastLoadError
         }
-        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
-            client.request(WireMessage(type: "list")) { [weak self] resp in
-                Task { @MainActor in
-                    if let self, let panes = resp?.panes {
-                        var map: [String: PaneInfo] = [:]
-                        for p in panes { map[p.specID] = p }
-                        self.paneRuntime = map
-                    }
-                    cont.resume()
-                }
-            }
+
+        let listReply = await requestAsync(WireMessage(type: "list"))
+        guard daemonEstablishSerial == establishSerial else { return }
+        guard let listReply, listReply.type == "panes",
+              let panes = listReply.panes else {
+            daemonOK = false
+            daemonNote = listReply == nil
+                ? "daemon 未回應 pane 清單"
+                : "daemon pane 清單格式無效"
+            return
         }
+
+        var map: [String: PaneInfo] = [:]
+        for pane in panes { map[pane.specID] = pane }
+        paneRuntime = map
+        daemonNote = healthyNote
+        daemonOK = true
+        daemonConnectionGeneration &+= 1
         daemonReady = true
         let cbs = readyCallbacks
         readyCallbacks.removeAll()
@@ -259,6 +372,8 @@ final class AppModel: ObservableObject {
         var list = store.scan()
         // Merge manual order: unseen tasks go to the front, vanished ones drop.
         let current = Set(list.map(\.id))
+        taskAISessionBaseCache = taskAISessionBaseCache.filter { current.contains($0.key) }
+        diskTaskSources = diskTaskSources.filter { current.contains($0.key) }
         let known = Set(taskOrder)
         let newOnes = list.map(\.id).filter { !known.contains($0) }
         let merged = newOnes + taskOrder.filter { current.contains($0) }
@@ -268,9 +383,15 @@ final class AppModel: ObservableObject {
         }
         let index = Dictionary(uniqueKeysWithValues: taskOrder.enumerated().map { ($1, $0) })
         list.sort { (index[$0.id] ?? .max) < (index[$1.id] ?? .max) }
-        tasks = list
+        let tasksChanged = tasks != list
+        if tasksChanged { tasks = list }
         refreshDerived() // sweep below must judge on FRESH derived state
         autoArchiveSweep()
+        // A rename changes the task_key → current-slug mapping while an older
+        // actor load may still be in flight. Bump the reload generation now.
+        if tasksChanged, statusWatcher != nil {
+            scheduleAIStatusReload(after: 0.1, includeTaskSources: true)
+        }
     }
 
     private func saveOrder() {
@@ -280,7 +401,7 @@ final class AppModel: ObservableObject {
     func newTask() {
         let slug = store.create(named: nil)
         rescan()
-        selection = slug
+        selectTask(slug)
     }
 
     func renameTask(_ slug: String, to newName: String) {
@@ -306,6 +427,133 @@ final class AppModel: ObservableObject {
         store.write(slug, transform(text))
     }
 
+    // MARK: - Mainline priority alerts
+
+    private func priorityAlertKey(_ task: TaskNote) -> String {
+        task.permanentID ?? task.id
+    }
+
+    private func taskForPriorityAlertKey(_ key: String) -> TaskNote? {
+        tasks.first { priorityAlertKey($0) == key }
+    }
+
+    /// Pending alerts in the same stable order as the sidebar.
+    var priorityAlertTasks: [TaskNote] {
+        tasks.filter {
+            $0.status == "active"
+                && $0.isMainline
+                && priorityAlertKeys.contains(priorityAlertKey($0))
+        }
+    }
+
+    func hasPriorityAlert(_ slug: String) -> Bool {
+        guard let task = tasks.first(where: {
+            $0.id == slug && $0.status == "active" && $0.isMainline
+        }) else { return false }
+        return priorityAlertKeys.contains(priorityAlertKey(task))
+    }
+
+    /// Selecting a task dismisses only the high-priority visual reminder. It
+    /// intentionally does NOT acknowledge the AI signal or move the task out
+    /// of 等你; lifecycle state remains an explicit user decision.
+    func selectTask(_ slug: String) {
+        selection = slug
+        dismissPriorityAlert(slug)
+    }
+
+    /// Banner action from either the main window or a task popout: switch the
+    /// main workspace to the target and bring that window forward.
+    func focusPriorityTask(_ slug: String) {
+        selectTask(slug)
+        guard let app = NSApp else { return }
+        app.windows.first(where: { $0.frameAutosaveName == "JamesDesk.main" })?
+            .makeKeyAndOrderFront(nil)
+        app.activate()
+    }
+
+    func dismissPriorityAlert(_ slug: String) {
+        guard let task = tasks.first(where: { $0.id == slug }) else { return }
+        let key = priorityAlertKey(task)
+        guard priorityAlertKeys.contains(key) else { return }
+        priorityAlertKeys.remove(key)
+    }
+
+    /// `priority: main` lives in the note so the designation syncs across
+    /// machines. Older notes also receive a permanent id here, making any
+    /// pending reminder survive a later rename.
+    func setMainline(_ slug: String, _ enabled: Bool) {
+        func transform(_ text: String) -> String {
+            var updated = text
+            if enabled {
+                if (TaskStore.frontmatter(updated)["id"] ?? "").isEmpty {
+                    updated = TaskStore.setFrontmatterValue(
+                        updated, key: "id", value: UUID().uuidString.lowercased()
+                    )
+                }
+                return TaskStore.setFrontmatterValue(updated, key: "priority", value: "main")
+            }
+            return TaskStore.removeFrontmatterKey(updated, key: "priority")
+        }
+        if let session = sessions[slug] {
+            session.noteText = transform(session.noteText)
+            session.flushNote()
+        } else {
+            mutateNoteOnDisk(slug, transform)
+        }
+        if enabled {
+            UNUserNotificationCenter.current().requestAuthorization(options: [.alert]) {
+                granted, error in
+                if let error {
+                    NSLog("TaskDeck: notification authorization failed: \(error)")
+                } else if !granted {
+                    NSLog("TaskDeck: notifications not authorized; in-app mainline alert remains active")
+                }
+            }
+        } else {
+            dismissPriorityAlert(slug)
+        }
+        rescan()
+    }
+
+    private func updatePriorityAlertDockBadge() {
+        guard NSApp != nil else { return }
+        NSApp.dockTile.badgeLabel = priorityAlertKeys.isEmpty
+            ? nil : String(priorityAlertKeys.count)
+        NSApp.dockTile.display()
+    }
+
+    private func clearPriorityAlertSystemNotification() {
+        let center = UNUserNotificationCenter.current()
+        center.removePendingNotificationRequests(
+            withIdentifiers: [Self.priorityAlertNotificationID]
+        )
+        center.removeDeliveredNotifications(
+            withIdentifiers: [Self.priorityAlertNotificationID]
+        )
+    }
+
+    private func deliverPriorityAlertNotification() {
+        let pending = priorityAlertTasks
+        guard !pending.isEmpty, let app = NSApp else { return }
+        app.requestUserAttention(.informationalRequest)
+
+        let content = UNMutableNotificationContent()
+        content.title = "★ 主線已就緒"
+        if pending.count == 1, let task = pending.first {
+            content.body = task.title
+        } else {
+            content.body = "\(pending.count) 個主線任務正在等你"
+        }
+        let request = UNNotificationRequest(
+            identifier: Self.priorityAlertNotificationID,
+            content: content,
+            trigger: nil
+        )
+        UNUserNotificationCenter.current().add(request) { error in
+            if let error { NSLog("TaskDeck: priority notification failed: \(error)") }
+        }
+    }
+
     func archiveTask(_ slug: String) {
         sessions[slug]?.flushAll()
         for info in paneRuntime.values where paneBelongs(info, to: slug) {
@@ -314,10 +562,15 @@ final class AppModel: ObservableObject {
             client.fire(k)
         }
         paneRuntime = paneRuntime.filter { !paneBelongs($0.value, to: slug) }
+        let stamp = Self.archiveDate.string(from: Date())
+        func transform(_ text: String) -> String {
+            TaskStore.markArchived(text, at: stamp)
+        }
         if let s = sessions[slug] {
-            s.setNoteStatus("done")
+            s.noteText = transform(s.noteText)
+            s.flushNote()
         } else {
-            mutateNoteOnDisk(slug) { TaskStore.setFrontmatterValue($0, key: "status", value: "done") }
+            mutateNoteOnDisk(slug, transform)
         }
         rescan()
         if selection == slug {
@@ -326,10 +579,12 @@ final class AppModel: ObservableObject {
     }
 
     func unarchiveTask(_ slug: String) {
+        func transform(_ text: String) -> String { TaskStore.markActive(text) }
         if let s = sessions[slug] {
-            s.setNoteStatus("active")
+            s.noteText = transform(s.noteText)
+            s.flushNote()
         } else {
-            mutateNoteOnDisk(slug) { TaskStore.setFrontmatterValue($0, key: "status", value: "active") }
+            mutateNoteOnDisk(slug, transform)
         }
         rescan()
     }
@@ -406,6 +661,21 @@ final class AppModel: ObservableObject {
         let cwd: String?
     }
 
+    /// Sources independent of hook status, cached until the note or pane
+    /// model actually changes. Periodic status refreshes therefore do not
+    /// re-stat/re-parse every task document.
+    private struct TaskAISessionBase {
+        let text: String
+        let machine: TaskMachineState
+        let sessions: [TaskAISession]
+        let seen: Set<String>
+        let references: Set<String>
+    }
+    private var taskAISessionBaseCache: [String: TaskAISessionBase] = [:]
+    /// Periodically revalidated off-main for closed tasks. Open tasks always
+    /// use their TaskSession's newer in-memory note/machine values.
+    private var diskTaskSources: [String: TaskAISource] = [:]
+
     /// All AI sessions of a task: app-created pane specs ∪ the note's manifest
     /// lines ∪ any live-signal session whose id appears ANYWHERE in the note.
     /// The last source is what catches sessions the app never registered —
@@ -413,36 +683,60 @@ final class AppModel: ObservableObject {
     /// ("Session ID: <uuid>") below the manifest divider — as long as the id
     /// is written somewhere in the note. Deduped by session id.
     func taskAISessions(_ slug: String) -> [TaskAISession] {
-        let machine = sessions[slug]?.machine ?? store.cachedMachineState(slug)
-        var seen = Set<String>()
-        var out: [TaskAISession] = []
-        for pane in machine.panes where pane.kind == "ai" {
-            guard let sid = pane.sessionID, seen.insert(sid).inserted else { continue }
-            out.append(TaskAISession(sid: sid, team: pane.team, cwd: pane.cwd))
+        taskAISessions(slug, statusIDs: Set(aiStatus.keys))
+    }
+
+    private func taskAISessions(_ slug: String, statusIDs: Set<String>) -> [TaskAISession] {
+        let diskSource = diskTaskSources[slug]
+        let machine = sessions[slug]?.machine
+            ?? diskSource?.machine
+            ?? store.cachedMachineState(slug)
+        let text = sessions[slug]?.noteText
+            ?? diskSource?.text
+            ?? store.cachedRead(slug)
+
+        let base: TaskAISessionBase
+        if let cached = taskAISessionBaseCache[slug],
+           cached.text == text, cached.machine == machine {
+            base = cached
+        } else {
+            var seen = Set<String>()
+            var out: [TaskAISession] = []
+            for pane in machine.panes where pane.kind == "ai" {
+                guard let rawSID = pane.sessionID else { continue }
+                let sid = rawSID.lowercased()
+                guard seen.insert(sid).inserted else { continue }
+                out.append(TaskAISession(sid: sid, team: pane.team, cwd: pane.cwd))
+            }
+            for line in TaskStore.manifestLines(text) where line.hasPrefix("- ") {
+                let parts = line.dropFirst(2).split(separator: " ").map(String.init)
+                guard parts.count >= 2 else { continue }
+                let sid = parts[1]
+                guard (32 ... 36).contains(sid.count),
+                      sid.allSatisfy({ $0.isHexDigit || $0 == "-" }),
+                      seen.insert(sid.lowercased()).inserted else { continue }
+                out.append(TaskAISession(sid: sid.lowercased(), team: parts[0], cwd: nil))
+            }
+            base = TaskAISessionBase(
+                text: text, machine: machine, sessions: out, seen: seen,
+                references: SessionDiscovery.references(in: text)
+            )
+            taskAISessionBaseCache[slug] = base
         }
-        let text = sessions[slug]?.noteText ?? store.cachedRead(slug)
-        for line in TaskStore.manifestLines(text) where line.hasPrefix("- ") {
-            let parts = line.dropFirst(2).split(separator: " ").map(String.init)
-            guard parts.count >= 2 else { continue }
-            let sid = parts[1]
-            guard (32 ... 36).contains(sid.count),
-                  sid.allSatisfy({ $0.isHexDigit || $0 == "-" }),
-                  seen.insert(sid).inserted else { continue }
-            out.append(TaskAISession(sid: sid, team: parts[0], cwd: nil))
-        }
+        var seen = base.seen
+        var out = base.sessions
         // Any known session (hook status file) whose id is written anywhere in
         // the note belongs to this task, even outside the manifest. Team is
         // unknown here but a hook signal doesn't need it (only the mtime
         // fallback does), so these still drive running / 等你 grouping.
-        for sid in aiStatus.keys where !seen.contains(sid) && text.contains(sid) {
-            seen.insert(sid)
+        let referencedStatusIDs = base.references.intersection(statusIDs)
+        for sid in referencedStatusIDs.sorted() where seen.insert(sid).inserted {
             out.append(TaskAISession(sid: sid, team: nil, cwd: nil))
         }
         // Sessions the hook tagged with this task (pane's TASKDECK_TASK) —
         // auto-attributed no matter how they were started, even if never
         // recorded in the note or a pane spec.
-        for (sid, task) in sessionTask where task == slug && !seen.contains(sid) {
-            seen.insert(sid)
+        for sid in (hookSessionsByTask[slug] ?? []).sorted() where seen.insert(sid).inserted {
             out.append(TaskAISession(sid: sid, team: nil, cwd: nil))
         }
         return out
@@ -493,11 +787,13 @@ final class AppModel: ObservableObject {
 
     /// Badge clicked: mark the task's CURRENT AI states as seen.
     func ackAIStatus(_ slug: String) {
+        var next = ackedAI
         for s in taskAISessions(slug) {
-            if let entry = statusEntry(sid: s.sid, team: s.team, cwd: s.cwd) {
-                ackedAI[s.sid] = entry.ts
+            if let entry = statusEntry(sid: s.sid) {
+                next[s.sid] = entry.ts
             }
         }
+        if next != ackedAI { ackedAI = next }
         refreshDerived() // ack changes grouping (等你 → 已讀)
     }
 
@@ -519,35 +815,58 @@ final class AppModel: ObservableObject {
         df.dateFormat = "yyyy-MM-dd HH:mm"
         return df
     }()
+    private static let archiveDate: DateFormatter = {
+        let df = DateFormatter()
+        df.locale = Locale(identifier: "en_US_POSIX")
+        df.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        return df
+    }()
 
     /// Signals older than this stop steering the sidebar either way；the
     /// real clearing mechanism is the ack（已看過）, not time.
     private static let signalWindow: TimeInterval = 7 * 24 * 3600
 
-    /// Effective AI state for a session: hook signal first; when a session
-    /// predates the hooks (no status file), fall back to the conversation
-    /// file's mtime — writes stop when the AI stops, so quiet ≥10 min ⇒
-    /// "waiting", fresher ⇒ "running".
-    private func statusEntry(sid: String, team: String?, cwd: String?) -> (state: String, ts: Date)? {
-        if let entry = aiStatus[sid] {
-            return Date().timeIntervalSince(entry.ts) < Self.signalWindow ? entry : nil
-        }
-        guard let team,
+    /// Effective AI state for a session. The background loader combines
+    /// authoritative hook signals with legacy transcript-event fallbacks.
+    private func statusEntry(sid: String, now: Date = Date()) -> (state: String, ts: Date)? {
+        guard let entry = aiStatus[sid],
+              now.timeIntervalSince(entry.ts) < Self.signalWindow else { return nil }
+        return (entry.state, entry.ts)
+    }
+
+    private func transcriptActivityRequest(
+        for session: TaskAISession
+    ) -> TranscriptActivityRequest? {
+        guard let team = session.team,
               let dir = config.teams.first(where: { $0.id == team })?.configDir else { return nil }
-        let cwdPath = Paths.expand(cwd ?? config.defaultCwd)
+        let sid = session.sid.lowercased()
+        let cwdPath = Paths.expand(session.cwd ?? config.defaultCwd)
         let projectSlug = cwdPath.replacingOccurrences(of: "/", with: "-")
             .replacingOccurrences(of: ".", with: "-")
-        // The record is `<sid>.jsonl` (older) OR a `<sid>` directory (this
-        // claude version) — same dual-format teamFromSessionFile handles.
         let proj = URL(fileURLWithPath: Paths.expand(dir)).appendingPathComponent("projects/\(projectSlug)")
-        let jsonl = proj.appendingPathComponent("\(sid).jsonl")
-        let asDir = proj.appendingPathComponent(sid)
-        let rec = FileManager.default.fileExists(atPath: jsonl.path) ? jsonl : asDir
-        guard let mtime = Self.transcriptMtime(rec),
-              Date().timeIntervalSince(mtime) < Self.signalWindow else { return nil }
-        return Date().timeIntervalSince(mtime) < 600
-            ? ("running", mtime)
-            : ("waiting", mtime)
+        return TranscriptActivityRequest(
+            sid: sid,
+            jsonlURL: proj.appendingPathComponent("\(sid).jsonl")
+        )
+    }
+
+    private struct ResolvedAISession {
+        let session: TaskAISession
+        let entry: (state: String, ts: Date)
+    }
+
+    private func resolve(_ taskSessions: [TaskAISession], now: Date) -> [ResolvedAISession] {
+        taskSessions.compactMap { session in
+            guard let entry = statusEntry(sid: session.sid, now: now) else { return nil }
+            return ResolvedAISession(session: session, entry: entry)
+        }
+    }
+
+    private func signals(from resolved: [ResolvedAISession]) -> [SessionSignal] {
+        resolved.map { item in
+            SessionSignal(state: item.entry.state, ts: item.entry.ts,
+                          acked: (ackedAI[item.session.sid] ?? .distantPast) >= item.entry.ts)
+        }
     }
 
     /// Impure snapshot feeding the pure GroupingRules: each of the task's AI
@@ -557,11 +876,8 @@ final class AppModel: ObservableObject {
     /// Sessions count wherever they live (pane spec or note manifest) and
     /// whether or not their pane still runs — finished output awaits review.
     func sessionSignals(_ slug: String) -> [SessionSignal] {
-        taskAISessions(slug).compactMap { s in
-            guard let entry = statusEntry(sid: s.sid, team: s.team, cwd: s.cwd) else { return nil }
-            return SessionSignal(state: entry.state, ts: entry.ts,
-                                 acked: (ackedAI[s.sid] ?? .distantPast) >= entry.ts)
-        }
+        let now = Date()
+        return signals(from: resolve(taskAISessions(slug), now: now))
     }
 
     /// Seconds since the task last showed life (newest signal / group_since),
@@ -581,7 +897,7 @@ final class AppModel: ObservableObject {
     }
 
     // Per-task derived display values, recomputed OFF the render path (only in
-    // rescan / reloadAIStatus / ackAIStatus). View bodies read this cache, so a
+    // rescan / status-snapshot apply / ackAIStatus). View bodies read this cache, so a
     // keystroke or a sidebar hover no longer re-runs the disk-touching gather
     // for every task. The 20s status reload is the freshness backstop.
     private struct Derived {
@@ -589,65 +905,148 @@ final class AppModel: ObservableObject {
         let attention: (permission: Bool, since: Date)?
         let activeTeam: String?
         let mainTeam: String?          // 主力 (manual) ?? 現用 — the sidebar's "主 AI"
+        let backgroundCount: Int       // informational only; never drives grouping
         let lastActivity: Date?        // for silence(); cached so the sidebar sort
                                        // (re-run on every hover) does zero disk I/O
     }
     private var derivedCache: [String: Derived] = [:]
 
-    private func refreshDerived() {
+    @discardableResult
+    private func refreshDerived(allowPriorityAlertTriggers: Bool = true) -> Bool {
         let now = Date()
+        let statusIDs = Set(aiStatus.keys)
         var cache: [String: Derived] = [:]
         cache.reserveCapacity(tasks.count)
         for t in tasks {
-            let signals = sessionSignals(t.id)
-            var when = signals.map(\.ts)
+            let taskSessions = taskAISessions(t.id, statusIDs: statusIDs)
+            let resolved = resolve(taskSessions, now: now)
+            let taskSignals = signals(from: resolved)
+            var when = taskSignals.map(\.ts)
             if let s = t.groupSince.flatMap({ Self.fmDate.date(from: $0) }) { when.append(s) }
             let lastActivity = when.max()
             let group = GroupingRules.classify(status: t.status, group: t.group,
                                                quiet: lastActivity.map { now.timeIntervalSince($0) } ?? 0,
-                                               signals: signals, now: now)
-            let active = computeActiveTeam(t.id)
+                                               signals: taskSignals, now: now)
+            let active = computeActiveTeam(resolved)
+            let backgroundCount = taskSessions.reduce(into: 0) { count, session in
+                count += backgroundTasksBySession[session.sid] ?? 0
+            }
             cache[t.id] = Derived(group: group,
-                                  attention: GroupingRules.attention(signals),
+                                  attention: GroupingRules.attention(taskSignals),
                                   activeTeam: active,
                                   mainTeam: primaryTeam(t.id) ?? active,
+                                  backgroundCount: backgroundCount,
                                   lastActivity: lastActivity)
         }
+        reconcilePriorityAlerts(current: cache, allowTriggers: allowPriorityAlertTriggers)
+        guard !Self.derivedCachesEqual(derivedCache, cache) else { return false }
+        objectWillChange.send()
         derivedCache = cache
+        return true
+    }
+
+    /// Keep pending reminders honest and detect only the real rising edge.
+    /// Validation also clears the reminder when a task starts running again,
+    /// is untagged, completed, deleted, or otherwise leaves 等你.
+    private func reconcilePriorityAlerts(current: [String: Derived],
+                                         allowTriggers: Bool) {
+        var currentGroups: [String: SidebarGroup] = [:]
+        for task in tasks {
+            if let group = current[task.id]?.group {
+                currentGroups[priorityAlertKey(task)] = group
+            }
+        }
+        defer { priorityAlertGroupCache = currentGroups }
+        guard hasLoadedAIStatusSnapshot else { return }
+
+        var next = Set(priorityAlertKeys.filter { key in
+            guard let task = taskForPriorityAlertKey(key),
+                  task.isMainline,
+                  currentGroups[key] == .needsYou else { return false }
+            return true
+        })
+        var newlyTriggered: [TaskNote] = []
+        if allowTriggers {
+            for task in tasks {
+                let key = priorityAlertKey(task)
+                guard let oldGroup = priorityAlertGroupCache[key],
+                      let newGroup = currentGroups[key],
+                      current[task.id]?.attention != nil else { continue }
+                if PriorityAlertRules.shouldTrigger(
+                    isMainline: task.isMainline,
+                    previous: oldGroup,
+                    current: newGroup,
+                    isCurrentlyViewed: isCurrentlyViewing(task)
+                ), next.insert(key).inserted {
+                    newlyTriggered.append(task)
+                }
+            }
+        }
+
+        if next != priorityAlertKeys { priorityAlertKeys = next }
+        guard !newlyTriggered.isEmpty else { return }
+        priorityAlertPulse &+= 1
+        if !(NSApp?.isActive ?? false) {
+            deliverPriorityAlertNotification()
+        }
+    }
+
+    /// A selected slug is only truly "being viewed" when its actual window is
+    /// key. This avoids suppressing alerts while the user works in a different
+    /// task popout (and recognizes a popout already showing this same task).
+    private func isCurrentlyViewing(_ task: TaskNote) -> Bool {
+        guard let app = NSApp, app.isActive, let window = app.keyWindow else { return false }
+        switch window.frameAutosaveName {
+        case "JamesDesk.main":
+            return selection == task.id
+        case "JamesDesk.task.\(task.id)":
+            return true
+        default:
+            return false
+        }
+    }
+
+    private static func derivedCachesEqual(_ lhs: [String: Derived],
+                                           _ rhs: [String: Derived]) -> Bool {
+        guard lhs.count == rhs.count else { return false }
+        for (slug, a) in lhs {
+            guard let b = rhs[slug],
+                  a.group == b.group,
+                  a.activeTeam == b.activeTeam,
+                  a.mainTeam == b.mainTeam,
+                  a.backgroundCount == b.backgroundCount,
+                  a.lastActivity == b.lastActivity,
+                  a.attention?.permission == b.attention?.permission,
+                  a.attention?.since == b.attention?.since else { return false }
+        }
+        return true
     }
 
     /// Manually designated 主力 (quota home) from machine state; in-memory for
     /// the open task, else read off disk (only here, off the render path).
     private func primaryTeam(_ slug: String) -> String? {
-        (sessions[slug]?.machine ?? store.cachedMachineState(slug)).primaryTeam
+        (sessions[slug]?.machine
+            ?? diskTaskSources[slug]?.machine
+            ?? store.cachedMachineState(slug)).primaryTeam
     }
 
     /// The task's "主 AI" for the sidebar: manual 主力 if set, else 現用.
     func mainTeam(_ slug: String) -> String? { derivedCache[slug]?.mainTeam }
+
+    /// Informational count of Claude-native background tasks. It is orthogonal
+    /// to ownership/attention, so "等你 · 背景 1" is a valid simultaneous state.
+    func backgroundTaskCount(_ slug: String) -> Int {
+        if let derived = derivedCache[slug] { return derived.backgroundCount }
+        return taskAISessions(slug).reduce(into: 0) { count, session in
+            count += backgroundTasksBySession[session.sid] ?? 0
+        }
+    }
 
     /// Cached last-activity instant — a STABLE sort key for the sidebar.
     /// (Sorting by silence() embedded a fresh now() in every comparison, so
     /// keys shifted between comparisons and near-tied rows swapped places on
     /// every hover re-sort.)
     func lastActivity(_ slug: String) -> Date? { derivedCache[slug]?.lastActivity }
-
-    /// Last-write instant of a conversation record. A `<sid>.jsonl` file is
-    /// its own mtime; a `<sid>/` DIRECTORY's mtime only changes when entries
-    /// are added/removed — appends to files inside don't touch it, so use the
-    /// newest content mtime (shallow) or the transcript looks idle mid-turn.
-    static func transcriptMtime(_ url: URL) -> Date? {
-        let fm = FileManager.default
-        var isDir: ObjCBool = false
-        guard fm.fileExists(atPath: url.path, isDirectory: &isDir) else { return nil }
-        let own = (try? fm.attributesOfItem(atPath: url.path))?[.modificationDate] as? Date
-        guard isDir.boolValue else { return own }
-        let kids = (try? fm.contentsOfDirectory(
-            at: url, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
-        let kidMax = kids.compactMap {
-            try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate
-        }.max()
-        return [own, kidMax].compactMap { $0 }.max()
-    }
 
     /// Ground-truth account for a session: which team's CLAUDE_CONFIG_DIR
     /// actually holds its conversation record. Beats the manifest's recorded
@@ -656,84 +1055,125 @@ final class AppModel: ObservableObject {
     /// said claude, the record lived in claude-team3). The record is stored
     /// per project cwd as either `<sid>.jsonl` (older) or a `<sid>` directory
     /// (this claude version) — match both. nil = unknown.
-    // Short-TTL cache: this enumerates every account's projects/ dir (disk),
-    // and it's called from view bodies that re-render on EVERY keystroke
-    // (detail-pane 現用 chip via activeTeam, AI pane headers, the resume menu).
-    // Un-memoized it meant one multi-dir disk scan per keystroke → typing lag.
-    // Memoizing per sid for a few seconds makes it ~once per few seconds.
+    // Positive results live for the process (a conversation doesn't move
+    // accounts); misses retry after a backoff. Crucially, lookup is cache-only
+    // on the main actor: directory traversal happens in a detached task.
     private var teamFileCache: [String: (team: String?, at: Date)] = [:]
+    private var pendingTeamFileLookups = Set<String>()
+    private var queuedTeamFileLookups = Set<String>()
+    private var teamFileLookupTask: Task<Void, Never>?
+    private static let missingTeamRetry: TimeInterval = 5
 
     func teamFromSessionFile(_ sid: String) -> String? {
-        if let c = teamFileCache[sid] {
-            // A session's account is immutable — its transcript is created in
-            // one account's dir and never moves — so once resolved, cache it
-            // for the whole run and NEVER re-scan (the old 3s TTL re-scanned
-            // disk every 3s on the main thread → periodic hitch). Keep retrying
-            // only while still unresolved (nil), with a short backoff.
-            if c.team != nil { return c.team }
-            if Date().timeIntervalSince(c.at) < 5 { return nil }
-        }
-        let result = computeTeamFromSessionFile(sid)
-        teamFileCache[sid] = (result, Date())
-        return result
+        cachedTeamsFromSessionFiles([sid])[sid.lowercased()]
     }
 
-    private func computeTeamFromSessionFile(_ sid: String) -> String? {
-        let fm = FileManager.default
-        for team in config.teams {
-            guard let dir = team.configDir else { continue }
-            let projects = URL(fileURLWithPath: Paths.expand(dir)).appendingPathComponent("projects")
-            guard let subs = try? fm.contentsOfDirectory(
-                at: projects, includingPropertiesForKeys: nil) else { continue }
-            for sub in subs {
-                if fm.fileExists(atPath: sub.appendingPathComponent("\(sid).jsonl").path)
-                    || fm.fileExists(atPath: sub.appendingPathComponent(sid).path) {
-                    return team.id
+    /// Batch cache lookup used by the resume menu. Missing ids are resolved
+    /// together in the background; this function never performs file I/O.
+    func cachedTeamsFromSessionFiles(_ sessionIDs: [String]) -> [String: String] {
+        let ids = Set(sessionIDs.map { $0.lowercased() })
+        let now = Date()
+        var found: [String: String] = [:]
+        var missing = Set<String>()
+        for sid in ids {
+            if let cached = teamFileCache[sid] {
+                if let team = cached.team {
+                    found[sid] = team
+                    continue
                 }
+                if now.timeIntervalSince(cached.at) < Self.missingTeamRetry { continue }
+            }
+            if !pendingTeamFileLookups.contains(sid) { missing.insert(sid) }
+        }
+        scheduleTeamFileLookup(missing)
+        return found
+    }
+
+    private func scheduleTeamFileLookup(_ sessionIDs: Set<String>) {
+        guard !sessionIDs.isEmpty else { return }
+        pendingTeamFileLookups.formUnion(sessionIDs)
+        queuedTeamFileLookups.formUnion(sessionIDs)
+        beginTeamFileLookupIfNeeded()
+    }
+
+    /// Coalesce cache misses from all task rows / pane headers / resume menus
+    /// into one directory traversal. A cold launch used to start one full
+    /// 100+-project scan per visible session.
+    private func beginTeamFileLookupIfNeeded() {
+        guard teamFileLookupTask == nil, !queuedTeamFileLookups.isEmpty else { return }
+        teamFileLookupTask = Task { [weak self] in
+            // Let one SwiftUI update enqueue every visible session first.
+            try? await Task.sleep(nanoseconds: 30_000_000)
+            guard let self else { return }
+            let sessionIDs = queuedTeamFileLookups
+            queuedTeamFileLookups.removeAll()
+            let roots = sessionTeamRoots()
+            let resolved = await Task.detached(priority: .utility) {
+                SessionDiscovery.resolveTeams(sessionIDs: sessionIDs, roots: roots)
+            }.value
+            let stamp = Date()
+            var gainedResult = false
+            for sid in sessionIDs {
+                let team = resolved[sid]
+                if team != nil, teamFileCache[sid]?.team != team { gainedResult = true }
+                teamFileCache[sid] = (team, stamp)
+                pendingTeamFileLookups.remove(sid)
+            }
+            teamFileLookupTask = nil
+            beginTeamFileLookupIfNeeded()
+            // Active-team chips and resume rows may both depend on this cache.
+            // Publish only when the derived active/main team really changed.
+            // Resume-menu content is evaluated again when the menu opens, so
+            // a same-team cache warm-up does not justify rebuilding the app.
+            if gainedResult, !refreshDerived() {
+                // No active/main-team field changed, but resume rows and pane
+                // headers read this cache directly.
+                objectWillChange.send()
             }
         }
-        return nil
+    }
+
+    private func sessionTeamRoots() -> [SessionDiscovery.TeamRoot] {
+        config.teams.compactMap { team in
+            guard let dir = team.configDir else { return nil }
+            return SessionDiscovery.TeamRoot(
+                team: team.id,
+                projects: URL(fileURLWithPath: Paths.expand(dir)).appendingPathComponent("projects")
+            )
+        }
     }
 
     /// Recent conversations on disk for `cwd`, across every team account —
     /// (team, sid, modified). Powers the pane "rebind to the real session"
     /// picker when the app's recorded session drifted from what's running.
-    private var recentCache: [String: (rows: [(team: String, sid: String, at: Date)], at: Date)] = [:]
+    private var recentCache: [String: (rows: [SessionDiscovery.RecentSession], at: Date)] = [:]
+    private var pendingRecentLookups = Set<String>()
 
-    func recentSessions(cwd: String, limit: Int = 10) -> [(team: String, sid: String, at: Date)] {
+    func recentSessions(cwd: String, limit: Int = 10) -> [SessionDiscovery.RecentSession] {
         let ckey = "\(cwd)#\(limit)"
-        if let c = recentCache[ckey], Date().timeIntervalSince(c.at) < 3 { return c.rows }
-        let fm = FileManager.default
-        let slug = Paths.expand(cwd)
-            .replacingOccurrences(of: "/", with: "-").replacingOccurrences(of: ".", with: "-")
-        // Keyed by sid: a session can appear as BOTH `<sid>.jsonl` and a
-        // `<sid>` directory — collapse to one, newest mtime wins. Older code
-        // only matched `.jsonl` and silently missed directory-format records.
-        var best: [String: (team: String, at: Date)] = [:]
-        for team in config.teams {
-            guard let dir = team.configDir else { continue }
-            let proj = URL(fileURLWithPath: Paths.expand(dir))
-                .appendingPathComponent("projects/\(slug)")
-            guard let items = try? fm.contentsOfDirectory(
-                at: proj, includingPropertiesForKeys: [.contentModificationDateKey, .isDirectoryKey]) else { continue }
-            for f in items {
-                let vals = try? f.resourceValues(forKeys: [.contentModificationDateKey, .isDirectoryKey])
-                let isDir = vals?.isDirectory ?? false
-                guard f.pathExtension == "jsonl" || isDir else { continue }
-                let sid = f.pathExtension == "jsonl" ? f.deletingPathExtension().lastPathComponent
-                                                     : f.lastPathComponent
-                // Directory records: the dir's own mtime misses appends to
-                // files inside — use the newest content mtime.
-                let mt = isDir ? (Self.transcriptMtime(f) ?? .distantPast)
-                               : (vals?.contentModificationDate ?? .distantPast)
-                if let cur = best[sid], cur.at >= mt { continue }
-                best[sid] = (team.id, mt)
+        if let cached = recentCache[ckey] {
+            if Date().timeIntervalSince(cached.at) >= 10 {
+                scheduleRecentLookup(cwd: cwd, limit: limit, cacheKey: ckey)
             }
+            return cached.rows
         }
-        let rows = best.map { (team: $0.value.team, sid: $0.key, at: $0.value.at) }
-            .sorted { $0.at > $1.at }.prefix(limit).map { $0 }
-        recentCache[ckey] = (rows, Date())
-        return rows
+        scheduleRecentLookup(cwd: cwd, limit: limit, cacheKey: ckey)
+        return []
+    }
+
+    private func scheduleRecentLookup(cwd: String, limit: Int, cacheKey: String) {
+        guard pendingRecentLookups.insert(cacheKey).inserted else { return }
+        let roots = sessionTeamRoots()
+        Task { [weak self] in
+            let rows = await Task.detached(priority: .utility) {
+                SessionDiscovery.recentSessions(cwd: cwd, roots: roots, limit: limit)
+            }.value
+            guard let self else { return }
+            let changed = recentCache[cacheKey]?.rows != rows
+            if changed { objectWillChange.send() }
+            recentCache[cacheKey] = (rows, Date())
+            pendingRecentLookups.remove(cacheKey)
+        }
     }
 
     /// The account currently working on the task — "現用" in the header chip.
@@ -743,11 +1183,13 @@ final class AppModel: ObservableObject {
     /// quota home).
     func activeTeam(_ slug: String) -> String? { derivedCache[slug]?.activeTeam }
 
-    private func computeActiveTeam(_ slug: String) -> String? {
+    private func computeActiveTeam(_ resolved: [ResolvedAISession]) -> String? {
         var best: (ts: Date, sid: String, team: String?)?
-        for s in taskAISessions(slug) {
-            guard let entry = statusEntry(sid: s.sid, team: s.team, cwd: s.cwd) else { continue }
-            if best == nil || entry.ts > best!.ts { best = (entry.ts, s.sid, s.team) }
+        for item in resolved {
+            let candidate = (item.entry.ts, item.session.sid, item.session.team)
+            if best == nil || candidate.0 > best!.ts {
+                best = candidate
+            }
         }
         guard let best else { return nil }
         return teamFromSessionFile(best.sid) ?? best.team
@@ -833,8 +1275,6 @@ final class AppModel: ObservableObject {
     /// Runs on every rescan; idempotent (done tasks are skipped, the
     /// annotation is stamped once via the auto_archived frontmatter key).
     private func autoArchiveSweep() {
-        let df = DateFormatter()
-        df.dateFormat = "yyyy-MM-dd HH:mm"
         for t in tasks where t.status == "active" {
             guard sidebarGroup(t) == .semiArchived,
                   let quiet = silence(t), quiet > Self.autoDoneAfter else { continue }
@@ -846,9 +1286,8 @@ final class AppModel: ObservableObject {
             // archive annotation would clobber the note.
             if text.isEmpty, FileManager.default.fileExists(atPath: store.noteURL(t.id).path) { continue }
             guard TaskStore.frontmatter(text)["auto_archived"] == nil else { continue }
-            let stamp = df.string(from: Date())
-            text = TaskStore.setFrontmatterValue(text, key: "status", value: "done")
-            text = TaskStore.setFrontmatterValue(text, key: "auto_archived", value: stamp)
+            let stamp = Self.archiveDate.string(from: Date())
+            text = TaskStore.markArchived(text, at: stamp, automatic: true)
             if !text.hasSuffix("\n") { text += "\n" }
             text += "\n> 🗄 \(stamp) 系統自動封存：半封存超過 30 天無動靜，自動歸入「已完成」。\n"
             if let s = sessions[t.id] {
@@ -877,49 +1316,106 @@ final class AppModel: ObservableObject {
         setCloseOnExec(statusFD)
         let src = DispatchSource.makeFileSystemObjectSource(
             fileDescriptor: statusFD, eventMask: .write, queue: .main)
-        src.setEventHandler { [weak self] in self?.reloadAIStatus() }
+        src.setEventHandler { [weak self] in
+            self?.scheduleAIStatusReload(after: 0.1, includeTaskSources: false)
+        }
         src.activate()
         statusWatcher = src
     }
 
-    private func reloadAIStatus() {
-        var map: [String: (state: String, ts: Date)] = [:]
-        var taskMap: [String: String] = [:]
+    private func scheduleAIStatusReload(after delay: TimeInterval = 0,
+                                        includeTaskSources: Bool) {
+        statusReloadGeneration &+= 1
+        let generation = statusReloadGeneration
+        statusReloadTask?.cancel()
         // task_key (permanent frontmatter uuid) → CURRENT slug; the slug tag
         // alone goes stale when a task is renamed mid-session.
         let keyToSlug = Dictionary(uniqueKeysWithValues: tasks.compactMap { t in
             t.permanentID.map { ($0, t.id) }
         })
-        let files = (try? FileManager.default.contentsOfDirectory(
-            at: Paths.statusDir, includingPropertiesForKeys: nil)) ?? []
-        for f in files where f.pathExtension == "json" {
-            guard let d = try? Data(contentsOf: f),
-                  let obj = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
-                  let state = obj["state"] as? String else { continue }
-            let sid = f.deletingPathExtension().lastPathComponent
-            let ts = (obj["ts"] as? Double).map { Date(timeIntervalSince1970: $0) } ?? .distantPast
-            // Prune on the way through: signals beyond the window steer nothing
-            // (grouping ignores them), so their files only make this 20s sweep
-            // slower forever. Unbounded before; a few months ≈ hundreds of
-            // stat+read+parse per pass.
-            if Date().timeIntervalSince(ts) > Self.signalWindow {
-                try? FileManager.default.removeItem(at: f)
-                continue
-            }
-            map[sid] = (state, ts)
-            // Attribution: rename-proof task_key first, then the slug tag.
-            if let key = obj["task_key"] as? String, let slug = keyToSlug[key] {
-                taskMap[sid] = slug
-            } else if let task = obj["task"] as? String, !task.isEmpty {
-                taskMap[sid] = task
+        let loader = statusLoader
+        let statusDirectory = Paths.statusDir
+        let statusIDs = Set(aiStatus.keys)
+        let transcriptRequests = tasks.flatMap { task in
+            taskAISessions(task.id, statusIDs: statusIDs).compactMap {
+                transcriptActivityRequest(for: $0)
             }
         }
-        aiStatus = map
-        sessionTask = taskMap
-        // acked entries whose signal is gone can never matter again; without
-        // pruning this dictionary (persisted to UserDefaults) only grows.
-        ackedAI = ackedAI.filter { map[$0.key] != nil }
-        refreshDerived()
+        let sourceRequests: [TaskAISourceRequest]?
+        if includeTaskSources {
+            let machineDirectory = Paths.machineStateDir
+            sourceRequests = tasks.map { task in
+                TaskAISourceRequest(
+                    slug: task.id,
+                    noteURL: store.noteURL(task.id),
+                    machineURL: machineDirectory.appendingPathComponent(task.id + ".json")
+                )
+            }
+        } else {
+            sourceRequests = nil
+        }
+        statusReloadTask = Task { [weak self] in
+            if delay > 0 {
+                do {
+                    try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                } catch {
+                    return
+                }
+            }
+            guard !Task.isCancelled else { return }
+            let snapshot = await loader.load(
+                from: statusDirectory, keyToSlug: keyToSlug,
+                taskSourceRequests: sourceRequests,
+                transcriptRequests: transcriptRequests,
+                now: Date(), signalWindow: Self.signalWindow
+            )
+            guard let self, !Task.isCancelled,
+                  generation == statusReloadGeneration else { return }
+            guard let snapshot else {
+                // Preserve the last known status on transient I/O failure, but
+                // still advance purely time-based grouping thresholds.
+                refreshDerived()
+                return
+            }
+            applyAIStatus(snapshot)
+        }
+    }
+
+    private func applyAIStatus(_ snapshot: AIStatusSnapshot) {
+        // The first loaded snapshot establishes a baseline. It may validate a
+        // persisted reminder, but must not replay a completion pulse merely
+        // because the app was relaunched after that completion.
+        let allowPriorityAlertTriggers = hasLoadedAIStatusSnapshot
+        hasLoadedAIStatusSnapshot = true
+        if aiStatus != snapshot.statusBySession {
+            aiStatus = snapshot.statusBySession
+        }
+        if hookSessionsByTask != snapshot.sessionsByTask {
+            hookSessionsByTask = snapshot.sessionsByTask
+        }
+        if backgroundTasksBySession != snapshot.backgroundTasksBySession {
+            backgroundTasksBySession = snapshot.backgroundTasksBySession
+        }
+        if let loadedSources = snapshot.taskSources {
+            // Merge instead of replacing: a transient read/decode failure for
+            // one file intentionally omits that row, preserving its last good
+            // source until a later validation succeeds.
+            let currentSlugs = Set(tasks.map(\.id))
+            var nextSources = diskTaskSources.filter { currentSlugs.contains($0.key) }
+            for (slug, source) in loadedSources where currentSlugs.contains(slug) {
+                nextSources[slug] = source
+            }
+            if nextSources != diskTaskSources { diskTaskSources = nextSources }
+        }
+        // Bound the persisted dictionary by the same signal window used for
+        // grouping. Do not prune by hook-file presence: legacy sessions use a
+        // transcript-event fallback, and their acknowledgement must survive
+        // periodic hook snapshots that naturally contain no row for them.
+        let nextAcked = AIStatusAcknowledgementRules.prune(
+            ackedAI, now: Date(), signalWindow: Self.signalWindow
+        )
+        if nextAcked != ackedAI { ackedAI = nextAcked }
+        refreshDerived(allowPriorityAlertTriggers: allowPriorityAlertTriggers)
     }
 
     func openInObsidian(_ slug: String) {
@@ -961,9 +1457,19 @@ final class AppModel: ObservableObject {
         guard dirFD >= 0 else { return }
         setCloseOnExec(dirFD)
         let src = DispatchSource.makeFileSystemObjectSource(fileDescriptor: dirFD, eventMask: .write, queue: .main)
-        src.setEventHandler { [weak self] in self?.rescan() }
+        src.setEventHandler { [weak self] in self?.scheduleRescan() }
         src.activate()
         dirWatcher = src
+    }
+
+    private func scheduleRescan() {
+        rescanTimer?.invalidate()
+        rescanTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: false) { [weak self] _ in
+            Task { @MainActor in
+                self?.rescanTimer = nil
+                self?.rescan()
+            }
+        }
     }
 
     // MARK: - Quota
@@ -1254,16 +1760,12 @@ final class TaskSession: ObservableObject {
     /// file location, so resuming uses the right claude. Lets the user get
     /// back into a task's conversation the app was never told about.
     func resumableSessions() -> [(sid: String, team: String)] {
-        let ids = Set(noteText.ranges(of: try! Regex(
-            "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"))
-            .map { String(noteText[$0]) })
         let openSids = Set(machine.panes.compactMap { $0.sessionID })
-        var out: [(String, String)] = []
-        for sid in ids.sorted() where sid != TaskStore.frontmatter(noteText)["id"]
-            && !openSids.contains(sid) {
-            if let team = app.teamFromSessionFile(sid) { out.append((sid, team)) }
-        }
-        return out
+        let ids = SessionDiscovery.resumableReferences(
+            in: noteText, openSessionIDs: openSids
+        )
+        let teams = app.cachedTeamsFromSessionFiles(ids)
+        return ids.compactMap { sid in teams[sid].map { (sid, $0) } }
     }
 
     /// Open a pane that resumes an existing session under its real account

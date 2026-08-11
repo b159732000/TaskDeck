@@ -15,11 +15,239 @@ func check(_ name: String, _ cond: @autoclosure () -> Bool) {
     }
 }
 
+func multilineShiftReturn(
+    _ keyCode: UInt16,
+    shift: Bool = false,
+    command: Bool = false,
+    option: Bool = false,
+    control: Bool = false
+) -> [UInt8]? {
+    TerminalInputEncoding.multilineShiftReturn(
+        keyCode: keyCode,
+        shift: shift,
+        command: command,
+        option: option,
+        control: control
+    )
+}
+
+check("terminal input: main Shift+Return stays distinct from submit",
+      multilineShiftReturn(36, shift: true) == [0x1b, 0x0d])
+check("terminal input: keypad Shift+Enter uses the same mapping",
+      multilineShiftReturn(76, shift: true) == [0x1b, 0x0d])
+check("terminal input: plain Return remains on SwiftTerm's normal path",
+      multilineShiftReturn(36) == nil)
+check("terminal input: modified Shift+Return is not stolen",
+      multilineShiftReturn(36, shift: true, option: true) == nil
+      && multilineShiftReturn(36, shift: true, command: true) == nil
+      && multilineShiftReturn(36, shift: true, control: true) == nil)
+
 /// True when `a` occurs before `b` in `s` (both must exist).
 func ordered(_ s: String, _ a: String, _ b: String) -> Bool {
     guard let ra = s.range(of: a), let rb = s.range(of: b) else { return false }
     return ra.lowerBound < rb.lowerBound
 }
+
+// MARK: remote terminal surface — additive wire carrier + resize lease
+
+var surfaceWire = WireMessage(type: "replay")
+surfaceWire.surfaceVersion = Wire.remoteSurfaceVersion
+surfaceWire.surfaceClientID = "view-a"
+surfaceWire.paneEpoch = "epoch-a"
+surfaceWire.surfaceRevision = 7
+surfaceWire.setSurfaceSnapshot([0x00, 0x1b, 0xff])
+let surfaceReader = FrameCodec.Reader()
+surfaceReader.append(FrameCodec.encode(surfaceWire))
+let decodedSurfaceWire = surfaceReader.next()
+check("surface wire: opaque snapshot round-trips",
+      decodedSurfaceWire?.surfaceSnapshotBytes == [0x00, 0x1b, 0xff])
+check("surface wire: pane epoch + revision round-trip",
+      decodedSurfaceWire?.surfaceVersion == Wire.remoteSurfaceVersion
+      && decodedSurfaceWire?.paneEpoch == "epoch-a"
+      && decodedSurfaceWire?.surfaceRevision == 7)
+
+let legacyWireJSON = Data(#"{"type":"replay","data":"eA==","futureField":true}"#.utf8)
+let legacyWire = try? JSONDecoder().decode(WireMessage.self, from: legacyWireJSON)
+check("surface wire: legacy frame decodes with no capability",
+      legacyWire?.dataBytes == [0x78]
+      && legacyWire?.surfaceVersion == nil
+      && legacyWire?.surfaceSnapshot == nil)
+
+var lease = ResizeLeaseState()
+let firstLease = lease.acquire(ownerID: "conn-a:view-a", nowMS: 100, ttlMS: 50,
+                               token: "token-a")
+check("resize lease: first owner acquires",
+      firstLease?.token == "token-a"
+      && firstLease?.generation == 1
+      && firstLease?.expiresAtMS == 150)
+check("resize lease: competing live owner is denied",
+      lease.acquire(ownerID: "conn-b:view-b", nowMS: 120, ttlMS: 50,
+                    token: "token-b") == nil)
+let renewedLease = lease.acquire(ownerID: "conn-a:view-a", nowMS: 130, ttlMS: 50,
+                                 token: "must-not-replace")
+check("resize lease: same owner renews credential",
+      renewedLease?.token == "token-a"
+      && renewedLease?.generation == 1
+      && renewedLease?.expiresAtMS == 180)
+check("resize lease: valid resize renews",
+      lease.validateAndRenew(ownerID: "conn-a:view-a", token: "token-a",
+                             generation: 1, nowMS: 150, ttlMS: 50)?.expiresAtMS == 200)
+check("resize lease: wrong token cannot resize",
+      lease.validateAndRenew(ownerID: "conn-a:view-a", token: "stale",
+                             generation: 1, nowMS: 160, ttlMS: 50) == nil)
+let secondLease = lease.acquire(ownerID: "conn-b:view-b", nowMS: 200, ttlMS: 40,
+                                token: "token-b")
+check("resize lease: expiry permits new generation",
+      secondLease?.token == "token-b" && secondLease?.generation == 2)
+check("resize lease: expired owner's credential stays stale",
+      !lease.isOwned(by: "conn-a:view-a", token: "token-a", generation: 1, at: 201))
+check("resize lease: stale release cannot revoke new owner",
+      !lease.release(ownerID: "conn-a:view-a", token: "token-a", generation: 1)
+      && lease.isOwned(by: "conn-b:view-b", token: "token-b", generation: 2, at: 201))
+check("resize lease: connection teardown revokes owner",
+      lease.revoke(ownerID: "conn-b:view-b") && lease.grant == nil)
+
+var claimedLease = ResizeLeaseState()
+_ = claimedLease.acquire(ownerID: "conn-a:view-a", nowMS: 10, ttlMS: 100,
+                         token: "old-token")
+let claimedGrant = claimedLease.claim(ownerID: "conn-b:view-b", nowMS: 20, ttlMS: 100,
+                                      token: "focus-token")
+check("resize lease: focused viewer preempts immediately",
+      claimedGrant?.ownerID == "conn-b:view-b"
+      && claimedGrant?.token == "focus-token"
+      && claimedGrant?.generation == 2)
+check("resize lease: claim invalidates old in-flight resize",
+      !claimedLease.isOwned(by: "conn-a:view-a", token: "old-token", generation: 1, at: 21))
+let sameClaim = claimedLease.claim(ownerID: "conn-b:view-b", nowMS: 30, ttlMS: 100,
+                                   token: "must-not-replace")
+check("resize lease: repeated focus keeps credential stable",
+      sameClaim?.token == "focus-token" && sameClaim?.generation == 2)
+
+// MARK: terminal attach — replay/live barrier is per view
+
+var replayBuffer = ReplayFirstOutputBuffer()
+check("terminal replay: pre-response live is dropped as snapshot overlap",
+      !replayBuffer.appendLive(Array("duplicate".utf8)) && replayBuffer.drain().isEmpty)
+check("terminal replay: response opens applying phase",
+      replayBuffer.receivedReplayResponse()
+      && replayBuffer.phase == .applyingReplay)
+check("terminal replay: post-snapshot live waits for UI replay",
+      !replayBuffer.appendLive(Array("after-snapshot".utf8))
+      && replayBuffer.drain().isEmpty)
+check("terminal replay: applying replay releases newer bytes",
+      replayBuffer.replayApplied()
+      && replayBuffer.drain() == Array("after-snapshot".utf8))
+check("terminal replay: live output is immediately deliverable",
+      replayBuffer.appendLive(Array("live".utf8))
+      && replayBuffer.drain() == Array("live".utf8))
+
+var emptyReplayBuffer = ReplayFirstOutputBuffer()
+_ = emptyReplayBuffer.receivedReplayResponse()
+check("terminal replay: empty replay still unlocks subscription",
+      !emptyReplayBuffer.replayApplied()
+      && emptyReplayBuffer.phase == .live
+      && emptyReplayBuffer.appendLive([0x78]))
+
+var cancelledReplayBuffer = ReplayFirstOutputBuffer()
+_ = cancelledReplayBuffer.receivedReplayResponse()
+_ = cancelledReplayBuffer.appendLive([0x6f, 0x6c, 0x64])
+cancelledReplayBuffer.cancel()
+check("terminal replay: cancelled generation drops late output",
+      cancelledReplayBuffer.phase == .cancelled
+      && !cancelledReplayBuffer.replayApplied()
+      && !cancelledReplayBuffer.appendLive([0x6e, 0x65, 0x77])
+      && cancelledReplayBuffer.drain().isEmpty)
+
+// MARK: terminal attach — conservative truncated OpenTUI recovery
+
+let syncBegin = Array("\u{1b}[?2026h".utf8)
+var truncatedTUIReplay = Array("29;6H".utf8) // ring begins inside a lost CSI
+truncatedTUIReplay.append(contentsOf: syncBegin)
+truncatedTUIReplay.append(contentsOf: Array("first draw\u{1b}[?2026l".utf8))
+truncatedTUIReplay.append(contentsOf: syncBegin)
+truncatedTUIReplay.append(contentsOf: Array("second draw\u{1b}[?2026l".utf8))
+truncatedTUIReplay.append(contentsOf: repeatElement(
+    0x20, count: TerminalReplayRecovery.daemonReplayCapacity - truncatedTUIReplay.count))
+let recoveryPlan = TerminalReplayRecovery.plan(
+    for: truncatedTUIReplay, allowMouseModeRecovery: true)
+let recoveredReplay = recoveryPlan.prepare(truncatedTUIReplay)
+let expectedMousePrefix = Array("\u{1b}[?1000h\u{1b}[?1006h".utf8)
+check("terminal recovery: full repeated OpenTUI replay is recognized",
+      recoveryPlan.applicationPagingFallback)
+check("terminal recovery: partial leading CSI is discarded",
+      recoveryPlan.startOffset == 5)
+check("terminal recovery: local mouse state precedes first complete draw",
+      recoveredReplay.starts(with: expectedMousePrefix + syncBegin))
+check("terminal recovery: pane metadata is required",
+      TerminalReplayRecovery.plan(
+          for: truncatedTUIReplay, allowMouseModeRecovery: false) == .init())
+
+var completeTUIReplay = truncatedTUIReplay
+let mouseSetup = Array("\u{1b}[?1000;1006h".utf8)
+completeTUIReplay.replaceSubrange(0 ..< 5, with: mouseSetup)
+check("terminal recovery: existing combined mouse setup is never overridden",
+      TerminalReplayRecovery.plan(
+          for: completeTUIReplay, allowMouseModeRecovery: true) == .init())
+var encodingOnlyTUIReplay = truncatedTUIReplay
+let mouseEncodingOnly = Array("\u{1b}[?1006h".utf8)
+encodingOnlyTUIReplay.replaceSubrange(0 ..< 5, with: mouseEncodingOnly)
+check("terminal recovery: 1006 encoding alone does not imply mouse tracking",
+      TerminalReplayRecovery.plan(
+          for: encodingOnlyTUIReplay,
+          allowMouseModeRecovery: true).applicationPagingFallback)
+var hostileParameterReplay = truncatedTUIReplay
+let oversizedParameter = Array(
+    ("\u{1b}[?" + String(repeating: "9", count: 1024) + "h").utf8)
+hostileParameterReplay.replaceSubrange(0 ..< 5, with: oversizedParameter)
+check("terminal recovery: oversized CSI parameter cannot overflow parser",
+      TerminalReplayRecovery.plan(
+          for: hostileParameterReplay,
+          allowMouseModeRecovery: true).applicationPagingFallback)
+check("terminal recovery: non-full replay is left untouched",
+      TerminalReplayRecovery.plan(
+          for: Array(truncatedTUIReplay.prefix(4096)),
+          allowMouseModeRecovery: true) == .init())
+
+// MARK: title search — contiguous literal substring, title only
+
+let searchTitle = "Keycap PRO-1816- [FE-GL] PRO-1280 keycap键帽生成器"
+
+check("search: empty query matches",
+      TaskSearchRules.matchesTitle(searchTitle, query: ""))
+check("search: whitespace-only query matches",
+      TaskSearchRules.matchesTitle(searchTitle, query: " \n\t "))
+check("search: trims query edges",
+      TaskSearchRules.matchesTitle(searchTitle, query: "  PRO-1816  "))
+check("search: contiguous substring matches",
+      TaskSearchRules.matchesTitle(searchTitle, query: "PRO-1816"))
+check("search: ASCII case-insensitive",
+      TaskSearchRules.matchesTitle(searchTitle, query: "keyCAP"))
+check("search: Chinese substring matches",
+      TaskSearchRules.matchesTitle(searchTitle, query: "键帽生成"))
+check("search: no fuzzy token matching",
+      !TaskSearchRules.matchesTitle(searchTitle, query: "Keycap PRO-1280"))
+check("search: internal punctuation remains significant",
+      !TaskSearchRules.matchesTitle(searchTitle, query: "PRO-1816 [FE-GL]"))
+check("search: reordered text does not match",
+      !TaskSearchRules.matchesTitle(searchTitle, query: "PRO-1280 PRO-1816"))
+check("search: brackets are ordinary text",
+      TaskSearchRules.matchesTitle(searchTitle, query: "[FE-GL]"))
+check("search: regex wildcard is not evaluated",
+      !TaskSearchRules.matchesTitle("plain title", query: ".*"))
+check("search: regex anchor is not evaluated",
+      !TaskSearchRules.matchesTitle("plain title", query: "^plain"))
+
+let decomposedCafe = "Cafe" + String(UnicodeScalar(0x0301)!)
+check("search: canonically equivalent Unicode matches",
+      TaskSearchRules.matchesTitle("Café review", query: decomposedCafe))
+check("search: accent is not discarded",
+      !TaskSearchRules.matchesTitle("Café review", query: "cafe"))
+check("search: no simplified/traditional conversion",
+      !TaskSearchRules.matchesTitle("鍵帽生成器", query: "键帽"))
+check("search: no width conversion",
+      !TaskSearchRules.matchesTitle("ＰＲＯ task", query: "pro"))
+check("search: grapheme cluster matches",
+      TaskSearchRules.matchesTitle("Family 👨‍👩‍👧‍👦 task", query: "👨‍👩‍👧‍👦"))
 
 let note = """
 ---
@@ -167,6 +395,103 @@ let setG2 = TaskStore.setFrontmatterValue(setG, key: "group", value: "read")
 check("fm-set: update existing key stays in frontmatter", TaskStore.frontmatter(setG2)["group"] == "read")
 check("fm-set: update didn't touch body", setG2.contains("正文 group: 設計討論 這行不能被動"))
 
+let mainlined = TaskStore.setFrontmatterValue(bodyLookalike, key: "priority", value: "main")
+check("fm-priority: mainline marker stored", TaskStore.frontmatter(mainlined)["priority"] == "main")
+let unmainlined = TaskStore.removeFrontmatterKey(mainlined, key: "priority")
+check("fm-priority: marker removal keeps body",
+      TaskStore.frontmatter(unmainlined)["priority"] == nil
+      && unmainlined.contains("正文 group: 設計討論 這行不能被動"))
+
+// MARK: archive ordering — completion time, never creation time
+
+let archiveTemp = FileManager.default.temporaryDirectory
+    .appendingPathComponent("taskdeck-archive-sort-\(UUID().uuidString)")
+let archiveStore = TaskStore(dir: archiveTemp)
+func archiveNote(created: String, archiveKey: String? = nil,
+                 archiveValue: String? = nil) -> String {
+    var rows = ["---", "status: done", "created: \(created)"]
+    if let archiveKey, let archiveValue { rows.append("\(archiveKey): \(archiveValue)") }
+    rows += ["---", "", "# archived"]
+    return rows.joined(separator: "\n")
+}
+archiveStore.write("created-new-archived-old", archiveNote(
+    created: "2026-07-30 10:00",
+    archiveKey: "archived_at", archiveValue: "2026-07-20 10:00:00"
+))
+archiveStore.write("created-old-archived-new", archiveNote(
+    created: "2026-07-01 10:00",
+    archiveKey: "archived_at", archiveValue: "2026-07-30 10:00:00"
+))
+archiveStore.write("auto-archive-compat", archiveNote(
+    created: "2026-07-29 10:00",
+    archiveKey: "auto_archived", archiveValue: "2026-07-25 10:00"
+))
+archiveStore.write("legacy-mtime", archiveNote(created: "2026-07-28 10:00"))
+let archiveTestDF = DateFormatter()
+archiveTestDF.locale = Locale(identifier: "en_US_POSIX")
+archiveTestDF.dateFormat = "yyyy-MM-dd HH:mm:ss"
+let legacyMtime = archiveTestDF.date(from: "2026-07-28 10:00:00")!
+try? FileManager.default.setAttributes(
+    [.modificationDate: legacyMtime],
+    ofItemAtPath: archiveStore.noteURL("legacy-mtime").path
+)
+let archivedRows = archiveStore.scan()
+let archiveOrder = archivedRows.sorted(by: TaskSortRules.archivedNewestFirst).map(\.id)
+check("archive-sort: newest archive wins despite older creation",
+      archiveOrder.first == "created-old-archived-new")
+check("archive-sort: exact, legacy mtime, auto fallback, old exact",
+      archiveOrder == [
+          "created-old-archived-new",
+          "legacy-mtime",
+          "auto-archive-compat",
+          "created-new-archived-old",
+      ])
+check("archive-sort: auto_archived compatibility parsed",
+      archivedRows.first(where: { $0.id == "auto-archive-compat" })?.archivedAt != nil)
+check("archive-sort: legacy done falls back to file mtime",
+      abs((archivedRows.first(where: { $0.id == "legacy-mtime" })?.archivedAt
+           ?? .distantPast).timeIntervalSince(legacyMtime)) < 1)
+try? FileManager.default.removeItem(at: archiveTemp)
+
+let autoParked = """
+---
+status: active
+group: waiting
+group_since: 2026-06-01 10:00
+---
+
+# auto lifecycle
+
+正文 auto_archived: 只是文字，不能被動
+"""
+let firstAutoArchive = TaskStore.markArchived(
+    autoParked, at: "2026-07-01 10:00:00", automatic: true
+)
+check("archive-lifecycle: automatic archive writes canonical + source marker",
+      TaskStore.frontmatter(firstAutoArchive)["archived_at"] == "2026-07-01 10:00:00"
+      && TaskStore.frontmatter(firstAutoArchive)["auto_archived"] == "2026-07-01 10:00:00")
+let reactivatedAuto = TaskStore.markActive(firstAutoArchive)
+check("archive-lifecycle: reactivating auto archive clears stale archive + parking",
+      TaskStore.frontmatter(reactivatedAuto)["status"] == "active"
+      && TaskStore.frontmatter(reactivatedAuto)["archived_at"] == nil
+      && TaskStore.frontmatter(reactivatedAuto)["auto_archived"] == nil
+      && TaskStore.frontmatter(reactivatedAuto)["group"] == nil
+      && TaskStore.frontmatter(reactivatedAuto)["group_since"] == nil)
+check("archive-lifecycle: reactivation leaves free-form body untouched",
+      reactivatedAuto.contains("正文 auto_archived: 只是文字，不能被動"))
+let secondAutoArchive = TaskStore.markArchived(
+    reactivatedAuto, at: "2026-07-30 12:00:00", automatic: true
+)
+check("archive-lifecycle: reactivated task can auto-archive again",
+      TaskStore.frontmatter(secondAutoArchive)["archived_at"] == "2026-07-30 12:00:00"
+      && TaskStore.frontmatter(secondAutoArchive)["auto_archived"] == "2026-07-30 12:00:00")
+let manualAfterAuto = TaskStore.markArchived(
+    firstAutoArchive, at: "2026-07-30 13:00:00"
+)
+check("archive-lifecycle: manual archive clears stale automatic marker",
+      TaskStore.frontmatter(manualAfterAuto)["archived_at"] == "2026-07-30 13:00:00"
+      && TaskStore.frontmatter(manualAfterAuto)["auto_archived"] == nil)
+
 // MARK: manifest merge-guard — stale flush must not drop session ids
 
 let diskNote = "---\nstatus: active\n---\n\n# t\n\n- claude-eng old-123\n- claude3 keep-456\n\n---\n\n內文"
@@ -182,6 +507,163 @@ check("merge: idempotent",
       TaskStore.mergeManifestLines(disk: diskNote, into: mergedNote) == mergedNote)
 check("merge: no manifest on disk is a no-op",
       TaskStore.mergeManifestLines(disk: "# t\n\n無 manifest", into: staleMemory) == staleMemory)
+
+// MARK: session discovery — one note scan + batched off-main directory lookup
+
+let uuidA = "11111111-2222-3333-4444-555555555555"
+let uuidB = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+let discoveryNote = """
+---
+id: \(uuidA)
+---
+
+# sessions
+
+Body UUID: \(uuidB)
+Duplicate uppercase: \(uuidB.uppercased())
+OpenCode: ses_01jz9abc123
+Malformed: 1111-2222 and ses_
+"""
+check("sessions: references are deduped + canonical",
+      SessionDiscovery.references(in: discoveryNote)
+          == [uuidA, uuidB, "ses_01jz9abc123"])
+check("sessions: resumable excludes permanent + open",
+      SessionDiscovery.resumableReferences(
+          in: discoveryNote, openSessionIDs: ["ses_01jz9abc123"]
+      ) == [uuidB])
+
+let discoveryTemp = FileManager.default.temporaryDirectory
+    .appendingPathComponent("taskdeck-session-discovery-\(UUID().uuidString)")
+let teamAProjects = discoveryTemp.appendingPathComponent("team-a/projects")
+let teamBProjects = discoveryTemp.appendingPathComponent("team-b/projects")
+let projectA = teamAProjects.appendingPathComponent("project-a")
+let projectB = teamBProjects.appendingPathComponent("project-b")
+try? FileManager.default.createDirectory(at: projectA, withIntermediateDirectories: true)
+try? FileManager.default.createDirectory(
+    at: projectB.appendingPathComponent(uuidB), withIntermediateDirectories: true
+)
+try? FileManager.default.createDirectory(
+    at: projectB.appendingPathComponent(uuidA), withIntermediateDirectories: true
+)
+try? Data("{}".utf8).write(to: projectA.appendingPathComponent("\(uuidA).jsonl"))
+let discoveredTeams = SessionDiscovery.resolveTeams(
+    sessionIDs: [uuidA, uuidB, "ffffffff-ffff-ffff-ffff-ffffffffffff"],
+    roots: [
+        .init(team: "team-a", projects: teamAProjects),
+        .init(team: "team-b", projects: teamBProjects),
+    ]
+)
+check("sessions: batch resolver finds jsonl + preserves team priority",
+      discoveredTeams[uuidA] == "team-a")
+check("sessions: batch resolver finds directory record", discoveredTeams[uuidB] == "team-b")
+check("sessions: unresolved id omitted", discoveredTeams.count == 2)
+
+// A transcript's filesystem mtime can move without any new conversation
+// event. Status fallback must use the latest top-level JSONL timestamp.
+let transcriptURL = projectA.appendingPathComponent("legacy-status.jsonl")
+let embeddedTimestamp = "2026-07-23T05:11:48.151Z"
+let eventLine = #"{"type":"system","subtype":"turn_duration","timestamp":"\#(embeddedTimestamp)"}"#
+let nestedFakeTimestamp = #"{"type":"metadata","payload":{"timestamp":"2099-01-01T00:00:00.000Z"}}"#
+let largeUntimestampedMetadata = try! JSONSerialization.data(withJSONObject: [
+    "type": "metadata",
+    "payload": String(repeating: "x", count: 70_000),
+])
+var transcriptData = Data(eventLine.utf8)
+transcriptData.append(Data("\n".utf8))
+transcriptData.append(Data(nestedFakeTimestamp.utf8))
+transcriptData.append(Data("\n".utf8))
+transcriptData.append(largeUntimestampedMetadata)
+transcriptData.append(Data("\n{not-json\n".utf8))
+try? transcriptData.write(to: transcriptURL)
+let touchedAt = Date(timeIntervalSince1970: 1_785_387_600)
+try? FileManager.default.setAttributes(
+    [.modificationDate: touchedAt], ofItemAtPath: transcriptURL.path
+)
+let timestampParser = ISO8601DateFormatter()
+timestampParser.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+let expectedEventAt = timestampParser.date(from: embeddedTimestamp)!
+let parsedEventAt = SessionDiscovery.transcriptEventTimestamp(transcriptURL)
+check("transcript status: embedded event beats a touched filesystem mtime",
+      parsedEventAt.map { abs($0.timeIntervalSince(expectedEventAt)) < 0.001 } == true)
+check("transcript status: nested timestamp is not an event",
+      parsedEventAt.map { abs($0.timeIntervalSince(expectedEventAt)) < 0.001 } == true)
+check("transcript status: reverse scan crosses large timestamp-free tail",
+      parsedEventAt != nil)
+let fallbackNow = expectedEventAt.addingTimeInterval(8 * 24 * 3600)
+check("transcript status: expired embedded event yields no signal",
+      SessionDiscovery.transcriptSignal(
+          eventTimestamp: parsedEventAt, now: fallbackNow,
+          signalWindow: 7 * 24 * 3600, runningWindow: 600
+      ) == nil)
+check("transcript status: genuinely recent event is running",
+      SessionDiscovery.transcriptSignal(
+          eventTimestamp: fallbackNow.addingTimeInterval(-60), now: fallbackNow,
+          signalWindow: 7 * 24 * 3600, runningWindow: 600
+      )?.state == "running")
+check("transcript status: quiet recent event is waiting",
+      SessionDiscovery.transcriptSignal(
+          eventTimestamp: fallbackNow.addingTimeInterval(-1200), now: fallbackNow,
+          signalWindow: 7 * 24 * 3600, runningWindow: 600
+      )?.state == "waiting")
+
+let sidecarURL = projectA.appendingPathComponent("sidecar-only")
+let subagentsURL = sidecarURL.appendingPathComponent("subagents")
+try? FileManager.default.createDirectory(at: subagentsURL, withIntermediateDirectories: true)
+try? Data(eventLine.utf8).write(to: subagentsURL.appendingPathComponent("agent-a.jsonl"))
+check("transcript status: auxiliary sidecar cannot drive task grouping",
+      SessionDiscovery.transcriptEventTimestamp(sidecarURL) == nil)
+try? FileManager.default.removeItem(at: discoveryTemp)
+
+// MARK: Claude native background-task transcript lifecycle
+
+let bgStartA = #"{"toolUseResult":{"backgroundTaskId":"bg-a"}}"#
+let bgStartB = #"{"toolUseResult":{"backgroundTaskId":"bg-b"}}"#
+let bgCompleteA = #"{"origin":{"kind":"task-notification"},"message":{"content":"<task-notification><task-id>bg-a</task-id><status>completed</status></task-notification>"}}"#
+let bgFailedB = #"{"origin":{"kind":"task-notification"},"message":{"content":"<task-notification><task-id>bg-b</task-id><status>failed</status></task-notification>"}}"#
+var bgAccumulator = BackgroundTaskAccumulator()
+bgAccumulator.consume(jsonLine: bgStartA)
+bgAccumulator.consume(jsonLine: bgStartB)
+check("background: two native starts are active",
+      bgAccumulator.activeTaskIDs == ["bg-a", "bg-b"])
+bgAccumulator.consume(jsonLine: bgCompleteA)
+bgAccumulator.consume(jsonLine: bgCompleteA) // duplicate notifications are idempotent
+check("background: terminal notification removes + dedupes",
+      bgAccumulator.activeTaskIDs == ["bg-b"])
+bgAccumulator.consume(jsonLine: "{not json")
+check("background: malformed transcript row is ignored",
+      bgAccumulator.activeTaskIDs == ["bg-b"])
+bgAccumulator.consume(jsonLine: bgFailedB)
+check("background: failed is terminal", bgAccumulator.activeTaskIDs.isEmpty)
+check("background: static JSONL reducer handles stopped",
+      BackgroundActivity.activeTaskIDs(inJSONLines: [
+          bgStartA,
+          #"{"origin":{"kind":"task-notification"},"message":{"content":"<task-notification><task-id>bg-a</task-id><status>stopped</status></task-notification>"}}"#,
+      ].joined(separator: "\n")).isEmpty)
+check("background: queue-operation completion is terminal",
+      BackgroundActivity.activeTaskIDs(inJSONLines: [
+          bgStartA,
+          #"{"type":"queue-operation","operation":"enqueue","content":"<task-notification><task-id>bg-a</task-id><status>completed</status></task-notification>"}"#,
+      ].joined(separator: "\n")).isEmpty)
+check("background: queued-command attachment completion is terminal",
+      BackgroundActivity.activeTaskIDs(inJSONLines: [
+          bgStartA,
+          #"{"type":"attachment","attachment":{"type":"queued_command","commandMode":"task-notification","prompt":"<task-notification><task-id>bg-a</task-id><status>failed</status></task-notification>"}}"#,
+      ].joined(separator: "\n")).isEmpty)
+check("background: TaskStop result is terminal",
+      BackgroundActivity.activeTaskIDs(inJSONLines: [
+          bgStartA,
+          #"{"toolUseResult":{"message":"Successfully stopped task: bg-a (command)","task_id":"bg-a","task_type":"local_bash"}}"#,
+      ].joined(separator: "\n")).isEmpty)
+check("background: killed notification is terminal",
+      BackgroundActivity.activeTaskIDs(inJSONLines: [
+          bgStartA,
+          #"{"type":"queue-operation","operation":"enqueue","content":"<task-notification><task-id>bg-a</task-id><status>killed</status></task-notification>"}"#,
+      ].joined(separator: "\n")).isEmpty)
+check("background: pasted notification XML is not treated as lifecycle",
+      BackgroundActivity.activeTaskIDs(inJSONLines: [
+          bgStartA,
+          #"{"type":"user","message":{"content":"Example: <task-notification><task-id>bg-a</task-id><status>completed</status></task-notification>"}}"#,
+      ].joined(separator: "\n")) == ["bg-a"])
 
 // MARK: slack deep links
 
@@ -245,8 +727,10 @@ check("grp: fresh running → aiRunning (overrides manual group)",
       grp(group: "waiting", [sig("running", agoSec: 60, acked: false)]) == .aiRunning)
 check("grp: STALE running (>30m) is not running",
       grp([sig("running", agoSec: 2000, acked: true)]) == .idle)
-check("grp: waiting group is sticky vs fresh attention",
-      grp(group: "waiting", [sig("waiting", agoSec: 30, acked: false)]) == .waitingExt)
+check("grp: waiting → fresh unacked AI stop → 等你",
+      grp(group: "waiting", [sig("waiting", agoSec: 30, acked: false)]) == .needsYou)
+check("grp: waiting remains sticky after current stop is acknowledged",
+      grp(group: "waiting", [sig("waiting", agoSec: 30, acked: true)]) == .waitingExt)
 check("grp: waiting group sinks when quiet",
       grp(group: "waiting", quiet: sink + 10, [sig("ended", agoSec: sink + 10, acked: true)]) == .semiArchived)
 check("grp: FRESH unacked stop resurfaces a 已讀 task to 等你",
@@ -271,6 +755,65 @@ check("attn: unacked permission beats waiting, since = oldest",
       }())
 check("attn: all acked → nil",
       GroupingRules.attention([sig("waiting", agoSec: 30, acked: true)]) == nil)
+
+// MARK: acknowledgement retention — transcript-only fallback sessions
+
+let ackWindow: TimeInterval = 7 * 24 * 3600
+let fallbackSID = "transcript-only"
+let expiredSID = "expired"
+let fallbackTS = gNow.addingTimeInterval(-1800)
+let retainedAcks = AIStatusAcknowledgementRules.prune(
+    [
+        fallbackSID: fallbackTS,
+        expiredSID: gNow.addingTimeInterval(-ackWindow - 1),
+    ],
+    now: gNow,
+    signalWindow: ackWindow
+)
+check("ack: transcript fallback survives hook-less refresh",
+      retainedAcks[fallbackSID] == fallbackTS)
+check("ack: entries older than signal window are pruned",
+      retainedAcks[expiredSID] == nil)
+check("ack: retained fallback keeps manual 已讀 stable",
+      grp(group: "read", [
+          SessionSignal(
+              state: "waiting",
+              ts: fallbackTS,
+              acked: (retainedAcks[fallbackSID] ?? .distantPast) >= fallbackTS
+          ),
+      ]) == .read)
+let genuinelyNewTS = fallbackTS.addingTimeInterval(60)
+check("ack: genuinely newer AI signal resurfaces to 等你",
+      grp(group: "read", [
+          SessionSignal(
+              state: "waiting",
+              ts: genuinelyNewTS,
+              acked: (retainedAcks[fallbackSID] ?? .distantPast) >= genuinelyNewTS
+          ),
+      ]) == .needsYou)
+
+// MARK: priority alert — only the unseen mainline AI-running → needs-you edge
+
+check("priority-alert: mainline AI completion triggers",
+      PriorityAlertRules.shouldTrigger(
+          isMainline: true, previous: .aiRunning, current: .needsYou,
+          isCurrentlyViewed: false))
+check("priority-alert: non-mainline completion stays quiet",
+      !PriorityAlertRules.shouldTrigger(
+          isMainline: false, previous: .aiRunning, current: .needsYou,
+          isCurrentlyViewed: false))
+check("priority-alert: needs-you reload does not replay",
+      !PriorityAlertRules.shouldTrigger(
+          isMainline: true, previous: .needsYou, current: .needsYou,
+          isCurrentlyViewed: false))
+check("priority-alert: tagging an already-waiting task does not trigger",
+      !PriorityAlertRules.shouldTrigger(
+          isMainline: true, previous: .needsYou, current: .needsYou,
+          isCurrentlyViewed: false))
+check("priority-alert: currently viewed completion stays quiet",
+      !PriorityAlertRules.shouldTrigger(
+          isMainline: true, previous: .aiRunning, current: .needsYou,
+          isCurrentlyViewed: true))
 
 // MARK: snapshot — URLs containing parens survive the markdown round-trip
 

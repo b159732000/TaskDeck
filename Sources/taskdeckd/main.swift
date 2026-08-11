@@ -42,6 +42,21 @@ final class Pane {
     var running = false
     var exitCode: Int32?
     private(set) var ring = ByteQueue()
+    /// Lifetime of the daemon-owned terminal surface. A restarted pane gets a
+    /// new epoch even when it reuses the same persisted spec id.
+    let paneEpoch = UUID().uuidString.lowercased()
+    var resizeLease = ResizeLeaseState()
+    /// The authoritative emulator is injected once during pane construction.
+    /// If it encounters unsupported state or an export invariant fails, the
+    /// pane disables native publication once and keeps legacy raw replay alive.
+    var canonicalSurface: CanonicalSurfaceProviding?
+    var pendingSurfaceSnapshots: [PendingSurfaceSnapshot] = []
+    /// Parsing remains immediate, but render exports are coalesced to one
+    /// publication per display frame. Without this, a scroll-heavy PTY read in
+    /// ~1 KiB chunks produced dozens of near-viewport-sized patches and could
+    /// amplify 100 KiB of host output past the socket high-water mark.
+    private var surfacePublicationScheduled = false
+    private static let surfacePublicationIntervalMS = 16
     private var readSource: DispatchSourceRead?
     private var procSource: DispatchSourceProcess?
     // Output that couldn't be written yet (PTY buffer full). Flushed by an
@@ -53,7 +68,11 @@ final class Pane {
     // One drain pass stops after this many bytes and reschedules itself, so a
     // firehose pane can't monopolize the shared state queue (input/resize for
     // quiet panes stays responsive).
-    private static let drainBudget = 256 * 1024
+    private static let rawDrainBudget = 256 * 1024
+    /// VT parsing is CPU work (and is serialized through main for SwiftTerm's
+    /// DEC 2026 timer). Yield after a much smaller slice so one `yes` pane
+    /// cannot delay input/ping/resize for every other pane.
+    private static let canonicalDrainBudget = 16 * 1024
     unowned let server: Server
 
     static let ringCap = 512 * 1024
@@ -65,14 +84,21 @@ final class Pane {
         self.title = title
         self.cwd = cwd
         self.shell = shell
-        self.cols = cols
-        self.rows = rows
+        // SwiftTerm's parser has a two-column minimum. Keep the canonical grid,
+        // PTY winsize, list metadata, and snapshots on one geometry.
+        self.cols = max(2, min(cols, 1000))
+        self.rows = max(1, min(rows, 1000))
         self.server = server
     }
 
     var infoStruct: PaneInfo {
         PaneInfo(id: id, taskID: taskID, specID: specID, title: title, cwd: cwd,
                  pid: pid, running: running, exitCode: exitCode, cols: cols, rows: rows)
+    }
+
+    func installCanonicalSurface() {
+        precondition(canonicalSurface == nil)
+        canonicalSurface = CanonicalTerminalSurface(pane: self)
     }
 
     /// Clamp a terminal dimension into a sane range. `UInt16(v)` traps on a
@@ -95,8 +121,23 @@ final class Pane {
         for key in env.keys where key.hasPrefix("CLAUDE") || key == "CLAUDECODE" {
             env.removeValue(forKey: key)
         }
+        // The GUI/daemon may be relaunched by an AI tool or another terminal.
+        // Its presentation policy and terminal identity belong to that outer
+        // process, not to the new PTY. Leaking NO_COLOR made full-screen apps
+        // such as Claude Code deliberately render monochrome even though this
+        // pane advertises 256-color/truecolor support. Explicit per-pane env
+        // below remains authoritative for users who intentionally opt out.
+        let inheritedTerminalKeys = [
+            "NO_COLOR", "FORCE_COLOR", "CLICOLOR", "CLICOLOR_FORCE",
+            "NODE_DISABLE_COLORS", "CI", "COLORFGBG",
+            "TERM_PROGRAM", "TERM_PROGRAM_VERSION", "TERM_SESSION_ID",
+            "ITERM_SESSION_ID", "LC_TERMINAL", "LC_TERMINAL_VERSION",
+            "TMUX", "TMUX_PANE", "STY", "WINDOW",
+        ]
+        for key in inheritedTerminalKeys { env.removeValue(forKey: key) }
         env["TERM"] = "xterm-256color"
         env["COLORTERM"] = "truecolor"
+        env["TERM_PROGRAM"] = "JamesDesk"
         if env["LANG"] == nil { env["LANG"] = "en_US.UTF-8" }
         env["TASKDECK"] = "1"
         // Tag the pane with its task so the AI-status hook can record which
@@ -222,17 +263,33 @@ final class Pane {
     }
 
     private func drain() {
-        var buf = [UInt8](repeating: 0, count: 65536)
+        let budget = canonicalSurface == nil
+            ? Pane.rawDrainBudget
+            : Pane.canonicalDrainBudget
+        var buf = [UInt8](repeating: 0, count: min(65536, budget))
         var drained = 0
         while true {
             let n = read(master, &buf, buf.count)
             if n > 0 {
                 let chunk = Array(buf[0 ..< n])
+                if let surface = canonicalSurface {
+                    do {
+                        // Feed/query responses are never delayed. Only the
+                        // replaceable render publication is coalesced.
+                        _ = try surface.feed(chunk, wantsPublication: false)
+                        scheduleSurfacePublicationIfNeeded()
+                        if !surface.synchronizedOutputActive {
+                            server.flushPendingSurfaceSnapshots(for: self)
+                        }
+                    } catch {
+                        server.surfaceFailed(pane: self, error: error)
+                    }
+                }
                 ring.append(chunk)
                 ring.trimFront(toCount: Pane.ringCap)
                 server.broadcastOutput(pane: self, bytes: chunk)
                 drained += n
-                if drained >= Pane.drainBudget {
+                if drained >= budget {
                     // Yield the shared state queue; continue in a fresh block
                     // so other panes' input/resize aren't starved by one
                     // firehose (`yes`, huge build logs).
@@ -290,11 +347,38 @@ final class Pane {
     }
 
     func resize(cols: Int, rows: Int) {
-        self.cols = max(1, min(cols, 1000))
+        self.cols = max(2, min(cols, 1000))
         self.rows = max(1, min(rows, 1000))
+        if let surface = canonicalSurface {
+            do {
+                _ = try surface.resize(
+                    cols: self.cols, rows: self.rows, wantsPublication: false)
+                scheduleSurfacePublicationIfNeeded()
+                if !surface.synchronizedOutputActive {
+                    server.flushPendingSurfaceSnapshots(for: self)
+                }
+            } catch {
+                server.surfaceFailed(pane: self, error: error)
+            }
+        }
         guard master >= 0 else { return }
         var ws = winsize(ws_row: Pane.dim(self.rows), ws_col: Pane.dim(self.cols), ws_xpixel: 0, ws_ypixel: 0)
         _ = ioctl(master, TIOCSWINSZ_VALUE, &ws)
+    }
+
+    private func scheduleSurfacePublicationIfNeeded() {
+        guard !surfacePublicationScheduled,
+              canonicalSurface != nil,
+              server.hasSurfaceSubscribers(for: self) else { return }
+        surfacePublicationScheduled = true
+        server.queue.asyncAfter(
+            deadline: .now() + .milliseconds(Self.surfacePublicationIntervalMS)
+        ) { [weak self] in
+            guard let self else { return }
+            self.surfacePublicationScheduled = false
+            guard self.server.panes[self.id] === self else { return }
+            self.server.flushCanonicalSurfacePublication(for: self)
+        }
     }
 
     func terminate(force: Bool) {
@@ -303,10 +387,21 @@ final class Pane {
     }
 }
 
+private struct SurfaceCursor: Equatable {
+    let epoch: String
+    let revision: UInt64
+}
+
 final class Conn {
+    /// Process-local identity used as one half of resize-lease ownership. One
+    /// socket can still host multiple surfaces, distinguished by client id.
+    let identity = UUID().uuidString.lowercased()
     let fd: Int32
     let reader = FrameCodec.Reader()
     var subs = Set<String>()
+    /// pane id -> view identities. Patches/events are sent once per connection,
+    /// even when multiple windows on that connection display the same pane.
+    var surfaceSubs: [String: Set<String>] = [:]
     private var readSource: DispatchSourceRead?
     // Outbound: buffered on the server's state queue and drained by an
     // event-driven write source. The old design did BLOCKING writes on a
@@ -318,11 +413,33 @@ final class Conn {
     private var outBuf = ByteQueue()
     private var writeSource: DispatchSourceWrite?
     private var writeFD: Int32 = -1 // dup(fd); the write source owns this copy
+    /// Raised only while one explicitly bounded (>4 MiB) surface frame drains.
+    /// This leaves room for control replies/events behind it without allowing
+    /// an unbounded series of large render frames.
+    private var outHighWater = Conn.highWater
+    private var oversizedSurfaceFrameInFlight = false
+    private var backlogWatchGeneration: UInt64 = 0
+    private var backlogWatchScheduled = false
+    private var lastWriteProgressMS: UInt64 = 0
+    /// Last render boundary queued onto this connection, plus panes for which
+    /// an intermediate patch was deliberately skipped. All state is confined
+    /// to Server.queue.
+    private var surfaceCursors: [String: SurfaceCursor] = [:]
+    private var dirtySurfaceTargets: [String: SurfaceCursor] = [:]
+    private var lastSurfaceCatchUpPaneID: String?
     private(set) var closed = false
     /// A subscriber this far behind isn't reading: disconnect it rather than
     /// buffer forever or drop mid-stream bytes. It can reconnect and get a
     /// fresh ring replay.
     static let highWater = 4 * 1024 * 1024
+    /// A legitimate full terminal snapshot can be larger than the streaming
+    /// backlog cap. Permit one bounded atomic surface frame without weakening
+    /// the 4 MiB protection for raw-output or patch backlogs.
+    static let maxSurfaceFrame = 64 * 1024 * 1024
+    /// A native surface can replace skipped frames, so byte high-water alone
+    /// no longer identifies a client that stopped reading. Drop only after the
+    /// socket has made no write progress for a sustained interval.
+    private static let writeStallTimeoutMS: UInt64 = 3_000
     unowned let server: Server
 
     init(fd: Int32, server: Server) {
@@ -344,6 +461,11 @@ final class Conn {
         guard !closed else { return }
         closed = true
         outBuf.removeAll()
+        surfaceCursors.removeAll()
+        dirtySurfaceTargets.removeAll()
+        lastSurfaceCatchUpPaneID = nil
+        backlogWatchGeneration &+= 1
+        backlogWatchScheduled = false
         readSource?.cancel() // its cancel handler closes fd
         readSource = nil
         writeSource?.cancel() // its cancel handler closes writeFD
@@ -363,17 +485,142 @@ final class Conn {
 
     func send(_ m: WireMessage) { sendEncoded(FrameCodec.encode(m)) }
 
+    var hasOutputBacklog: Bool { !outBuf.isEmpty }
+
+    @discardableResult
+    func sendSurfaceFrame(_ m: WireMessage) -> Bool {
+        let encoded = FrameCodec.encode(m)
+        guard encoded.count <= Conn.maxSurfaceFrame,
+              outBuf.isEmpty,
+              !oversizedSurfaceFrameInFlight else { return false }
+        let oversized = encoded.count > Conn.highWater
+        let accepted = sendEncoded(
+            encoded,
+            highWater: oversized ? encoded.count + Conn.highWater : Conn.highWater)
+        if accepted, oversized, !outBuf.isEmpty {
+            oversizedSurfaceFrameInFlight = true
+        }
+        return accepted
+    }
+
+    func addSurfaceSubscription(paneID: String, clientID: String) {
+        subs.remove(paneID) // one pane never mixes raw and native state
+        surfaceSubs[paneID, default: []].insert(clientID)
+    }
+
+    func removeSurfaceSubscription(paneID: String, clientID: String) {
+        surfaceSubs[paneID]?.remove(clientID)
+        if surfaceSubs[paneID]?.isEmpty == true {
+            surfaceSubs.removeValue(forKey: paneID)
+            clearSurfaceStream(paneID: paneID)
+        }
+    }
+
+    func hasSurfaceSubscription(paneID: String) -> Bool {
+        surfaceSubs[paneID]?.isEmpty == false
+    }
+
+    func beginSurfaceStream(paneID: String, epoch: String, revision: UInt64) {
+        surfaceCursors[paneID] = SurfaceCursor(epoch: epoch, revision: revision)
+    }
+
+    func clearSurfaceStream(paneID: String) {
+        surfaceCursors.removeValue(forKey: paneID)
+        dirtySurfaceTargets.removeValue(forKey: paneID)
+    }
+
+    func markSurfaceDirty(paneID: String, epoch: String, revision: UInt64) {
+        dirtySurfaceTargets[paneID] = SurfaceCursor(epoch: epoch, revision: revision)
+    }
+
+    func isSurfaceDirty(paneID: String) -> Bool {
+        dirtySurfaceTargets[paneID] != nil
+    }
+
+    func nextDirtySurfacePaneID(where eligible: (String) -> Bool) -> String? {
+        let ids = dirtySurfaceTargets.keys.filter(eligible).sorted()
+        guard !ids.isEmpty else { return nil }
+        let selected: String
+        if let lastSurfaceCatchUpPaneID,
+           let next = ids.first(where: { $0 > lastSurfaceCatchUpPaneID }) {
+            selected = next
+        } else {
+            selected = ids[0]
+        }
+        lastSurfaceCatchUpPaneID = selected
+        return selected
+    }
+
+    /// Queue one shared broadcast boundary if this connection can preserve
+    /// exact stream continuity. A slow normal stream is disconnected at 4 MiB;
+    /// while one admitted oversized snapshot drains, replaceable updates are
+    /// skipped and healed later with one current snapshot.
+    @discardableResult
+    func sendSurfacePublication(
+        _ data: Data,
+        paneID: String,
+        epoch: String,
+        baseRevision: UInt64?,
+        revision: UInt64
+    ) -> Bool {
+        let target = SurfaceCursor(epoch: epoch, revision: revision)
+        guard !isSurfaceDirty(paneID: paneID) else {
+            dirtySurfaceTargets[paneID] = target
+            return false
+        }
+        if let baseRevision {
+            guard surfaceCursors[paneID] == SurfaceCursor(
+                epoch: epoch, revision: baseRevision) else {
+                dirtySurfaceTargets[paneID] = target
+                return false
+            }
+        }
+
+        let oversized = data.count > Conn.highWater
+        if oversizedSurfaceFrameInFlight || !outBuf.isEmpty {
+            dirtySurfaceTargets[paneID] = target
+            return false
+        }
+
+        let accepted = sendEncoded(
+            data,
+            highWater: oversized ? data.count + Conn.highWater : Conn.highWater)
+        guard accepted else { return false }
+        surfaceCursors[paneID] = target
+        if oversized, !outBuf.isEmpty { oversizedSurfaceFrameInFlight = true }
+        return true
+    }
+
+    /// A full catch-up snapshot is broadcast (no request id), so every token
+    /// for this pane on the socket observes the same repaired boundary.
+    @discardableResult
+    func sendSurfaceCatchUp(
+        _ message: WireMessage,
+        paneID: String,
+        epoch: String,
+        revision: UInt64
+    ) -> Bool {
+        guard !closed, outBuf.isEmpty, isSurfaceDirty(paneID: paneID) else { return false }
+        guard sendSurfaceFrame(message) else { return false }
+        surfaceCursors[paneID] = SurfaceCursor(epoch: epoch, revision: revision)
+        dirtySurfaceTargets.removeValue(forKey: paneID)
+        return true
+    }
+
     /// server.queue only. Fast path writes inline (non-blocking); leftovers
     /// are buffered whole — never a partial frame drop — and flushed by the
     /// write source when the socket drains.
-    func sendEncoded(_ data: Data) {
-        guard !closed else { return }
-        if outBuf.count + data.count > Conn.highWater {
+    @discardableResult
+    func sendEncoded(_ data: Data, highWater: Int = Conn.highWater) -> Bool {
+        guard !closed else { return false }
+        let effectiveHighWater = max(outHighWater, highWater)
+        if outBuf.count + data.count > effectiveHighWater {
             dlog("conn fd=\(fd) output backlog over high-water; dropping subscriber")
             server.drop(self)
-            return
+            return false
         }
-        if outBuf.isEmpty {
+        let wasEmpty = outBuf.isEmpty
+        if wasEmpty {
             var off = 0
             data.withUnsafeBytes { raw in
                 while off < raw.count {
@@ -381,28 +628,89 @@ final class Conn {
                     if n > 0 { off += n } else if errno == EINTR { continue } else { break }
                 }
             }
-            if off >= data.count { return }
+            if off >= data.count { return true }
             outBuf.append(data.dropFirst(off))
         } else {
             outBuf.append(data)
         }
+        outHighWater = effectiveHighWater
+        if wasEmpty {
+            lastWriteProgressMS = monotonicMS()
+            scheduleBacklogWatchIfNeeded()
+        }
         armWriteSource()
+        return true
+    }
+
+    private func monotonicMS() -> UInt64 {
+        DispatchTime.now().uptimeNanoseconds / 1_000_000
+    }
+
+    private func scheduleBacklogWatchIfNeeded() {
+        guard !backlogWatchScheduled, !outBuf.isEmpty, !closed else { return }
+        backlogWatchScheduled = true
+        backlogWatchGeneration &+= 1
+        let generation = backlogWatchGeneration
+        server.queue.asyncAfter(
+            deadline: .now() + .milliseconds(Int(Self.writeStallTimeoutMS))
+        ) { [weak self] in
+            self?.checkBacklogWatch(generation: generation)
+        }
+    }
+
+    private func checkBacklogWatch(generation: UInt64) {
+        guard !closed, backlogWatchScheduled,
+              backlogWatchGeneration == generation else { return }
+        guard !outBuf.isEmpty else {
+            backlogWatchScheduled = false
+            return
+        }
+        let now = monotonicMS()
+        let elapsed = now >= lastWriteProgressMS ? now - lastWriteProgressMS : 0
+        if elapsed >= Self.writeStallTimeoutMS {
+            dlog("conn fd=\(fd) made no write progress for \(elapsed)ms; dropping subscriber")
+            server.drop(self)
+            return
+        }
+        server.queue.asyncAfter(
+            deadline: .now() + .milliseconds(
+                Int(Self.writeStallTimeoutMS - elapsed))
+        ) { [weak self] in
+            self?.checkBacklogWatch(generation: generation)
+        }
     }
 
     private func armWriteSource() {
-        guard writeSource == nil, !closed else { return }
+        guard writeSource == nil, writeFD < 0, !closed, !outBuf.isEmpty else { return }
         // The write source gets its own dup so each source owns exactly one
         // fd copy and closes it in its cancel handler — no double-close races.
-        if writeFD < 0 {
-            writeFD = dup(fd)
-            guard writeFD >= 0 else { return }
-            setCloseOnExec(writeFD)
-        }
-        let ws = DispatchSource.makeWriteSource(fileDescriptor: writeFD, queue: server.queue)
+        let ownedFD = dup(fd)
+        guard ownedFD >= 0 else { return }
+        setCloseOnExec(ownedFD)
+        writeFD = ownedFD
+        let ws = DispatchSource.makeWriteSource(fileDescriptor: ownedFD, queue: server.queue)
         ws.setEventHandler { [weak self] in self?.flushOut() }
-        ws.setCancelHandler { [writeFD] in close(writeFD) }
+        ws.setCancelHandler { [weak self] in
+            close(ownedFD)
+            self?.writeSourceDidCancel(ownedFD)
+        }
         ws.activate()
         writeSource = ws
+    }
+
+    private func writeSourceDidCancel(_ ownedFD: Int32) {
+        if writeFD == ownedFD { writeFD = -1 }
+        guard !closed else { return }
+        if outBuf.isEmpty {
+            // Yield one state-queue turn before snapshot generation so inbound
+            // control traffic is never trapped behind a catch-up loop.
+            server.queue.async { [weak self] in
+                guard let self, !self.closed, self.outBuf.isEmpty else { return }
+                self.server.connectionOutputDrained(self)
+            }
+        } else {
+            armWriteSource()
+        }
     }
 
     private func flushOut() {
@@ -413,6 +721,7 @@ final class Conn {
             }
             if n > 0 {
                 outBuf.consume(n)
+                lastWriteProgressMS = monotonicMS()
             } else if errno == EINTR {
                 continue
             } else if errno == EAGAIN || errno == EWOULDBLOCK {
@@ -422,10 +731,15 @@ final class Conn {
                 return
             }
         }
-        // Drained: disarm (cancel closes writeFD; next burst dups again).
+        // Drained: disarm. The cancel handler owns close(writeFD) and schedules
+        // catch-up only after that descriptor is closed, avoiding fd-reuse
+        // races when a fresh burst immediately arms another source.
+        outHighWater = Conn.highWater
+        oversizedSurfaceFrameInFlight = false
+        backlogWatchScheduled = false
+        backlogWatchGeneration &+= 1
         writeSource?.cancel()
         writeSource = nil
-        writeFD = -1
     }
 }
 
@@ -442,6 +756,7 @@ final class Server {
     private var listenFD: Int32 = -1
     private var singletonLockFD: Int32 = -1
     private var acceptSource: DispatchSourceRead?
+    private static let resizeLeaseTTLMS: UInt64 = 15_000
 
     func start() {
         let path = Wire.socketPath()
@@ -493,7 +808,36 @@ final class Server {
 
     func drop(_ c: Conn) {
         conns.removeValue(forKey: ObjectIdentifier(c))
+        // A closed GUI must not retain resize authority until timeout. Tokens
+        // are connection-scoped, so revoking these owners cannot affect another
+        // window or a replacement connection.
+        let ownerPrefix = c.identity + ":"
+        for pane in panes.values {
+            pane.pendingSurfaceSnapshots.removeAll { $0.connection === c }
+            if let ownerID = pane.resizeLease.grant?.ownerID,
+               ownerID.hasPrefix(ownerPrefix) {
+                _ = pane.resizeLease.revoke(ownerID: ownerID)
+            }
+        }
         c.stop()
+    }
+
+    private func monotonicMS() -> UInt64 {
+        DispatchTime.now().uptimeNanoseconds / 1_000_000
+    }
+
+    private func resizeLeaseOwner(_ c: Conn, _ m: WireMessage) -> String? {
+        guard let clientID = m.surfaceClientID, !clientID.isEmpty else { return nil }
+        return "\(c.identity):\(clientID)"
+    }
+
+    private func fillResizeLease(_ m: inout WireMessage, pane: Pane,
+                                 grant: ResizeLeaseState.Grant) {
+        m.paneID = pane.id
+        m.paneEpoch = pane.paneEpoch
+        m.resizeLeaseToken = grant.token
+        m.resizeLeaseGeneration = grant.generation
+        m.resizeLeaseTTLMS = Self.resizeLeaseTTLMS
     }
 
     private func reply(_ c: Conn, to m: WireMessage, _ type: String, _ mutate: (inout WireMessage) -> Void = { _ in }) {
@@ -501,6 +845,289 @@ final class Server {
         r.id = m.id
         mutate(&r)
         c.send(r)
+    }
+
+    func hasSurfaceSubscribers(for pane: Pane) -> Bool {
+        conns.values.contains { $0.hasSurfaceSubscription(paneID: pane.id) }
+    }
+
+    private func surfaceClientID(_ m: WireMessage) -> String? {
+        guard let clientID = m.surfaceClientID, !clientID.isEmpty else { return nil }
+        return clientID
+    }
+
+    @discardableResult
+    private func sendSurfaceSnapshot(
+        pane: Pane,
+        connection c: Conn,
+        request: WireMessage,
+        registerSubscription: Bool,
+        allowDirtyStream: Bool = false
+    ) -> Bool {
+        guard !c.closed else { return false }
+        guard let surface = pane.canonicalSurface else {
+            reply(c, to: request, "error") {
+                $0.message = "daemon-owned terminal surface unavailable"
+            }
+            return true
+        }
+        guard !c.hasOutputBacklog,
+              allowDirtyStream || !c.isSurfaceDirty(paneID: pane.id) else { return false }
+        do {
+            let firstSurfaceSubscriber = !hasSurfaceSubscribers(for: pane)
+            if firstSurfaceSubscriber { surface.resetPublicationBaseline() }
+            let snapshot = try surface.snapshot()
+            var response = WireMessage(type: "surfaceSnapshot")
+            response.id = request.id
+            response.paneID = pane.id
+            response.paneEpoch = pane.paneEpoch
+            response.surfaceVersion = Wire.remoteSurfaceVersion
+            response.surfaceRevision = snapshot.revision
+            response.setSurfaceSnapshot(snapshot.bytes)
+            guard c.sendSurfaceFrame(response) else {
+                surfaceFailed(
+                    pane: pane,
+                    error: NSError(
+                        domain: "taskdeckd.surface",
+                        code: 1,
+                        userInfo: [NSLocalizedDescriptionKey: "terminal surface snapshot exceeds 64 MiB"]
+                    )
+                )
+                reply(c, to: request, "error") {
+                    $0.message = "terminal surface snapshot is too large"
+                }
+                return true
+            }
+            if registerSubscription, !c.closed,
+               let clientID = surfaceClientID(request) {
+                c.addSurfaceSubscription(paneID: pane.id, clientID: clientID)
+            }
+            if c.hasSurfaceSubscription(paneID: pane.id) {
+                c.beginSurfaceStream(
+                    paneID: pane.id, epoch: snapshot.epoch, revision: snapshot.revision)
+            }
+            return true
+        } catch {
+            surfaceFailed(pane: pane, error: error)
+            reply(c, to: request, "error") {
+                $0.message = "terminal surface snapshot failed: \(error.localizedDescription)"
+            }
+            return true
+        }
+    }
+
+    private func queueOrSendSurfaceSnapshot(
+        pane: Pane,
+        connection c: Conn,
+        request: WireMessage,
+        registerSubscription: Bool
+    ) {
+        guard let surface = pane.canonicalSurface else {
+            _ = sendSurfaceSnapshot(pane: pane, connection: c, request: request,
+                                    registerSubscription: registerSubscription)
+            return
+        }
+        if surface.synchronizedOutputActive || c.hasOutputBacklog
+            || c.isSurfaceDirty(paneID: pane.id) {
+            pane.pendingSurfaceSnapshots.append(PendingSurfaceSnapshot(
+                connection: c,
+                request: request,
+                registerSubscription: registerSubscription
+            ))
+        } else {
+            // Align the shared broadcast baseline before issuing a targeted
+            // boundary. Existing viewers receive that update first; a request
+            // whose own socket becomes backlogged waits for its clean boundary.
+            flushCanonicalSurfacePublication(for: pane)
+            if c.hasOutputBacklog || c.isSurfaceDirty(paneID: pane.id)
+                || !sendSurfaceSnapshot(
+                    pane: pane, connection: c, request: request,
+                    registerSubscription: registerSubscription) {
+                pane.pendingSurfaceSnapshots.append(PendingSurfaceSnapshot(
+                    connection: c,
+                    request: request,
+                    registerSubscription: registerSubscription
+                ))
+            }
+        }
+    }
+
+    /// Completes subscriptions/resyncs only after DEC 2026 ends or SwiftTerm's
+    /// one-second timeout releases it. All calls occur on the serial state
+    /// queue, so the snapshot reply is ordered before every later patch.
+    func flushPendingSurfaceSnapshots(for pane: Pane) {
+        guard pane.canonicalSurface?.synchronizedOutputActive != true,
+              !pane.pendingSurfaceSnapshots.isEmpty else { return }
+        let pending = pane.pendingSurfaceSnapshots
+        pane.pendingSurfaceSnapshots.removeAll(keepingCapacity: true)
+        var remaining: [PendingSurfaceSnapshot] = []
+        remaining.reserveCapacity(pending.count)
+        for item in pending {
+            guard let c = item.connection, !c.closed else { continue }
+            guard !c.hasOutputBacklog,
+                  sendSurfaceSnapshot(
+                pane: pane,
+                connection: c,
+                request: item.request,
+                registerSubscription: item.registerSubscription,
+                // A request/response boundary must not starve behind an
+                // endlessly renewed generic catch-up. Keep the dirty marker:
+                // this targeted frame heals its token, then an unsolicited
+                // snapshot repairs every other token on the same socket.
+                allowDirtyStream: true
+                  ) else {
+                remaining.append(item)
+                continue
+            }
+        }
+        pane.pendingSurfaceSnapshots.append(contentsOf: remaining)
+    }
+
+    private func cancelPendingSurfaceSnapshots(
+        pane: Pane,
+        connection: Conn,
+        clientID: String
+    ) {
+        pane.pendingSurfaceSnapshots.removeAll {
+            $0.connection === connection && $0.request.surfaceClientID == clientID
+        }
+    }
+
+    func surfaceFailed(pane: Pane, error: Error) {
+        guard pane.canonicalSurface != nil else { return }
+        dlog("pane \(pane.id) canonical surface failed: \(error)")
+
+        if !pane.pendingSurfaceSnapshots.isEmpty {
+            let pending = pane.pendingSurfaceSnapshots
+            pane.pendingSurfaceSnapshots.removeAll()
+            for item in pending {
+                guard let c = item.connection, !c.closed else { continue }
+                reply(c, to: item.request, "error") {
+                    $0.message = "terminal surface failed: \(error.localizedDescription)"
+                }
+            }
+        }
+
+        var event = WireMessage(type: "surfaceError")
+        event.paneID = pane.id
+        event.paneEpoch = pane.paneEpoch
+        event.message = error.localizedDescription
+        let encoded = FrameCodec.encode(event)
+        for c in Array(conns.values) where c.hasSurfaceSubscription(paneID: pane.id) {
+            c.sendEncoded(encoded)
+            c.surfaceSubs.removeValue(forKey: pane.id)
+            c.clearSurfaceStream(paneID: pane.id)
+        }
+        // Export invariants do not heal on the next PTY chunk (unsupported
+        // images are the common example). Disable once and leave raw replay
+        // running so the GUI can explicitly fall back without log storms.
+        pane.canonicalSurface = nil
+    }
+
+    func canonicalSynchronizedOutputEnded(
+        pane: Pane,
+        surface: CanonicalSurfaceProviding
+    ) {
+        guard pane.canonicalSurface === surface else { return }
+        flushCanonicalSurfacePublication(for: pane)
+        flushPendingSurfaceSnapshots(for: pane)
+    }
+
+    /// Export at most one update from the shared pane baseline. PTY parsing is
+    /// immediate; callers are either the 16 ms coalescing tick, a snapshot
+    /// boundary, or DEC 2026's explicit/timeout completion.
+    func flushCanonicalSurfacePublication(for pane: Pane) {
+        guard let surface = pane.canonicalSurface,
+              !surface.synchronizedOutputActive else { return }
+        do {
+            if let publication = try surface.flushSynchronizedOutput(
+                wantsPublication: hasSurfaceSubscribers(for: pane)
+            ) {
+                broadcastSurfacePublication(pane: pane, publication: publication)
+            }
+        } catch {
+            surfaceFailed(pane: pane, error: error)
+        }
+    }
+
+    /// Called only after a connection's buffered byte stream is completely
+    /// drained. Repair one dirty pane per state-queue turn (round-robin by id),
+    /// then retry request snapshots. This avoids a multi-pane snapshot herd.
+    func connectionOutputDrained(_ c: Conn) {
+        guard !c.closed, conns[ObjectIdentifier(c)] === c,
+              !c.hasOutputBacklog else { return }
+
+        // Explicit initial/resync replies have priority over replaceable
+        // catch-up traffic. Otherwise sustained output can dirty the stream
+        // again after every catch-up snapshot and starve the request forever.
+        for pane in panes.values.sorted(by: { $0.id < $1.id })
+        where pane.pendingSurfaceSnapshots.contains(where: { $0.connection === c }) {
+            guard pane.canonicalSurface?.synchronizedOutputActive != true else { continue }
+            flushPendingSurfaceSnapshots(for: pane)
+            if !c.closed, !c.hasOutputBacklog {
+                queue.async { [weak self, weak c] in
+                    guard let self, let c else { return }
+                    self.connectionOutputDrained(c)
+                }
+            }
+            return
+        }
+
+        if let paneID = c.nextDirtySurfacePaneID(where: { paneID in
+            guard let pane = self.panes[paneID] else { return true }
+            return pane.canonicalSurface?.synchronizedOutputActive != true
+        }) {
+            guard let pane = panes[paneID],
+                  c.hasSurfaceSubscription(paneID: paneID) else {
+                c.clearSurfaceStream(paneID: paneID)
+                queue.async { [weak self, weak c] in
+                    guard let self, let c else { return }
+                    self.connectionOutputDrained(c)
+                }
+                return
+            }
+            guard pane.canonicalSurface?.synchronizedOutputActive != true else { return }
+            sendSurfaceCatchUp(pane: pane, connection: c)
+            if !c.closed, !c.hasOutputBacklog {
+                queue.async { [weak self, weak c] in
+                    guard let self, let c else { return }
+                    self.connectionOutputDrained(c)
+                }
+            }
+            return
+        }
+    }
+
+    private func sendSurfaceCatchUp(pane: Pane, connection c: Conn) {
+        guard let surface = pane.canonicalSurface, !c.closed,
+              !c.hasOutputBacklog, c.isSurfaceDirty(paneID: pane.id) else { return }
+        do {
+            let snapshot = try surface.snapshot()
+            var message = WireMessage(type: "surfaceSnapshot")
+            message.paneID = pane.id
+            message.paneEpoch = pane.paneEpoch
+            message.surfaceVersion = Wire.remoteSurfaceVersion
+            message.surfaceRevision = snapshot.revision
+            message.setSurfaceSnapshot(snapshot.bytes)
+            let frameSize = FrameCodec.encode(message).count
+            guard frameSize <= Conn.maxSurfaceFrame else {
+                surfaceFailed(
+                    pane: pane,
+                    error: NSError(
+                        domain: "taskdeckd.surface",
+                        code: 3,
+                        userInfo: [NSLocalizedDescriptionKey:
+                            "terminal catch-up snapshot exceeds 64 MiB"]
+                    )
+                )
+                return
+            }
+            _ = c.sendSurfaceCatchUp(
+                message, paneID: pane.id,
+                epoch: snapshot.epoch, revision: snapshot.revision)
+        } catch {
+            surfaceFailed(pane: pane, error: error)
+        }
     }
 
     func handle(_ m: WireMessage, from c: Conn) {
@@ -544,6 +1171,7 @@ final class Server {
                             shell: m.shell ?? "/bin/zsh",
                             cols: m.cols ?? 100, rows: m.rows ?? 28, server: self)
             do {
+                pane.installCanonicalSurface()
                 try pane.spawn(extraEnv: m.env ?? [:])
                 panes[pane.id] = pane
                 if let cmd = m.command, !cmd.isEmpty {
@@ -564,16 +1192,180 @@ final class Server {
                 reply(c, to: m, "error") { $0.message = "no such pane" }
                 return
             }
+            // Selecting the compatibility path for a pane tears down native
+            // delivery on this connection; one viewer must never parse raw
+            // bytes after accepting a canonical snapshot.
+            c.surfaceSubs.removeValue(forKey: pid)
+            c.clearSurfaceStream(paneID: pid)
+            pane.pendingSurfaceSnapshots.removeAll { $0.connection === c }
             c.subs.insert(pid)
             reply(c, to: m, "replay") {
                 $0.paneID = pid
                 $0.setData(pane.ring.snapshot())
                 $0.cols = pane.cols
                 $0.rows = pane.rows
+                // Available even on the raw compatibility path so a new client
+                // can safely bind follow-up lease requests to this pane lifetime.
+                $0.paneEpoch = pane.paneEpoch
             }
 
         case "unsubscribe":
             if let pid = m.paneID { c.subs.remove(pid) }
+
+        case "subscribeSurface":
+            guard let pid = m.paneID, let pane = panes[pid] else {
+                reply(c, to: m, "error") { $0.message = "no such pane" }
+                return
+            }
+            guard let requestedVersion = m.surfaceVersion,
+                  requestedVersion >= Wire.remoteSurfaceVersion else {
+                reply(c, to: m, "error") { $0.message = "unsupported terminal surface version" }
+                return
+            }
+            guard surfaceClientID(m) != nil else {
+                reply(c, to: m, "error") { $0.message = "missing surface client id" }
+                return
+            }
+            queueOrSendSurfaceSnapshot(
+                pane: pane,
+                connection: c,
+                request: m,
+                registerSubscription: true
+            )
+
+        case "surfaceResync":
+            guard let pid = m.paneID, let pane = panes[pid] else {
+                reply(c, to: m, "error") { $0.message = "no such pane" }
+                return
+            }
+            guard let clientID = surfaceClientID(m),
+                  c.surfaceSubs[pid]?.contains(clientID) == true else {
+                reply(c, to: m, "error") { $0.message = "surface is not subscribed" }
+                return
+            }
+            queueOrSendSurfaceSnapshot(
+                pane: pane,
+                connection: c,
+                request: m,
+                registerSubscription: false
+            )
+
+        case "unsubscribeSurface":
+            if let pid = m.paneID, let clientID = surfaceClientID(m) {
+                c.removeSurfaceSubscription(paneID: pid, clientID: clientID)
+                if let pane = panes[pid] {
+                    cancelPendingSurfaceSnapshots(
+                        pane: pane,
+                        connection: c,
+                        clientID: clientID
+                    )
+                }
+            }
+            if m.id != nil { reply(c, to: m, "ok") }
+
+        case "acquireResizeLease":
+            guard let pid = m.paneID, let pane = panes[pid] else {
+                reply(c, to: m, "error") { $0.message = "no such pane" }
+                return
+            }
+            guard m.paneEpoch == pane.paneEpoch else {
+                reply(c, to: m, "error") { $0.message = "stale or missing pane epoch" }
+                return
+            }
+            guard let ownerID = resizeLeaseOwner(c, m) else {
+                reply(c, to: m, "error") { $0.message = "missing surface client id" }
+                return
+            }
+            guard let grant = pane.resizeLease.acquire(
+                ownerID: ownerID, nowMS: monotonicMS(), ttlMS: Self.resizeLeaseTTLMS
+            ) else {
+                reply(c, to: m, "resizeLeaseBusy") {
+                    $0.paneID = pid
+                    $0.paneEpoch = pane.paneEpoch
+                    $0.resizeLeaseTTLMS = Self.resizeLeaseTTLMS
+                }
+                return
+            }
+            reply(c, to: m, "resizeLease") {
+                self.fillResizeLease(&$0, pane: pane, grant: grant)
+            }
+
+        case "claimResizeLease":
+            guard let pid = m.paneID, let pane = panes[pid] else {
+                reply(c, to: m, "error") { $0.message = "no such pane" }
+                return
+            }
+            guard m.paneEpoch == pane.paneEpoch else {
+                reply(c, to: m, "error") { $0.message = "stale or missing pane epoch" }
+                return
+            }
+            guard let ownerID = resizeLeaseOwner(c, m),
+                  let grant = pane.resizeLease.claim(
+                      ownerID: ownerID, nowMS: monotonicMS(), ttlMS: Self.resizeLeaseTTLMS
+                  ) else {
+                reply(c, to: m, "error") { $0.message = "missing surface client id" }
+                return
+            }
+            reply(c, to: m, "resizeLease") {
+                self.fillResizeLease(&$0, pane: pane, grant: grant)
+            }
+
+        case "renewResizeLease":
+            guard let pid = m.paneID, let pane = panes[pid],
+                  m.paneEpoch == pane.paneEpoch,
+                  let ownerID = resizeLeaseOwner(c, m),
+                  let token = m.resizeLeaseToken,
+                  let generation = m.resizeLeaseGeneration,
+                  let grant = pane.resizeLease.validateAndRenew(
+                      ownerID: ownerID, token: token, generation: generation,
+                      nowMS: monotonicMS(), ttlMS: Self.resizeLeaseTTLMS
+                  ) else {
+                reply(c, to: m, "error") { $0.message = "resize lease lost" }
+                return
+            }
+            reply(c, to: m, "resizeLease") {
+                self.fillResizeLease(&$0, pane: pane, grant: grant)
+            }
+
+        case "releaseResizeLease":
+            guard let pid = m.paneID, let pane = panes[pid],
+                  m.paneEpoch == pane.paneEpoch,
+                  let ownerID = resizeLeaseOwner(c, m),
+                  let token = m.resizeLeaseToken,
+                  let generation = m.resizeLeaseGeneration,
+                  pane.resizeLease.release(ownerID: ownerID, token: token,
+                                           generation: generation) else {
+                // Release is normally fire-and-forget during view teardown.
+                // Do not emit an unsolicited error event for an already
+                // expired/preempted lease.
+                if m.id != nil {
+                    reply(c, to: m, "error") { $0.message = "resize lease lost" }
+                }
+                return
+            }
+            if m.id != nil { reply(c, to: m, "ok") }
+
+        case "surfaceResize":
+            guard let pid = m.paneID, let pane = panes[pid],
+                  m.paneEpoch == pane.paneEpoch,
+                  let ownerID = resizeLeaseOwner(c, m),
+                  let token = m.resizeLeaseToken,
+                  let generation = m.resizeLeaseGeneration,
+                  pane.resizeLease.validateAndRenew(
+                      ownerID: ownerID, token: token, generation: generation,
+                      nowMS: monotonicMS(), ttlMS: Self.resizeLeaseTTLMS
+                  ) != nil else {
+                // Resizes are normally fire-and-forget; only answer a caller
+                // that supplied a request id, avoiding unsolicited error events.
+                if m.id != nil {
+                    reply(c, to: m, "error") { $0.message = "resize lease lost" }
+                }
+                return
+            }
+            if let cols = m.cols, let rows = m.rows {
+                pane.resize(cols: cols, rows: rows)
+            }
+            if m.id != nil { reply(c, to: m, "ok") }
 
         case "input":
             if let pid = m.paneID, let pane = panes[pid], let bytes = m.dataBytes {
@@ -596,6 +1388,11 @@ final class Server {
 
         case "remove":
             if let pid = m.paneID, let pane = panes.removeValue(forKey: pid) {
+                for connection in conns.values {
+                    connection.subs.remove(pid)
+                    connection.surfaceSubs.removeValue(forKey: pid)
+                    connection.clearSurfaceStream(paneID: pid)
+                }
                 if pane.running {
                     dying[pid] = pane // retain until childExited reaps + closes fd
                     pane.terminate(force: false)
@@ -626,7 +1423,85 @@ final class Server {
         // Encode once, share across subscribers; snapshot the conns because a
         // send can drop an over-backlog subscriber mid-iteration.
         let encoded = FrameCodec.encode(m)
-        for c in Array(conns.values) where c.subs.contains(pane.id) {
+        for c in Array(conns.values)
+        where c.subs.contains(pane.id) && !c.hasSurfaceSubscription(paneID: pane.id) {
+            c.sendEncoded(encoded)
+        }
+    }
+
+    func broadcastSurfacePublication(pane: Pane, publication: EncodedSurfacePublication) {
+        guard hasSurfaceSubscribers(for: pane) else { return }
+        var message: WireMessage
+        let epoch: String
+        let baseRevision: UInt64?
+        let revision: UInt64
+        switch publication {
+        case .snapshot(let snapshot):
+            message = WireMessage(type: "surfaceSnapshot")
+            message.surfaceRevision = snapshot.revision
+            message.setSurfaceSnapshot(snapshot.bytes)
+            epoch = snapshot.epoch
+            baseRevision = nil
+            revision = snapshot.revision
+        case .patch(let patch):
+            message = WireMessage(type: "surfacePatch")
+            message.surfaceBaseRevision = patch.baseRevision
+            message.surfaceRevision = patch.revision
+            message.setSurfacePatch(patch.bytes)
+            epoch = patch.epoch
+            baseRevision = patch.baseRevision
+            revision = patch.revision
+        }
+        message.paneID = pane.id
+        message.paneEpoch = pane.paneEpoch
+        message.surfaceVersion = Wire.remoteSurfaceVersion
+        let encoded = FrameCodec.encode(message)
+        guard encoded.count <= Conn.maxSurfaceFrame else {
+            surfaceFailed(
+                pane: pane,
+                error: NSError(
+                    domain: "taskdeckd.surface",
+                    code: 2,
+                    userInfo: [NSLocalizedDescriptionKey: "terminal surface update exceeds 64 MiB"]
+                )
+            )
+            return
+        }
+        for c in Array(conns.values) where c.hasSurfaceSubscription(paneID: pane.id) {
+            _ = c.sendSurfacePublication(
+                encoded,
+                paneID: pane.id,
+                epoch: epoch,
+                baseRevision: baseRevision,
+                revision: revision
+            )
+            if !c.closed, !c.hasOutputBacklog, c.isSurfaceDirty(paneID: pane.id) {
+                queue.async { [weak self, weak c] in
+                    guard let self, let c else { return }
+                    self.connectionOutputDrained(c)
+                }
+            }
+        }
+    }
+
+    /// Semantic side effects are parsed only by the canonical terminal. Send
+    /// one frame per socket, not one per view token, so opening two windows on
+    /// the same GUI connection never doubles bells, clipboard writes, or OS
+    /// notifications.
+    func broadcastSurfaceEvent(
+        pane: Pane,
+        kind: String,
+        _ populate: (inout WireMessage) -> Void = { _ in }
+    ) {
+        guard hasSurfaceSubscribers(for: pane) else { return }
+        var message = WireMessage(type: "surfaceEvent")
+        message.paneID = pane.id
+        message.paneEpoch = pane.paneEpoch
+        message.surfaceVersion = Wire.remoteSurfaceVersion
+        message.surfaceEvent = kind
+        populate(&message)
+        let encoded = FrameCodec.encode(message)
+        for c in Array(conns.values) where c.hasSurfaceSubscription(paneID: pane.id) {
             c.sendEncoded(encoded)
         }
     }

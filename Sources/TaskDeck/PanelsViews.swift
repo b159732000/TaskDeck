@@ -2,6 +2,17 @@ import AppKit
 import SwiftUI
 import TaskDeckCore
 
+private struct SidebarSearchFocusActionKey: FocusedValueKey {
+    typealias Value = () -> Void
+}
+
+extension FocusedValues {
+    var focusSidebarSearch: (() -> Void)? {
+        get { self[SidebarSearchFocusActionKey.self] }
+        set { self[SidebarSearchFocusActionKey.self] = newValue }
+    }
+}
+
 struct SidebarView: View {
     @EnvironmentObject var model: AppModel
     @Environment(\.openWindow) private var openWindow
@@ -11,6 +22,8 @@ struct SidebarView: View {
     @State private var statusSlug: String?
     @State private var statusText = ""
     @State private var hoveredSlug: String?
+    @State private var searchText = ""
+    @FocusState private var searchFocused: Bool
     @AppStorage("needsYouSectionExpanded") private var needsYouExpanded = true
     @AppStorage("aiRunningSectionExpanded") private var aiRunningExpanded = true
     @AppStorage("runningSectionExpanded") private var runningExpanded = true
@@ -24,7 +37,10 @@ struct SidebarView: View {
         // 家：新任務／手動作業／訊號過期，可拖曳排序）→ 已讀（看過待回）→ 等待外部
         //（手動）→ 半封存（>3 天沒動靜，預設折疊；滿 30 天自動歸入已完成）
         // → 已完成（封存）。規則見 AppModel.sidebarGroup / autoArchiveSweep。
-        let groups = Dictionary(grouping: model.tasks, by: { model.sidebarGroup($0) })
+        let visibleTasks = searchActive
+            ? model.tasks.filter { TaskSearchRules.matchesTitle($0.title, query: searchText) }
+            : model.tasks
+        let groups = Dictionary(grouping: visibleTasks, by: { model.sidebarGroup($0) })
         // Every group sort ends in `a.id < b.id`: Swift's sort isn't stable, so
         // two rows with an equal primary key (e.g. two 已讀 tasks parked at the
         // same group_since) would otherwise swap places on every hover re-sort
@@ -53,14 +69,14 @@ struct SidebarView: View {
             return a.id < b.id
         }
         let semi = groups[.semiArchived] ?? []
-        let done = groups[.done] ?? []
+        let done = (groups[.done] ?? []).sorted(by: TaskSortRules.archivedNewestFirst)
 
         // 不用 List 的 selection 系統：它的選取膠囊跟自畫常駐底是兩個
         // 形狀不同的圖層，焦點在側邊欄時必然疊成兩層色。選取全自管——
         // 點列設 model.selection，唯一的高亮圖層就是 listRowBackground。
         List {
             if !needsYou.isEmpty {
-                Section(isExpanded: $needsYouExpanded) {
+                sidebarSection(isExpanded: $needsYouExpanded) {
                     ForEach(needsYou) { row($0, group: .needsYou) }
                 } header: {
                     Text("等你（\(needsYou.count)）")
@@ -69,51 +85,63 @@ struct SidebarView: View {
                 }
             }
             if !aiRunning.isEmpty {
-                Section(isExpanded: $aiRunningExpanded) {
+                sidebarSection(isExpanded: $aiRunningExpanded) {
                     ForEach(aiRunning) { row($0, group: .aiRunning) }
                 } header: {
                     Text("AI 執行中（\(aiRunning.count)）")
                 }
             }
-            Section(isExpanded: $runningExpanded) {
-                ForEach(idle) { row($0, group: .idle) }
-                    .onMove { from, to in
-                        model.moveRunningTasks(idle.map(\.id), from: from, to: to)
+            if !idle.isEmpty || !searchActive {
+                sidebarSection(isExpanded: $runningExpanded) {
+                    if searchActive {
+                        ForEach(idle) { row($0, group: .idle) }
+                    } else {
+                        ForEach(idle) { row($0, group: .idle) }
+                            .onMove { from, to in
+                                model.moveRunningTasks(idle.map(\.id), from: from, to: to)
+                            }
                     }
-            } header: {
-                Text("待開工（\(idle.count)）")
+                } header: {
+                    Text("待開工（\(idle.count)）")
+                }
             }
             if !read.isEmpty {
-                Section(isExpanded: $readExpanded) {
+                sidebarSection(isExpanded: $readExpanded) {
                     ForEach(read) { row($0, group: .read) }
                 } header: {
                     Text("已讀（看過待回，\(read.count)）")
                 }
             }
             if !waiting.isEmpty {
-                Section(isExpanded: $waitingExpanded) {
+                sidebarSection(isExpanded: $waitingExpanded) {
                     ForEach(waiting) { row($0, group: .waitingExt) }
                 } header: {
                     Text("等待外部（\(waiting.count)）")
                 }
             }
             if !semi.isEmpty {
-                Section(isExpanded: $sunkExpanded) {
+                sidebarSection(isExpanded: $sunkExpanded) {
                     ForEach(semi) { row($0, group: .semiArchived) }
                 } header: {
                     Text("半封存 >3 天（\(semi.count)）")
                 }
             }
             if !done.isEmpty {
-                Section(isExpanded: $doneExpanded) {
+                sidebarSection(isExpanded: $doneExpanded) {
                     ForEach(done) { row($0, group: .done) }
                 } header: {
                     Text("已完成（\(done.count)）")
                 }
             }
+            if searchActive && visibleTasks.isEmpty {
+                searchEmptyState
+            }
         }
         .listStyle(.sidebar)
         .scrollContentBackground(.hidden)
+        .safeAreaInset(edge: .top, spacing: 0) {
+            searchHeader(resultCount: visibleTasks.count)
+        }
         .safeAreaInset(edge: .bottom) {
             HStack {
                 Button {
@@ -136,6 +164,7 @@ struct SidebarView: View {
             Rectangle().fill(Theme.border).frame(width: 1)
                 .ignoresSafeArea(edges: .top)
         }
+        .focusedSceneValue(\.focusSidebarSearch) { searchFocused = true }
         .alert("重新命名任務", isPresented: Binding(
             get: { renamingSlug != nil },
             set: { if !$0 { renamingSlug = nil } }
@@ -184,10 +213,147 @@ struct SidebarView: View {
         }
     }
 
+    private var normalizedSearchQuery: String {
+        searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var searchActive: Bool { !normalizedSearchQuery.isEmpty }
+
+    /// Search temporarily reveals every matching section without overwriting
+    /// the user's persisted disclosure choices. Clearing the query restores
+    /// the exact pre-search expansion state.
+    @ViewBuilder
+    private func sidebarSection<Content: View, Header: View>(
+        isExpanded: Binding<Bool>,
+        @ViewBuilder content: () -> Content,
+        @ViewBuilder header: () -> Header
+    ) -> some View {
+        if searchActive {
+            Section {
+                content()
+            } header: {
+                header()
+            }
+        } else {
+            Section(isExpanded: isExpanded) {
+                content()
+            } header: {
+                header()
+            }
+        }
+    }
+
+    private func searchHeader(resultCount: Int) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 6) {
+                Image(systemName: "magnifyingglass")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(searchFocused ? Theme.accent : .secondary)
+                    .accessibilityHidden(true)
+
+                TextField("搜尋標題", text: $searchText)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 12))
+                    .focused($searchFocused)
+                    .onExitCommand {
+                        if !searchText.isEmpty {
+                            searchText = ""
+                        } else {
+                            searchFocused = false
+                        }
+                    }
+                    .accessibilityLabel("搜尋任務標題")
+
+                if !searchText.isEmpty {
+                    Button {
+                        searchText = ""
+                        searchFocused = true
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .symbolRenderingMode(.hierarchical)
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
+                            .frame(width: 16, height: 16)
+                    }
+                    .buttonStyle(.plain)
+                    .help("清除搜尋")
+                    .accessibilityLabel("清除搜尋")
+                }
+            }
+            .padding(.horizontal, 7)
+            .frame(height: 29)
+            .background(Color.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 6))
+            .overlay {
+                RoundedRectangle(cornerRadius: 6)
+                    .stroke(searchFocused ? Theme.accent.opacity(0.7) : Theme.border,
+                            lineWidth: searchFocused ? 1.25 : 1)
+            }
+
+            if searchActive {
+                Text("\(resultCount) 個結果")
+                    .font(.system(size: 9.5))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+        }
+        .padding(.horizontal, 8)
+        .padding(.top, 6)
+        .padding(.bottom, searchActive ? 5 : 7)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Theme.panelBG)
+        .overlay(alignment: .bottom) {
+            Rectangle().fill(Theme.border).frame(height: 1)
+        }
+    }
+
+    private var searchEmptyState: some View {
+        VStack(spacing: 8) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 18))
+                .foregroundStyle(.tertiary)
+            Text("找不到符合的標題")
+                .font(.system(size: 11.5, weight: .medium))
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+            Button("清除搜尋") {
+                searchText = ""
+                searchFocused = true
+            }
+            .buttonStyle(.borderless)
+            .font(.system(size: 11))
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 16)
+        .listRowSeparator(.hidden)
+        .listRowBackground(Color.clear)
+    }
+
+    /// Emphasize every exact match using the same comparison options as the
+    /// filter, so Unicode-equivalent text can never be visible but unmarked.
+    private func highlightedTitle(_ title: String) -> Text {
+        let query = normalizedSearchQuery
+        guard !query.isEmpty else { return Text(title) }
+
+        var output = Text("")
+        var cursor = title.startIndex
+        while cursor < title.endIndex,
+              let match = title.range(of: query, options: [.caseInsensitive],
+                                      range: cursor ..< title.endIndex) {
+            output = output + Text(String(title[cursor ..< match.lowerBound]))
+            output = output + Text(String(title[match]))
+                .bold()
+                .foregroundColor(Theme.accent)
+            cursor = match.upperBound
+        }
+        return output + Text(String(title[cursor...]))
+    }
+
     /// Row background tint, all in the one accent hue: any selection is the
     /// brightest, then an unselected 等你 hint, then a faint hover. No second
     /// color — brightness alone ranks them.
-    private func rowFill(selected: Bool, needsYou: Bool, hovered: Bool) -> Color {
+    private func rowFill(selected: Bool, needsYou: Bool,
+                         priorityAlert: Bool, hovered: Bool) -> Color {
+        if priorityAlert { return Color(hex: 0xFF435A).opacity(selected ? 0.30 : 0.16) }
         if selected { return Theme.accent.opacity(0.30) }
         if needsYou { return Theme.accent.opacity(0.11) }
         if hovered { return Color.white.opacity(0.05) }
@@ -201,17 +367,33 @@ struct SidebarView: View {
     // 已讀 task resurfaced to 等你 by a fresh AI turn must still offer 已讀.
     private func row(_ t: TaskNote, group: AppModel.SidebarGroup) -> some View {
         let needsYou = group == .needsYou
+        let backgroundCount = model.backgroundTaskCount(t.id)
+        let priorityAlert = model.hasPriorityAlert(t.id)
         return HStack(spacing: 8) {
             VStack(alignment: .leading, spacing: 1) {
-                Text(t.title)
+                highlightedTitle(t.title)
                     .font(.system(size: 12.5 * model.uiScale))
-                    .lineLimit(1)
+                    .lineLimit(searchActive ? 2 : 1)
+                    .help(t.title)
                 HStack(spacing: 5) {
                     if let created = t.created {
                         Text(created)
                             .font(.system(size: 9.5 * model.uiScale))
                             .foregroundStyle(.tertiary)
                             .lineLimit(1)
+                    }
+                    if t.isMainline {
+                        HStack(spacing: 2) {
+                            Image(systemName: "star.fill")
+                            Text("主線")
+                        }
+                        .font(.system(size: 8.5 * model.uiScale, weight: .bold))
+                        .foregroundStyle(Color(hex: 0xFF6A67))
+                        .lineLimit(1)
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 0.5)
+                        .background(Color(hex: 0xFF435A).opacity(0.14), in: Capsule())
+                        .help(priorityAlert ? "主線 AI 已完成，正在等你查看" : "主線任務")
                     }
                     // 主 AI（主力 if set, else 現用）— cached, no per-render disk.
                     if let team = model.mainTeam(t.id) {
@@ -222,6 +404,16 @@ struct SidebarView: View {
                             .padding(.horizontal, 4)
                             .padding(.vertical, 0.5)
                             .background(Theme.accent.opacity(0.12), in: Capsule())
+                    }
+                    if backgroundCount > 0 {
+                        Text("背景 \(backgroundCount)")
+                            .font(.system(size: 8.5 * model.uiScale, weight: .medium))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 0.5)
+                            .background(Color.white.opacity(0.07), in: Capsule())
+                            .help("Claude 背景工作仍在執行；不影響目前任務分組")
                     }
                 }
                 // User-typed latest status（詳情頁頂端可編輯；設定檔案 frontmatter latest）
@@ -239,7 +431,10 @@ struct SidebarView: View {
         // 列高列寬零變化。chips 常駐掛載、以 opacity/scale 做進出漸變：
         // 比 if 插入/移除的 transition 可靠（List 列裡移除過渡常直接跳失）。
         .overlay(alignment: .trailing) {
-            if t.status == "active" {
+            // Search prioritizes the matched title; the hover capsule can cover
+            // most of a 150 pt sidebar row. Lifecycle actions remain available
+            // again as soon as the query is cleared (and in the context menu).
+            if t.status == "active" && !searchActive {
                 let hovered = hoveredSlug == t.id
                 LifecycleChips(task: t, group: group)
                     .padding(.horizontal, 5)
@@ -267,10 +462,16 @@ struct SidebarView: View {
                 RoundedRectangle(cornerRadius: 6)
                     .fill(rowFill(selected: model.selection == t.id,
                                   needsYou: needsYou,
+                                  priorityAlert: priorityAlert,
                                   hovered: hoveredSlug == t.id))
+                if priorityAlert {
+                    RoundedRectangle(cornerRadius: 6)
+                        .stroke(Color(hex: 0xFF5267).opacity(0.9), lineWidth: 1.25)
+                        .shadow(color: Color(hex: 0xFF314C).opacity(0.7), radius: 7)
+                }
                 if needsYou {
                     RoundedRectangle(cornerRadius: 1.5)
-                        .fill(Theme.accent)
+                        .fill(priorityAlert ? Color(hex: 0xFF5267) : Theme.accent)
                         .frame(width: 3)
                         .padding(.vertical, 3)
                 }
@@ -282,7 +483,7 @@ struct SidebarView: View {
             .animation(.easeInOut(duration: 0.15), value: hoveredSlug)
         )
         .contentShape(Rectangle())
-        .onTapGesture { model.selection = t.id }
+        .onTapGesture { model.selectTask(t.id) }
         .contextMenu {
             Button("複製 ID（永久 UUID）") {
                 NSPasteboard.general.clearContents()
@@ -299,6 +500,12 @@ struct SidebarView: View {
             Button("設定最新狀態…") {
                 statusText = t.statusLine ?? ""
                 statusSlug = t.id
+            }
+            Button {
+                model.setMainline(t.id, !t.isMainline)
+            } label: {
+                Label(t.isMainline ? "取消主線" : "設為主線",
+                      systemImage: t.isMainline ? "star.slash" : "star")
             }
             Button("在新視窗開啟") { openWindow(id: "task", value: t.id) }
             Button("在 Obsidian 開啟") { model.openInObsidian(t.id) }
@@ -513,6 +720,7 @@ struct TaskDetailView: View {
             }
         }
         .background(Theme.windowBG.ignoresSafeArea(edges: .top)) // titlebar seam
+        .dismissPriorityAlertOnTaskInteraction(slug)
     }
 }
 
@@ -703,6 +911,8 @@ struct NotesColumn: View {
             .padding(.horizontal, 12)
             .frame(height: 30)
             .background(Theme.paneHeaderBG)
+            .contentShape(Rectangle())
+            .simultaneousGesture(TapGesture().onEnded { session.focusZone = .notes })
 
             // NSTextView-backed: gives us ⌘B / ⌘I / ⌘⇧X markdown wrapping and a
             // reliable "became focus zone" signal (becomeFirstResponder).
@@ -743,8 +953,6 @@ struct NotesColumn: View {
                 .stroke(session.focusZone == .notes ? Theme.accent.opacity(0.65) : Theme.border,
                         lineWidth: session.focusZone == .notes ? 1.5 : 1)
         )
-        // 標頭等非編輯器區域的點擊仍走手勢補位。
-        .simultaneousGesture(TapGesture().onEnded { session.focusZone = .notes })
         .padding(.vertical, 8)
         .padding(.trailing, 8)
         // 不再自帶 windowBG：TaskDetailView 根部已鋪同款底——雙層疊加會讓

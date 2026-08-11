@@ -10,11 +10,17 @@ let package = Package(
         // rendering (composing CJK painted into the grid, not a floating
         // bubble) — both candidates for upstream PR.
         .package(url: "https://github.com/b159732000/SwiftTerm.git",
-                 revision: "d932d763921389e18d26effeb7433df280875c98"),
+                 revision: "3c4d483a26c768cb23a62b9025b7c5e782068650"),
     ],
     targets: [
         .target(name: "TaskDeckCore"),
-        .executableTarget(name: "taskdeckd", dependencies: ["TaskDeckCore"]),
+        .executableTarget(
+            name: "taskdeckd",
+            dependencies: [
+                "TaskDeckCore",
+                .product(name: "SwiftTerm", package: "SwiftTerm"),
+            ]
+        ),
         .executableTarget(name: "taskdeckctl", dependencies: ["TaskDeckCore"]),
         .executableTarget(
             name: "TaskDeck",
@@ -30,6 +36,12 @@ let package = Package(
         // Integration tests: spawns an ISOLATED taskdeckd on a temp socket
         // (never the production one) and exercises the wire protocol + pane
         // lifecycle. `swift run taskdeck-itest`, or Scripts/test.sh for all.
-        .executableTarget(name: "taskdeck-itest", dependencies: ["TaskDeckCore"]),
+        .executableTarget(
+            name: "taskdeck-itest",
+            dependencies: [
+                "TaskDeckCore",
+                .product(name: "SwiftTerm", package: "SwiftTerm"),
+            ]
+        ),
     ]
 )

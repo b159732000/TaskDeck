@@ -65,6 +65,12 @@ if task:
 task_key = os.environ.get("TASKDECK_TASK_KEY")
 if task_key:
     rec["task_key"] = task_key
+# Claude includes the append-only conversation record in every hook payload.
+# The GUI tails it off-main to count native background tasks without scraping
+# terminal pixels or walking the pane's process tree.
+transcript_path = payload.get("transcript_path")
+if isinstance(transcript_path, str) and transcript_path:
+    rec["transcript_path"] = transcript_path
 tmp = f"{out_dir}/.{sid}.json.tmp"
 with open(tmp, "w") as f:
     json.dump(rec, f)
