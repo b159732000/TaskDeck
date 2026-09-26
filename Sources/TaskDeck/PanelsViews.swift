@@ -1385,7 +1385,9 @@ struct QuotaGrid: View {
             .font(Theme.Fonts.mono(9 * scale))
             .foregroundStyle(Theme.text4)
             ForEach(accounts) { account in
-                let stale = account.staleSince != nil
+                // One missed poll (a 429) keeps numbers under five minutes
+                // old; badge only what has stayed unreachable — a dead token.
+                let stale = account.staleSince.map { Date().timeIntervalSince($0) > 15 * 60 } ?? false
                 GridRow(alignment: .center) {
                     HStack(spacing: 3) {
                         Text(Self.shortAlias(account.alias))
