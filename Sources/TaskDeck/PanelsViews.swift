@@ -270,9 +270,12 @@ struct SidebarView: View {
     }
 
     /// "最久 2 天" — how long the oldest unanswered task has been waiting.
+    /// Minutes at the finest: a lane header is not a stopwatch.
     private func owedText(_ tasks: [TaskNote]) -> String {
         guard let oldest = tasks.compactMap({ model.aiAttention($0.id)?.since }).min() else { return "" }
-        return "最久 " + activityDuration(Date().timeIntervalSince(oldest))
+        let seconds = Date().timeIntervalSince(oldest)
+        if seconds < 3600 { return "最久 \(max(1, Int(seconds / 60))) 分" }
+        return "最久 " + activityDuration(seconds)
     }
 
     private func accountsText(_ tasks: [TaskNote]) -> String {
@@ -430,16 +433,16 @@ struct SidebarView: View {
                     .help(t.title)
                 HStack(spacing: 5) {
                     if let created = t.created {
-                        Text(created)
+                        // "09-03": the year and time are in the note; the row
+                        // has ~250 pt for five things.
+                        Text(created.count >= 10 ? String(created.dropFirst(5).prefix(5)) : created)
                             .font(Theme.Fonts.mono(10 * model.uiScale))
                             .foregroundStyle(Theme.text3)
                             .lineLimit(1)
+                            .help(created)
                     }
                     if t.isMainline {
-                        HStack(spacing: 2) {
-                            Image(systemName: "star.fill")
-                            Text("主線")
-                        }
+                        Image(systemName: "star.fill")
                         .font(Theme.Fonts.ui(9 * model.uiScale, .bold))
                         .foregroundStyle(Theme.Lane.you)
                         .lineLimit(1)
@@ -450,7 +453,8 @@ struct SidebarView: View {
                     }
                     // 主 AI（主力 if set, else 現用）— cached, no per-render disk.
                     if let team = model.mainTeam(t.id) {
-                        Text(team)
+                        Text(QuotaGrid.shortAlias(team))
+                            .help(team)
                             .font(Theme.Fonts.mono(9 * model.uiScale, .medium))
                             .foregroundStyle(Theme.accent)
                             .lineLimit(1)
@@ -1227,7 +1231,8 @@ struct QuotaGrid: View {
     ]
 
     var body: some View {
-        Grid(alignment: .leading, horizontalSpacing: 8, verticalSpacing: 6) {
+        ScrollView(.horizontal, showsIndicators: false) {
+        Grid(alignment: .leading, horizontalSpacing: 6, verticalSpacing: 6) {
             GridRow {
                 Text("帳號").gridColumnAlignment(.leading)
                 ForEach(Self.columns, id: \.title) { Text($0.title) }
@@ -1259,6 +1264,7 @@ struct QuotaGrid: View {
                 .help(rowHelp(account))
             }
         }
+        }
     }
 
     private func bucket(_ account: AppModel.QuotaAccount,
@@ -1281,7 +1287,7 @@ struct QuotaGrid: View {
             }
             .frame(height: 3)
         }
-        .frame(minWidth: 34)
+        .frame(minWidth: 30)
     }
 
     private func tint(_ percent: Int) -> Color {

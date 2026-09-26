@@ -164,7 +164,15 @@ final class SnapshotService {
         // render; draw each table on top through the drawRect path.
         for table in Self.tables(in: view) {
             guard let rep = table.bitmapImageRepForCachingDisplay(in: table.bounds) else { continue }
+            // The table paints an opaque background through drawRect even
+            // though the live list is glass; capture it clear.
+            let background = table.backgroundColor
+            let scrollDraws = table.enclosingScrollView?.drawsBackground ?? false
+            table.backgroundColor = .clear
+            table.enclosingScrollView?.drawsBackground = false
             table.cacheDisplay(in: table.bounds, to: rep)
+            table.backgroundColor = background
+            table.enclosingScrollView?.drawsBackground = scrollDraws
             let inWindow = table.convert(table.bounds, to: nil) // window coords, y-up
             rep.draw(in: inWindow)
         }

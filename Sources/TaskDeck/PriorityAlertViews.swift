@@ -35,8 +35,10 @@ private struct PriorityAlertChromeModifier: ViewModifier {
             }
             .overlay(alignment: .top) {
                 if hasAlerts {
+                    // Below the ticket header (title + chips), over the pane
+                    // headers — never over the task title or the prompt line.
                     PriorityAlertBanner()
-                        .padding(.top, 10)
+                        .padding(.top, 64)
                         .padding(.horizontal, 16)
                 }
             }
