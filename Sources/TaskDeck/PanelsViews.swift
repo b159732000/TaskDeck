@@ -1301,6 +1301,7 @@ struct QuotaGrid: View {
             GridRow {
                 Text("帳號").gridColumnAlignment(.leading)
                 ForEach(Self.columns, id: \.title) { Text($0.title) }
+                Color.clear.frame(width: 1)
                 Text("重置").gridColumnAlignment(.trailing)
             }
             .font(Theme.Fonts.mono(9 * scale))
@@ -1320,12 +1321,18 @@ struct QuotaGrid: View {
                             Text("—").font(Theme.Fonts.mono(10 * scale)).foregroundStyle(Theme.text4)
                         }
                     }
-                    Text(resetText(account))
-                        .font(Theme.Fonts.mono(9.5 * scale))
-                        .foregroundStyle(tightest(account).map { tint($0.percent) } ?? Theme.text4)
-                        .gridColumnAlignment(.trailing)
-                        .lineLimit(1)
-                        .fixedSize() // "週四 08:00" must not truncate
+                    // A hairline and a ↻ keep the reset column from reading
+                    // as part of the 點數 column, which is mostly "—".
+                    Rectangle().fill(Theme.border).frame(width: 1).frame(maxHeight: .infinity)
+                    HStack(spacing: 3) {
+                        Image(systemName: "arrow.clockwise").font(.system(size: 8, weight: .semibold))
+                        Text(resetText(account))
+                    }
+                    .font(Theme.Fonts.mono(9.5 * scale))
+                    .foregroundStyle(tightest(account).map { tint($0.percent) } ?? Theme.text4)
+                    .gridColumnAlignment(.trailing)
+                    .lineLimit(1)
+                    .fixedSize() // "週四 08:00" must not truncate
                 }
                 .help(rowHelp(account))
             }
@@ -1384,19 +1391,27 @@ struct QuotaGrid: View {
         alias.hasPrefix("claude-") ? String(alias.dropFirst("claude-".count)) : alias
     }
 
-    /// The tightest window that actually resets (credits have no reset date).
+    /// The tightest window that actually resets (credits have no reset date),
+    /// always with a day: 今 19:20 / 明 02:59 / 週四 08:00.
     private func resetText(_ account: AppModel.QuotaAccount) -> String {
         if account.error != nil { return "未登入" }
         guard let reset = account.buckets.values
             .filter({ $0.resetsAt != nil }).max(by: { $0.percent < $1.percent })?.resetsAt else { return "—" }
-        return reset.timeIntervalSinceNow < 20 * 3600
-            ? Self.clock.string(from: reset) : Self.weekday.string(from: reset)
+        let calendar = Calendar.current
+        if calendar.isDateInToday(reset) { return "今 " + Self.clock.string(from: reset) }
+        if calendar.isDateInTomorrow(reset) { return "明 " + Self.clock.string(from: reset) }
+        return Self.weekday.string(from: reset)
     }
 
     private func rowHelp(_ account: AppModel.QuotaAccount) -> String {
         if let error = account.error { return "\(account.alias)：\(error)" }
+        let calendar = Calendar.current
         let lines = account.buckets.sorted { $0.key < $1.key }.map { name, bucket in
-            let reset = bucket.resetsAt.map { Self.weekday.string(from: $0) } ?? "—"
+            let reset = bucket.resetsAt.map { date -> String in
+                if calendar.isDateInToday(date) { return "今 " + Self.clock.string(from: date) }
+                if calendar.isDateInTomorrow(date) { return "明 " + Self.clock.string(from: date) }
+                return Self.weekday.string(from: date)
+            } ?? "—"
             return "· \(name) \(bucket.percent)% · 重置 \(reset)"
         }
         return ([account.alias] + lines).joined(separator: "\n")
