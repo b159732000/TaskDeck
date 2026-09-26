@@ -669,11 +669,29 @@ struct DockView: View {
 
     var body: some View {
         let totals = model.activityTotals
+        // The sidebar can be dragged down to 150 pt: shed the memory figure,
+        // then the idle count, before anything gets ellipsised.
+        ViewThatFits(in: .horizontal) {
+            row(totals, memory: true, idle: true)
+            row(totals, memory: false, idle: true)
+            row(totals, memory: false, idle: false)
+        }
+        .lineLimit(1)
+        .padding(.leading, 13)
+        .padding(.trailing, 5)
+        .padding(.vertical, 5)
+        .background(Theme.raisedBG, in: Capsule())
+        .overlay(Capsule().stroke(Theme.border, lineWidth: 1))
+        .shadow(color: .black.opacity(0.35), radius: 12, y: 6)
+        .help(helpText(totals))
+    }
+
+    private func row(_ totals: AppModel.ActivityTotals, memory: Bool, idle: Bool) -> some View {
         HStack(spacing: 11) {
             dot(Theme.good, totals.service, "服務")
             dot(Theme.Lane.ai, totals.ai, "AI")
-            dot(Theme.text4, totals.idle, "閒置")
-            if totals.panes > 0 {
+            if idle { dot(Theme.text4, totals.idle, "閒置") }
+            if memory, totals.panes > 0 {
                 Text(activityMemory(totals.residentBytes))
                     .font(Theme.Fonts.mono(10.5, .medium))
                     .foregroundStyle(Theme.text3)
@@ -690,14 +708,7 @@ struct DockView: View {
             .buttonStyle(.plain)
             .help("新任務（⇧⌘N）")
         }
-        .lineLimit(1)
-        .padding(.leading, 13)
-        .padding(.trailing, 5)
-        .padding(.vertical, 5)
-        .background(Theme.raisedBG, in: Capsule())
-        .overlay(Capsule().stroke(Theme.border, lineWidth: 1))
-        .shadow(color: .black.opacity(0.35), radius: 12, y: 6)
-        .help(helpText(totals))
+        .fixedSize(horizontal: false, vertical: true)
     }
 
     private func dot(_ tint: Color, _ count: Int, _ label: String) -> some View {
