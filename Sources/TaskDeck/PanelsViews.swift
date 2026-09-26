@@ -415,7 +415,7 @@ struct SidebarView: View {
     private func rowFill(selected: Bool, needsYou: Bool,
                          priorityAlert: Bool, hovered: Bool) -> Color {
         if priorityAlert { return Theme.Lane.you.opacity(selected ? 0.26 : 0.14) }
-        if selected { return Theme.accent.opacity(0.14) }
+        if selected { return Theme.accent.opacity(0.17) }
         if needsYou { return Theme.Lane.you.opacity(0.07) }
         if hovered { return Color.white.opacity(0.045) }
         return .clear
@@ -545,6 +545,10 @@ struct SidebarView: View {
         // 移去終端就變灰——自畫一層常駐選取底色（hover 給更淡的一階）。
         // 「等你」用同一主配色（accent）的深淺區分：未選一層淡底＋左側強調
         // 條，選中再加深，不引入額外色相。
+        // Three channels, one job each: the FILL says selected / hovered /
+        // 等你 hint, the RAIL says which lane, the OUTLINE says main-line
+        // alert. Nothing doubles up — the old accent bar for 等你 and the
+        // selection stroke both sat beside the rail as a second line.
         .listRowBackground(
             ZStack(alignment: .leading) {
                 RoundedRectangle(cornerRadius: 10)
@@ -552,10 +556,6 @@ struct SidebarView: View {
                                   needsYou: needsYou,
                                   priorityAlert: priorityAlert,
                                   hovered: hoveredSlug == t.id))
-                if model.selection == t.id {
-                    RoundedRectangle(cornerRadius: 10)
-                        .stroke(Theme.accent.opacity(0.28), lineWidth: 1)
-                }
                 if let rail = laneRail(group) {
                     RoundedRectangle(cornerRadius: 2)
                         .fill(rail)
@@ -564,15 +564,9 @@ struct SidebarView: View {
                         .padding(.leading, 3)
                 }
                 if priorityAlert {
-                    RoundedRectangle(cornerRadius: 6)
-                        .stroke(Color(hex: 0xFF5267).opacity(0.9), lineWidth: 1.25)
-                        .shadow(color: Color(hex: 0xFF314C).opacity(0.7), radius: 7)
-                }
-                if needsYou {
-                    RoundedRectangle(cornerRadius: 1.5)
-                        .fill(priorityAlert ? Color(hex: 0xFF5267) : Theme.accent)
-                        .frame(width: 3)
-                        .padding(.vertical, 3)
+                    RoundedRectangle(cornerRadius: 10)
+                        .stroke(Theme.Lane.you.opacity(0.9), lineWidth: 1.25)
+                        .shadow(color: Theme.Lane.you.opacity(0.6), radius: 6)
                 }
             }
             .padding(.horizontal, 4)
