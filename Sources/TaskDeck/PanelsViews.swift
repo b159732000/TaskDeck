@@ -1399,8 +1399,8 @@ struct QuotaGrid: View {
                               : "")
                 }
                 Color.clear.frame(width: 1)
-                Text("重置").gridColumnAlignment(.trailing)
-                    .help("週額度（週 / Fable 共用同一個窗口）何時重置；codex / opencode 顯示它們唯一的那個窗口。5h 窗口的倒數在 5h 那格。")
+                Text("週重置").gridColumnAlignment(.trailing)
+                    .help("週額度（週 / Fable 共用同一個窗口）還有多久重置；codex / opencode 是它們唯一的那個窗口。確切的日期時間在列的提示裡；5h 窗口的倒數在 5h 那格。")
             }
             .font(Theme.Fonts.mono(9 * scale))
             .foregroundStyle(Theme.text4)
@@ -1434,7 +1434,7 @@ struct QuotaGrid: View {
                     // A hairline keeps the reset column from reading as part
                     // of the 點數 column, which is mostly "—".
                     Rectangle().fill(Theme.border).frame(width: 1).frame(maxHeight: .infinity)
-                    resetCell(account, Self.weeklyBucket(account.buckets), stale: stale)
+                    resetCell(account, Self.weeklyBucket(account.buckets), stale: stale, now: now)
                 }
                 .help(rowHelp(account))
             }
@@ -1487,12 +1487,14 @@ struct QuotaGrid: View {
         percent >= 100 ? Theme.crit : (percent >= 70 ? Theme.warn : Theme.accent)
     }
 
-    /// "3h36m" / "12m" until `until`; nil once it has passed (the next poll
-    /// brings the new window). No seconds: the grid ticks by the minute.
+    /// "5d19h" / "3h36m" / "12m" until `until`; nil once it has passed (the
+    /// next poll brings the new window). Two units at most, no seconds: the
+    /// grid ticks by the minute.
     static func remaining(until: Date, now: Date) -> String? {
         let seconds = until.timeIntervalSince(now)
         guard seconds > 0 else { return nil }
         let minutes = Int((seconds / 60).rounded(.up))
+        if minutes >= 24 * 60 { return "\(minutes / (24 * 60))d\(minutes % (24 * 60) / 60)h" }
         return minutes >= 60 ? "\(minutes / 60)h\(minutes % 60)m" : "\(minutes)m"
     }
 
@@ -1509,16 +1511,20 @@ struct QuotaGrid: View {
             }
     }
 
+    /// Time left, not a weekday: "5d19h" answers the question directly; the
+    /// exact day and time stay in the row tooltip.
     private func resetCell(_ account: AppModel.QuotaAccount,
-                           _ bucket: AppModel.QuotaBucket?, stale: Bool) -> some View {
-        let text = account.error != nil ? "未登入" : bucket?.resetsAt.map(Self.dayLabel) ?? "—"
+                           _ bucket: AppModel.QuotaBucket?, stale: Bool, now: Date) -> some View {
+        let text = account.error != nil ? "未登入"
+            : bucket?.resetsAt.flatMap { Self.remaining(until: $0, now: now) } ?? "—"
         return Text(text)
             .font(Theme.Fonts.mono(9.5 * scale))
             .foregroundStyle(bucket.map { tint($0.percent) } ?? Theme.text4)
+            .monospacedDigit()
             .opacity(stale ? 0.45 : 1)
             .gridColumnAlignment(.trailing)
             .lineLimit(1)
-            .fixedSize() // "下週六 15:59" must not truncate
+            .fixedSize()
     }
 
     private static let clock: DateFormatter = {
