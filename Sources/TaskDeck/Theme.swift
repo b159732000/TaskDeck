@@ -14,8 +14,12 @@ enum Theme {
         let name: String
         let window: UInt32, panel: UInt32, header: UInt32, terminal: UInt32, border: UInt32
         /// Base alpha of each layer at boost 0. The classic presets are true
-        /// glass (22–37%); Night Lane sits at ~55–86% so type stays legible
-        /// over any wallpaper while the blur still shows through.
+        /// glass (22–37%). Night Lane keeps the WINDOW and TERMINAL at that
+        /// glass (the iTerm2 feel the terminal work in 4e85a30 / 81dc529 /
+        /// acd577e earned) and only raises the chrome — sidebar panel and
+        /// pane headers — so type there stays legible over any wallpaper.
+        /// The terminal's effective opacity is window × terminal stacked, so
+        /// raising the window layer darkens every shell; keep both low.
         var alphas: (window: Double, panel: Double, header: Double, terminal: Double)
             = (0.22, 0.26, 0.33, 0.37)
     }
@@ -36,8 +40,8 @@ enum Theme {
         .init(name: "暗紫", window: 0x120E1A, panel: 0x171221,
               header: 0x1F182B, terminal: 0x151021, border: 0x362B49),
         .init(name: "夜間車道（預設）", window: 0x0A0C11, panel: 0x10131A,
-              header: 0x161A23, terminal: 0x0C0E14, border: 0x262C3A,
-              alphas: (0.55, 0.70, 0.82, 0.86)),
+              header: 0x161A23, terminal: 0x14181F, border: 0x262C3A,
+              alphas: (0.24, 0.70, 0.82, 0.37)),
     ]
 
     // Current appearance (mirrored from AppModel's persisted @Published
