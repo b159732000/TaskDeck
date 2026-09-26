@@ -667,15 +667,16 @@ func activityMemory(_ bytes: UInt64) -> String {
 struct DockView: View {
     @EnvironmentObject var model: AppModel
 
+    /// Same persisted value ContentView sizes the sidebar with.
+    @AppStorage("sidebarWidth") private var sidebarWidth: Double = 230
+
     var body: some View {
         let totals = model.activityTotals
         // The sidebar can be dragged down to 150 pt: shed the memory figure,
-        // then the idle count, before anything gets ellipsised.
-        ViewThatFits(in: .horizontal) {
-            row(totals, memory: true, idle: true)
-            row(totals, memory: false, idle: true)
-            row(totals, memory: false, idle: false)
-        }
+        // then the idle count. Decided from the persisted width, not with
+        // ViewThatFits — inside a safeAreaInset that collapsed the inset to
+        // zero height and left the + button floating over the list.
+        row(totals, memory: sidebarWidth >= 235, idle: sidebarWidth >= 190)
         .lineLimit(1)
         .padding(.leading, 13)
         .padding(.trailing, 5)
@@ -706,9 +707,11 @@ struct DockView: View {
                     .background(Theme.accent, in: Circle())
             }
             .buttonStyle(.plain)
+            .onHover { inside in
+                if inside { NSCursor.pointingHand.push() } else { NSCursor.pop() }
+            }
             .help("新任務（⇧⌘N）")
         }
-        .fixedSize(horizontal: false, vertical: true)
     }
 
     private func dot(_ tint: Color, _ count: Int, _ label: String) -> some View {
