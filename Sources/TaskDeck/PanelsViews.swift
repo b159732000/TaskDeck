@@ -1325,6 +1325,7 @@ struct QuotaGrid: View {
                         .foregroundStyle(tightest(account).map { tint($0.percent) } ?? Theme.text4)
                         .gridColumnAlignment(.trailing)
                         .lineLimit(1)
+                        .fixedSize() // "週四 08:00" must not truncate
                 }
                 .help(rowHelp(account))
             }
