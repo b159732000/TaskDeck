@@ -259,8 +259,8 @@ struct SidebarView: View {
                 .monospacedDigit()
             Text(Self.laneName(group))
                 .font(Theme.Fonts.display(13, .bold))
+            Spacer(minLength: 6)
             if !sub.isEmpty {
-                Spacer(minLength: 6)
                 Text(sub)
                     .font(Theme.Fonts.mono(10))
                     .foregroundStyle(Theme.text3)
@@ -1293,7 +1293,8 @@ struct NotesColumn: View {
                                  minH: 44, maxH: b.quotaMax) {
                     quotaContentHeight = 0
                 }
-                QuotaFooterView(contentHeight: quotaExpanded ? b.quota : nil)
+                QuotaFooterView(contentHeight: quotaExpanded ? b.quota : nil,
+                                narrow: geo.size.width < 260)
             }
         }
         }
@@ -1502,6 +1503,8 @@ struct QuotaFooterView: View {
     /// degrades in two steps — first compact (bars off, tighter rows), then a
     /// vertical scroll — so no account ever drops off the bottom.
     var contentHeight: Double? = nil
+    /// Notes column narrower than ~260 pt: drop the timestamp from the header.
+    var narrow = false
     @AppStorage("quotaExpanded") private var expanded = true
     /// 額度表的獨立縮放（疊在全局 uiScale 之上）：右欄變窄（小螢幕給主終端
     /// 讓位）時，把表縮小到塞得下。
@@ -1517,17 +1520,20 @@ struct QuotaFooterView: View {
                 Text("AI 額度")
                     .font(Theme.Fonts.display(12, .semibold))
                     .foregroundStyle(Theme.text2)
+                    .lineLimit(1)
+                    .fixedSize()
                 if model.quotaStale {
                     Image(systemName: "exclamationmark.triangle.fill")
                         .font(.system(size: 9))
                         .foregroundStyle(.orange)
                         .help("上次更新失敗，顯示的是舊資料（stderr 在 /tmp/taskdeck-quota.err）")
                 }
-                Spacer()
-                if let t = model.quotaUpdatedAt {
+                Spacer(minLength: 4)
+                if let t = model.quotaUpdatedAt, !narrow {
                     Text(t, style: .time)
-                        .font(.system(size: 10))
-                        .foregroundStyle(.tertiary)
+                        .font(Theme.Fonts.mono(10))
+                        .foregroundStyle(Theme.text3)
+                        .lineLimit(1)
                         .padding(.trailing, 3)
                 }
                 HeaderIconButton(icon: "textformat.size.smaller",
@@ -1543,7 +1549,8 @@ struct QuotaFooterView: View {
                         .frame(width: 24, height: 18)
                 } else {
                     HeaderIconButton(icon: "arrow.clockwise",
-                                     help: "強制重新抓取最新（略過快取）；每 5 分鐘也會自動更新") {
+                                     help: "強制重新抓取最新（略過快取）；每 5 分鐘也會自動更新"
+                                         + (model.quotaUpdatedAt.map { "；上次 " + Self.clock.string(from: $0) } ?? "")) {
                         model.refreshQuota(force: true)
                     }
                 }
@@ -1584,6 +1591,10 @@ struct QuotaFooterView: View {
             }
         }
     }
+
+    private static let clock: DateFormatter = {
+        let f = DateFormatter(); f.dateFormat = "HH:mm"; return f
+    }()
 
     private var quotaHeight: CGFloat {
         let lines = max(3, model.quotaText.split(separator: "\n", omittingEmptySubsequences: false).count)
