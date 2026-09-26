@@ -1158,8 +1158,50 @@ struct NotesColumn: View {
     /// terminals block and the quota block. 0 = the quota's natural height.
     @AppStorage("sidePanesHeight") private var sidePanesHeight: Double = 232
     @AppStorage("quotaContentHeight") private var quotaContentHeight: Double = 0
+    @AppStorage("quotaExpanded") private var quotaExpanded = true
+
+    /// The column is a fixed budget: header, editor (never below `editorMin`),
+    /// the small-terminals block, the quota block, and a handle above each of
+    /// the last two. The remembered heights are wishes; the block above gives
+    /// way first, so growing the quota shrinks the terminals (which scroll
+    /// their own scrollback) instead of covering them, and nothing is ever
+    /// clipped off the bottom of the card.
+    private struct Budget {
+        static let header = 30.0, editorMin = 80.0, handle = 10.0, quotaHeader = 28.0
+        static let paneMin = 60.0
+        let side: Double      // height of the small-terminals block (0 = none)
+        let sideMax: Double
+        let quota: Double     // height of the quota content (0 = none)
+        let quotaMax: Double
+    }
+
+    private func budget(total: Double, sideCount: Int, natural: Double) -> Budget {
+        var free = total - Budget.header - Budget.editorMin
+        let hasQuota = model.config.quotaCommand != nil
+        var quotaMax = 0.0, quota = 0.0
+        if hasQuota {
+            free -= Budget.handle + Budget.quotaHeader
+            if sideCount > 0 { free -= Budget.handle + Budget.paneMin }
+            quotaMax = max(44, free)
+            quota = quotaExpanded ? min(quotaContentHeight > 0 ? quotaContentHeight : natural, quotaMax) : 0
+            free -= quota
+            if sideCount > 0 { free += Budget.paneMin }
+        }
+        var sideMax = 0.0, side = 0.0
+        if sideCount > 0 {
+            if !hasQuota { free -= Budget.handle }
+            sideMax = max(Budget.paneMin, free)
+            side = min(sidePanesHeight, sideMax)
+        }
+        return Budget(side: side, sideMax: sideMax, quota: quota, quotaMax: quotaMax)
+    }
 
     var body: some View {
+        GeometryReader { geo in
+        let sideIDs = session.sidePaneIDs
+        let natural = QuotaGrid.naturalHeight(rows: max(3, model.quotaAccounts.count),
+                                              scale: model.uiScale, compact: false)
+        let b = budget(total: Double(geo.size.height), sideCount: sideIDs.count, natural: natural)
         VStack(spacing: 0) {
             HStack(spacing: 8) {
                 Text("筆記")
@@ -1196,34 +1238,35 @@ struct NotesColumn: View {
 
             // Small side terminals: stacked under the notes, out of the main
             // grid so they never steal split space from the big panes.
-            let sideIDs = session.sidePaneIDs
             if !sideIDs.isEmpty {
-                // Drag the handle up to give the small terminals more room;
-                // double-click restores the default. Each terminal keeps its
-                // 220 pt and the block scrolls when there are several.
-                RowDividerHandle(height: $sidePanesHeight, fallback: 232, minH: 120, maxH: 640) {
+                // Drag up for more room; double-click restores the default.
+                // One terminal fills the block (down to 60 pt — no minimum
+                // worth the name, the terminal scrolls its own history);
+                // several keep 220 pt each and the block scrolls.
+                RowDividerHandle(height: $sidePanesHeight, fallback: 232,
+                                 minH: Budget.paneMin, maxH: b.sideMax) {
                     sidePanesHeight = 232
                 }
                 ScrollView {
                     VStack(spacing: 6) {
                         ForEach(sideIDs, id: \.self) { id in
                             PaneContainerView(specID: id)
-                                .frame(height: 220)
+                                .frame(height: sideIDs.count == 1 ? max(Budget.paneMin - 12, b.side - 12) : 220)
                         }
                     }
                     .padding(6)
                 }
-                .frame(height: CGFloat(sidePanesHeight))
+                .frame(height: CGFloat(b.side))
             }
 
             if model.config.quotaCommand != nil {
-                let natural = QuotaGrid.naturalHeight(rows: max(3, model.quotaAccounts.count),
-                                                      scale: model.uiScale, compact: false)
-                RowDividerHandle(height: $quotaContentHeight, fallback: natural, minH: 44, maxH: 520) {
+                RowDividerHandle(height: $quotaContentHeight, fallback: natural,
+                                 minH: 44, maxH: b.quotaMax) {
                     quotaContentHeight = 0
                 }
-                QuotaFooterView(contentHeight: quotaContentHeight > 0 ? quotaContentHeight : nil)
+                QuotaFooterView(contentHeight: quotaExpanded ? b.quota : nil)
             }
+        }
         }
         .background(Theme.notesBG)
         .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.l, style: .continuous))
