@@ -159,6 +159,7 @@ struct SidebarView: View {
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 8)
+            .modifier(SidebarChrome(edge: .bottom))
         }
         // Tint + border run under the titlebar so the strip above the
         // sidebar matches the sidebar (see ContentView's root tint note).
@@ -303,10 +304,7 @@ struct SidebarView: View {
         .padding(.top, 6)
         .padding(.bottom, searchActive ? 5 : 7)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Theme.panelBG)
-        .overlay(alignment: .bottom) {
-            Rectangle().fill(Theme.border).frame(height: 1)
-        }
+        .modifier(SidebarChrome(edge: .top))
     }
 
     private var searchEmptyState: some View {
@@ -549,6 +547,27 @@ struct SidebarView: View {
             }
             Button("徹底刪除…", role: .destructive) { deletingSlug = t.id }
         }
+    }
+}
+
+/// A strip pinned over the scrolling task list (the search header, the bottom
+/// bar). The sidebar is glass — `Theme.panelBG` is only ~26% opaque — so a
+/// plain tint lets rows scrolling underneath show straight through the strip
+/// and its text becomes unreadable. A material blurs what is behind into a
+/// frosted band instead: legible, and still glass rather than a solid slab.
+/// The tint on top keeps the strip in the same hue as the list; the hairline
+/// marks where the list ends.
+private struct SidebarChrome: ViewModifier {
+    let edge: VerticalEdge
+
+    func body(content: Content) -> some View {
+        content
+            .frame(maxWidth: .infinity)
+            .background(Theme.panelBG)
+            .background(.regularMaterial)
+            .overlay(alignment: edge == .top ? .bottom : .top) {
+                Rectangle().fill(Theme.border).frame(height: 1)
+            }
     }
 }
 
