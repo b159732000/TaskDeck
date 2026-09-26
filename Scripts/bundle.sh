@@ -4,7 +4,17 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 CONFIG="${1:-debug}"
-swift build -c "$CONFIG"
+
+# Swift 6.4 made the Xcode-style build system the default. It compiles
+# SwiftTerm's Metal shader, which needs Xcode's separately-downloaded Metal
+# toolchain — absent on the CLT-only setups this project supports. Fall back to
+# the native build system when that toolchain is missing (it ignores the
+# shader, exactly as every build before Swift 6.4 did).
+BUILD_ARGS=()
+if ! xcrun metal --version > /dev/null 2>&1; then
+  BUILD_ARGS+=(--build-system native)
+fi
+swift build -c "$CONFIG" "${BUILD_ARGS[@]}"
 
 BIN=".build/$CONFIG"
 APP="dist/JamesDesk.app"

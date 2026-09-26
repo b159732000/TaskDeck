@@ -7,7 +7,14 @@ set -e
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 echo "== swift build =="
-swift build --package-path "$ROOT"
+# See Scripts/bundle.sh: without Xcode's Metal toolchain the default (Swift 6.4+)
+# build system cannot compile SwiftTerm's shader.
+BUILD_ARGS=""
+if ! xcrun metal --version > /dev/null 2>&1; then
+  BUILD_ARGS="--build-system native"
+fi
+# shellcheck disable=SC2086
+swift build --package-path "$ROOT" $BUILD_ARGS
 
 echo "== taskdeck-selftest (pure functions) =="
 "$ROOT/.build/debug/taskdeck-selftest"
