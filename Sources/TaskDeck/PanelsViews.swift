@@ -1426,7 +1426,8 @@ struct QuotaGrid: View {
                         if let bucket = bucket(account, column.match) {
                             let countdown = column.title == "5h"
                                 ? bucket.resetsAt.flatMap { Self.remaining(until: $0, now: now) } : nil
-                            cell(bucket, note: countdown).opacity(stale ? 0.45 : 1)
+                            cell(bucket, note: countdown, narrow: column.title == "點數")
+                                .opacity(stale ? 0.45 : 1)
                         } else {
                             Text("—").font(Theme.Fonts.mono(10 * scale)).foregroundStyle(Theme.text4)
                         }
@@ -1448,8 +1449,11 @@ struct QuotaGrid: View {
     }
 
     /// `note` rides after the percentage: the 5h cell's "3h36m" until the
-    /// window resets, so no separate column is spent on it.
-    private func cell(_ bucket: AppModel.QuotaBucket, note: String? = nil) -> some View {
+    /// window resets, so no separate column is spent on it. `narrow` caps
+    /// the column (點數: mostly "—", rarely what you look at) so the three
+    /// windows that matter get the width.
+    private func cell(_ bucket: AppModel.QuotaBucket, note: String? = nil,
+                      narrow: Bool = false) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             HStack(alignment: .lastTextBaseline, spacing: 4) {
                 Text("\(bucket.percent)%")
@@ -1478,9 +1482,9 @@ struct QuotaGrid: View {
                 .frame(height: 3)
             }
         }
-        // Flexible: the four window columns share whatever width the notes
+        // Flexible: the window columns share whatever width the notes
         // column has, so the grid fills a wide column and squeezes to ~245 pt.
-        .frame(minWidth: 30, maxWidth: .infinity, alignment: .leading)
+        .frame(minWidth: 30, maxWidth: narrow ? 44 * scale : .infinity, alignment: .leading)
     }
 
     private func tint(_ percent: Int) -> Color {
