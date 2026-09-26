@@ -212,24 +212,39 @@ struct SidebarView: View {
     /// Search temporarily reveals every matching section without overwriting
     /// the user's persisted disclosure choices. Clearing the query restores
     /// the exact pre-search expansion state.
+    ///
+    /// The disclosure is our own: the sidebar List's built-in chevron pops in
+    /// on hover, sits off the header's centre line, and shoves the subtitle
+    /// left when it appears. Ours is always there (dim, rotates), the whole
+    /// header toggles, and nothing moves.
     @ViewBuilder
     private func sidebarSection<Content: View, Header: View>(
         isExpanded: Binding<Bool>,
         @ViewBuilder content: () -> Content,
         @ViewBuilder header: () -> Header
     ) -> some View {
-        if searchActive {
-            Section {
+        Section {
+            if searchActive || isExpanded.wrappedValue {
                 content()
-            } header: {
-                header()
             }
-        } else {
-            Section(isExpanded: isExpanded) {
-                content()
-            } header: {
+        } header: {
+            HStack(spacing: 8) {
                 header()
+                if !searchActive {
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(Theme.text4)
+                        .rotationEffect(.degrees(isExpanded.wrappedValue ? 0 : -90))
+                        .frame(width: 12, height: 12)
+                        .accessibilityHidden(true)
+                }
             }
+            .contentShape(Rectangle())
+            .onTapGesture {
+                guard !searchActive else { return }
+                withAnimation(.easeInOut(duration: 0.15)) { isExpanded.wrappedValue.toggle() }
+            }
+            .help(searchActive ? "" : (isExpanded.wrappedValue ? "收合" : "展開"))
         }
     }
 
