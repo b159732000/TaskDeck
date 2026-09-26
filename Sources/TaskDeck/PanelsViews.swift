@@ -1471,27 +1471,35 @@ struct QuotaGrid: View {
     }
 
     /// The tightest window that actually resets (credits have no reset date),
-    /// always with a day: 今 19:20 / 明 02:59 / 週四 08:00.
+    /// always with a day: 今 19:20 / 明 02:59 / 週四 08:00 / 下週六 16:00.
     private func resetText(_ account: AppModel.QuotaAccount) -> String {
         if account.error != nil { return "未登入" }
         guard let reset = account.buckets.values
             .filter({ $0.resetsAt != nil }).max(by: { $0.percent < $1.percent })?.resetsAt else { return "—" }
+        return Self.dayLabel(reset)
+    }
+
+    /// 今 / 明 / 週X for the coming week; a reset a full week out shares
+    /// today's weekday name, so it says 下週X instead of making you count.
+    static func dayLabel(_ date: Date) -> String {
         let calendar = Calendar.current
-        if calendar.isDateInToday(reset) { return "今 " + Self.clock.string(from: reset) }
-        if calendar.isDateInTomorrow(reset) { return "明 " + Self.clock.string(from: reset) }
-        return Self.weekday.string(from: reset)
+        let days = calendar.dateComponents([.day], from: calendar.startOfDay(for: Date()),
+                                           to: calendar.startOfDay(for: date)).day ?? 0
+        switch days {
+        case ..<0: return weekday.string(from: date)
+        case 0: return "今 " + clock.string(from: date)
+        case 1: return "明 " + clock.string(from: date)
+        case 2 ... 6: return weekday.string(from: date)
+        case 7 ... 13: return "下" + weekday.string(from: date)
+        default:
+            let f = DateFormatter(); f.dateFormat = "M/d HH:mm"; return f.string(from: date)
+        }
     }
 
     private func rowHelp(_ account: AppModel.QuotaAccount) -> String {
         if let error = account.error { return "\(account.alias)：\(error)" }
-        let calendar = Calendar.current
         let lines = account.buckets.sorted { $0.key < $1.key }.map { name, bucket in
-            let reset = bucket.resetsAt.map { date -> String in
-                if calendar.isDateInToday(date) { return "今 " + Self.clock.string(from: date) }
-                if calendar.isDateInTomorrow(date) { return "明 " + Self.clock.string(from: date) }
-                return Self.weekday.string(from: date)
-            } ?? "—"
-            return "· \(name) \(bucket.percent)% · 重置 \(reset)"
+            "· \(name) \(bucket.percent)% · 重置 \(bucket.resetsAt.map(Self.dayLabel) ?? "—")"
         }
         return ([account.alias] + lines).joined(separator: "\n")
     }
