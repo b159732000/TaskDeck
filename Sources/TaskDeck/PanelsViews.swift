@@ -1523,28 +1523,59 @@ struct QuotaGrid: View {
     }
 
     /// "週 5d19h" / "月 4d10h": time left, not a weekday — it answers the
-    /// question directly — and the unit names the window. The exact day and
+    /// question directly — and the unit names the window. Under it, how far
+    /// through the window we are (a week, or the calendar month for 點數),
+    /// in a neutral grey so it never reads as a usage bar. The exact day and
     /// time stay in the row tooltip.
     private func resetCell(_ account: AppModel.QuotaAccount,
                            _ window: (bucket: AppModel.QuotaBucket, unit: String)?,
                            stale: Bool, now: Date) -> some View {
         let countdown = window?.bucket.resetsAt.flatMap { Self.remaining(until: $0, now: now) }
-        return HStack(spacing: 3) {
-            if account.error != nil {
-                Text("未登入")
-            } else if let window, let countdown {
-                Text(window.unit).foregroundStyle(Theme.text4)
-                Text(countdown).foregroundStyle(tint(window.bucket.percent)).monospacedDigit()
-            } else {
-                Text("—")
+        let elapsed = window.flatMap { w in
+            w.bucket.resetsAt.flatMap { Self.windowElapsed(unit: w.unit, resetsAt: $0, now: now) }
+        }
+        return VStack(alignment: .trailing, spacing: 2) {
+            HStack(spacing: 3) {
+                if account.error != nil {
+                    Text("未登入")
+                } else if let window, let countdown {
+                    Text(window.unit).foregroundStyle(Theme.text4)
+                    Text(countdown).foregroundStyle(tint(window.bucket.percent)).monospacedDigit()
+                } else {
+                    Text("—")
+                }
+            }
+            .font(Theme.Fonts.mono(9.5 * scale))
+            .foregroundStyle(Theme.text4)
+            .lineLimit(1)
+            .fixedSize()
+            if !compact, let elapsed {
+                GeometryReader { geo in
+                    ZStack(alignment: .leading) {
+                        Capsule().fill(Color.white.opacity(0.08))
+                        Capsule().fill(Color.white.opacity(0.32))
+                            .frame(width: max(0, geo.size.width * elapsed))
+                    }
+                }
+                .frame(height: 3)
+                .help(String(format: "這個%@窗口已過 %.0f%%", window?.unit ?? "", elapsed * 100))
             }
         }
-        .font(Theme.Fonts.mono(9.5 * scale))
-        .foregroundStyle(Theme.text4)
+        .frame(minWidth: 30, maxWidth: 72 * scale, alignment: .trailing)
         .opacity(stale ? 0.45 : 1)
         .gridColumnAlignment(.trailing)
-        .lineLimit(1)
-        .fixedSize()
+    }
+
+    /// Fraction of the window already behind us: a week back from the reset
+    /// for 週, a calendar month back for 月 (codex's spend limit resets on
+    /// the 1st, so the month's own length is the window).
+    static func windowElapsed(unit: String, resetsAt: Date, now: Date) -> Double? {
+        let calendar = Calendar.current
+        let start = unit == "月"
+            ? calendar.date(byAdding: .month, value: -1, to: resetsAt)
+            : calendar.date(byAdding: .day, value: -7, to: resetsAt)
+        guard let start, resetsAt > start else { return nil }
+        return min(1, max(0, now.timeIntervalSince(start) / resetsAt.timeIntervalSince(start)))
     }
 
     private static let clock: DateFormatter = {
