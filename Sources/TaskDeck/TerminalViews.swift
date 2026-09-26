@@ -1158,11 +1158,11 @@ private struct DividerHandle: View {
         Rectangle()
             .fill(Color.clear)
             .overlay(
-                RoundedRectangle(cornerRadius: 1)
-                    .fill(hovering || startRatio != nil ? Theme.accent.opacity(0.7) : Color.clear)
-                    .frame(width: axis == "h" ? 2 : nil, height: axis == "v" ? 2 : nil)
+                Capsule()
+                    .fill(hovering || startRatio != nil ? Theme.accent.opacity(0.8) : Theme.text4.opacity(0.5))
+                    .frame(width: axis == "h" ? 3 : 36, height: axis == "v" ? 3 : 36)
             )
-            .frame(width: axis == "h" ? 8 : nil, height: axis == "v" ? 8 : nil)
+            .frame(width: axis == "h" ? 10 : nil, height: axis == "v" ? 10 : nil)
             .contentShape(Rectangle())
             .onHover { h in
                 hovering = h
@@ -1185,6 +1185,35 @@ private struct DividerHandle: View {
                     }
                     .onEnded { _ in startRatio = nil }
             )
+    }
+}
+
+/// Status dot with an optional slow expanding ring — the only ambient motion
+/// in the app, reserved for "an AI CLI is open in this terminal".
+private struct PulseDot: View {
+    let color: SwiftUI.Color
+    let active: Bool
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var ringOn = false
+
+    var body: some View {
+        ZStack {
+            if active && !reduceMotion {
+                Circle()
+                    .stroke(color.opacity(ringOn ? 0 : 0.6), lineWidth: 1.5)
+                    .frame(width: ringOn ? 17 : 7, height: ringOn ? 17 : 7)
+            }
+            Circle().fill(color).frame(width: 7, height: 7)
+        }
+        .frame(width: 17, height: 17)
+        .onAppear(perform: restart)
+        .onChange(of: active) { _, _ in restart() }
+    }
+
+    private func restart() {
+        ringOn = false
+        guard active, !reduceMotion else { return }
+        withAnimation(.easeOut(duration: 1.8).repeatForever(autoreverses: false)) { ringOn = true }
     }
 }
 
@@ -1226,13 +1255,14 @@ struct PaneContainerView: View {
                 }
             }
         }
-        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.l, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 8)
-                .stroke(focused ? Theme.accent.opacity(0.65) : Theme.border,
+            RoundedRectangle(cornerRadius: Theme.Radius.l, style: .continuous)
+                .stroke(focused ? Theme.accent.opacity(0.55) : Theme.border,
                         lineWidth: focused ? 1.5 : 1)
         )
-        .padding(1)
+        .shadow(color: .black.opacity(0.30), radius: 10, y: 4)
+        .padding(2)
         .contentShape(Rectangle())
         .onTapGesture {
             session.focusedSpecID = specID
@@ -1242,14 +1272,22 @@ struct PaneContainerView: View {
 
     private var header: some View {
         HStack(spacing: 7) {
-            Circle()
-                .fill(info == nil ? Color.secondary.opacity(0.3)
-                    : (info!.running ? Color(hex: 0x8FCF7F) : Color(hex: 0xE8646E)))
-                .frame(width: 7, height: 7)
+            // Green = alive; teal + a slow ring = an AI CLI is open here;
+            // red = the pane exited.
+            let aiOpen = model.paneActivity[specID]?.kind == .ai
+            PulseDot(color: info == nil ? Theme.text4
+                        : (info!.running ? (aiOpen ? Theme.Lane.ai : Theme.good) : Theme.crit),
+                     active: aiOpen && info?.running == true)
             Text(spec?.title ?? "?")
-                .font(.system(size: 11 * model.uiScale, weight: .medium))
-                .foregroundStyle(.secondary)
+                .font(Theme.Fonts.ui(11 * model.uiScale, .semibold))
+                .foregroundStyle(Theme.text2)
                 .lineLimit(1)
+            if let sid = spec?.sessionID, spec?.kind == "ai" {
+                Text(sid.prefix(8))
+                    .font(Theme.Fonts.mono(9.5 * model.uiScale))
+                    .foregroundStyle(Theme.text4)
+                    .help(sid)
+            }
             // Account badge, clickable. Prefer the session's real account
             // (file location) over the spec's recorded team, which drifts when
             // a different claude was run in the pane. The menu lets you correct
@@ -1283,11 +1321,11 @@ struct PaneContainerView: View {
                     }
                 } label: {
                     Text(shown)
-                        .font(.system(size: 9, weight: .medium))
+                        .font(Theme.Fonts.mono(9.5, .semibold))
                         .foregroundStyle(Theme.accent)
-                        .padding(.horizontal, 5)
-                        .padding(.vertical, 1.5)
-                        .background(Theme.accent.opacity(0.14), in: Capsule())
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Theme.accent.opacity(0.14), in: RoundedRectangle(cornerRadius: 6))
                 }
                 .menuStyle(.borderlessButton)
                 .menuIndicator(.hidden)

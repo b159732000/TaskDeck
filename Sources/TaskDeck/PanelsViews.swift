@@ -758,11 +758,11 @@ struct StatusLineField: View {
         HStack(spacing: 6) {
             Image(systemName: "text.line.first.and.arrowtriangle.forward")
                 .font(.system(size: 9))
-                .foregroundStyle(.tertiary)
+                .foregroundStyle(Theme.text4)
             TextField("最新狀態…（例：等 QA；不打時間會自動加）", text: $text)
                 .textFieldStyle(.plain)
-                .font(.system(size: 11))
-                .foregroundStyle(Theme.accent)
+                .font(Theme.Fonts.ui(11.5))
+                .foregroundStyle(Theme.text2)
                 .focused($focused)
                 .onSubmit { commit() }
                 .onChange(of: focused) { f in if !f { commit() } }
@@ -815,6 +815,12 @@ struct TaskDetailView: View {
     /// keeps its width across task switches, app relaunches and new tasks.
     @AppStorage("notesColumnWidth") private var notesWidth: Double = 380
 
+    /// 向右 only when the stage is wide enough for two readable columns;
+    /// otherwise stack, which is what a 14" screen wants.
+    private func updateSplitAxis(stage: CGSize) {
+        session.preferredSplitAxis = stage.width >= 1200 || stage.height < 560 ? "h" : "v"
+    }
+
     private func primaryChipText(primary: String?, active: String?) -> String {
         switch (primary, active) {
         case let (p?, a?) where p != a: return "主力 \(p) · 現用 \(a)"
@@ -828,8 +834,10 @@ struct TaskDetailView: View {
         VStack(spacing: 0) {
             HStack(spacing: 10) {
                 Text(slug)
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(Theme.Fonts.display(22, .bold))
+                    .foregroundStyle(Theme.text)
                     .lineLimit(1)
+                    .minimumScaleFactor(0.7)
                 // 主力＝配額之家（手動指定）；現用＝最近有動靜的帳號（自動
                 // 偵測、只顯示不改寫）。不一致時亮橘提醒，點 chip 一鍵接管。
                 // Always shown so a shell-only task (no AI pane) can still be
@@ -838,7 +846,7 @@ struct TaskDetailView: View {
                 let active = model.activeTeam(session.slug)
                 let unset = primary == nil && active == nil
                 let mismatch = active != nil && primary != nil && active != primary
-                let tint = mismatch ? Color.orange : (unset ? Color.secondary : Theme.accent)
+                let tint = mismatch ? Theme.warn : (unset ? Theme.text3 : Theme.accent)
                 Menu {
                     if let active, mismatch {
                         Button("改立 \(active) 為主力") { session.setPrimaryTeam(active) }
@@ -861,29 +869,51 @@ struct TaskDetailView: View {
                     }
                 } label: {
                     Text(primaryChipText(primary: primary, active: active))
-                        .font(.system(size: 10))
+                        .font(Theme.Fonts.mono(10, .medium))
                         .foregroundStyle(tint)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 3)
                         .background(tint.opacity(0.14), in: Capsule())
                 }
                 .menuStyle(.borderlessButton)
                 .menuIndicator(.hidden)
                 .fixedSize()
                 .help("主力＝任務的配額之家（手動指定）；現用＝最近有動靜的帳號（自動偵測）。點擊可改主力。")
+                // Where the task sits right now, and any service still running
+                // in one of its panes — the two things a glance at the header
+                // should answer without looking at the sidebar.
+                if let task = model.tasks.first(where: { $0.id == slug }) {
+                    let group = model.sidebarGroup(task)
+                    Text(SidebarView.laneName(group))
+                        .font(Theme.Fonts.ui(10, .semibold))
+                        .foregroundStyle(Theme.laneColor(group))
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 3)
+                        .background(Theme.laneColor(group).opacity(0.14), in: Capsule())
+                }
+                ForEach(Array(model.services(slug).prefix(2).enumerated()), id: \.offset) { _, svc in
+                    Text("▶ \(svc.label) · \(activityDuration(svc.runningFor))")
+                        .font(Theme.Fonts.mono(10, .medium))
+                        .foregroundStyle(Theme.good)
+                        .lineLimit(1)
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 3)
+                        .background(Theme.good.opacity(0.14), in: Capsule())
+                }
                 Spacer()
                 ResourceMenu()
                 NewPaneMenu(labelStyle: .toolbar)
                     .menuStyle(.borderlessButton)
                     .fixedSize()
             }
-            .padding(.horizontal, 12)
-            .frame(height: 36)
+            .padding(.horizontal, 16)
+            .padding(.top, 10)
+            .padding(.bottom, 4)
 
             // Editable one-line status — shows under the sidebar title too.
             StatusLineField()
-                .padding(.horizontal, 12)
-                .padding(.bottom, 6)
+                .padding(.horizontal, 16)
+                .padding(.bottom, 8)
 
             Rectangle().fill(Theme.border).frame(height: 1)
 
@@ -898,6 +928,10 @@ struct TaskDetailView: View {
                 HStack(spacing: 0) {
                     TerminalGridView()
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .onAppear { updateSplitAxis(stage: CGSize(width: total - clamped, height: Double(geo.size.height))) }
+                        .onChange(of: geo.size) { _, size in
+                            updateSplitAxis(stage: CGSize(width: Double(size.width) - clamped, height: Double(size.height)))
+                        }
                     // 邊界與顯示 clamp 同一組，拖曳才會跟手（見 handle 註解）。
                     ColumnDividerHandle(width: $notesWidth, total: geo.size.width,
                                         minW: notesMin, maxW: maxNotes)
@@ -930,9 +964,9 @@ struct ColumnDividerHandle: View {
         Rectangle()
             .fill(Color.clear)
             .overlay(
-                RoundedRectangle(cornerRadius: 1)
-                    .fill(hovering || startWidth != nil ? Theme.accent.opacity(0.7) : Color.clear)
-                    .frame(width: 2)
+                Capsule()
+                    .fill(hovering || startWidth != nil ? Theme.accent.opacity(0.8) : Theme.text4.opacity(0.5))
+                    .frame(width: 3, height: 36)
             )
             .frame(width: 8)
             .contentShape(Rectangle())
@@ -1080,8 +1114,8 @@ struct NotesColumn: View {
         VStack(spacing: 0) {
             HStack(spacing: 8) {
                 Text("筆記")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(.secondary)
+                    .font(Theme.Fonts.display(12, .semibold))
+                    .foregroundStyle(Theme.text2)
                 Spacer()
                 // 筆記欄標頭統一用 HeaderIconButton 尺寸；「在 Finder 顯示」
                 // 使用頻率低、撤出標頭（側邊欄右鍵選單仍有）。

@@ -123,6 +123,17 @@ final class AppModel: ObservableObject {
         if let raw = UserDefaults.standard.dictionary(forKey: "ackedAI") as? [String: Double] {
             ackedAI = raw.mapValues { Date(timeIntervalSince1970: $0) }
         }
+        // Night Lane became the factory look with the redesign. Users still on
+        // the old factory preset move once; a preset chosen on purpose stays,
+        // and 外觀設定 still lists every preset. (init: observers do not fire.)
+        if UserDefaults.standard.object(forKey: "nightLaneMigrated") == nil {
+            UserDefaults.standard.set(true, forKey: "nightLaneMigrated")
+            if bgPresetIndex == 0 {
+                bgPresetIndex = Theme.defaultPresetIndex
+                UserDefaults.standard.set(bgPresetIndex, forKey: "bgPresetIndex")
+                Theme.bgPresetIndex = bgPresetIndex
+            }
+        }
         rescan()
         Task { @MainActor [weak self] in
             self?.clearPriorityAlertSystemNotification()
@@ -1955,6 +1966,10 @@ final class TaskSession: ObservableObject {
         }
     }
 
+    /// Which way "加一個終端" splits: set by TaskDetailView from the stage
+    /// size (向下 on a laptop, 向右 once the stage is ≥ 1200 pt wide).
+    var preferredSplitAxis = "v"
+
     private func add(_ spec: PaneSpec, side: Bool = false) {
         var spec = spec
         if side { spec.location = "side" }
@@ -1963,9 +1978,9 @@ final class TaskSession: ObservableObject {
             // Side panes never enter the grid's split tree.
             if let layout = machine.layout {
                 if let f = focusedSpecID, LayoutOps.contains(layout, f) {
-                    machine.layout = LayoutOps.insertSplit(layout, target: f, axis: "h", newPane: spec.id)
+                    machine.layout = LayoutOps.insertSplit(layout, target: f, axis: preferredSplitAxis, newPane: spec.id)
                 } else {
-                    machine.layout = .split(axis: "h", ratio: 0.5, a: layout, b: .pane(spec.id))
+                    machine.layout = .split(axis: preferredSplitAxis, ratio: 0.5, a: layout, b: .pane(spec.id))
                 }
             } else {
                 machine.layout = .pane(spec.id)
