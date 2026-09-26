@@ -35,6 +35,37 @@ unix socket ↔ `taskdeckd` (owns every PTY). Public, source-available repo
   `remove <paneID>`. Clean up panes you created; every other pane in
   `list` belongs to the user — do not touch.
 
+## Seeing the UI without a screenshot permission
+
+The GUI renders its own windows on request — no Screen Recording grant, no
+focus change, safe while the user keeps working:
+
+```sh
+touch "$HOME/Library/Application Support/TaskDeck/snapshots/request"
+# → snapshots/<stamp>-main.png (+ task-<slug>.png per popout) and latest.json
+```
+
+`latest.json` lists window frames, which bundled font families resolved,
+the active background preset, and per-List row counts (so an empty sidebar
+in the PNG can be told from a capture miss). Metal terminal cells are drawn
+through the layer tree; List rows through `cacheDisplay`. See
+`SnapshotService.swift`. Prefer this over `screencapture`, which fails from
+a pane-hosted shell without a TCC grant.
+
+Relaunching the GUI while the user is active: `Scripts/dev.sh` quits and
+reopens the window (2–3 s). If the user may be typing in JamesDesk, gate it
+on idleness (front app not JamesDesk, or ≥ 90 s without input) rather than
+interrupting them.
+
+## Design tokens (Night Lane)
+
+`Theme.swift` is the single source: lane colours (`Theme.Lane`, one
+saturated hue per sidebar lane), semantic `good/warn/crit`, the text ramp
+`text…text4`, `Radius`, and the three type voices `Theme.Fonts.display /
+ui / mono` (Bricolage Grotesque / Instrument Sans / JetBrains Mono, bundled
+under `Support/Fonts`, registered via `ATSApplicationFontsPath`). Use those
+instead of `.system(size:)` and literal colours in new UI.
+
 ## Conventions
 
 - Code comments in English. Design tokens live in
