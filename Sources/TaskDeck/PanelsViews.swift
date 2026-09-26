@@ -1297,6 +1297,15 @@ struct QuotaGrid: View {
     ]
 
     var body: some View {
+        // Fill the column when the grid's minimum fits; otherwise scroll
+        // sideways rather than clip the reset column.
+        ViewThatFits(in: .horizontal) {
+            grid
+            ScrollView(.horizontal, showsIndicators: false) { grid }
+        }
+    }
+
+    private var grid: some View {
         Grid(alignment: .leading, horizontalSpacing: 6, verticalSpacing: compact ? 3 : 6) {
             GridRow {
                 Text("帳號").gridColumnAlignment(.leading)
