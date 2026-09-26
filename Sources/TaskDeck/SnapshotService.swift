@@ -65,9 +65,14 @@ final class SnapshotService {
         let stamp = Self.stampFormatter.string(from: Date())
         var windows: [[String: Any]] = []
 
-        for window in NSApp.windows where window.isVisible {
+        var used: Set<String> = []
+        // Tooltips and popovers are visible windows too (a hovered .help
+        // once wrote a 250×89 "main.png" over the real one); only document
+        // level windows are the UI being verified.
+        for window in NSApp.windows where window.isVisible && window.level == .normal {
             guard let view = window.contentView, view.bounds.width > 0, view.bounds.height > 0 else { continue }
-            let name = Self.shortName(window)
+            var name = Self.shortName(window)
+            if !used.insert(name).inserted { name += "-\(used.count)" }
             guard let image = render(view) else { continue }
             let file = directory.appendingPathComponent("\(stamp)-\(name).png")
             try? image.write(to: file)
