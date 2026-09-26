@@ -1237,10 +1237,12 @@ struct QuotaGrid: View {
             .foregroundStyle(Theme.text4)
             ForEach(accounts) { account in
                 GridRow(alignment: .center) {
-                    Text(account.alias)
+                    Text(Self.shortAlias(account.alias))
                         .font(Theme.Fonts.mono(10.5 * scale, .medium))
                         .foregroundStyle(account.error == nil ? Theme.text2 : Theme.text4)
                         .lineLimit(1)
+                        .fixedSize()
+                        .help(account.alias)
                     ForEach(Self.columns, id: \.title) { column in
                         if let bucket = bucket(account, column.match) {
                             cell(bucket)
@@ -1294,11 +1296,21 @@ struct QuotaGrid: View {
         let f = DateFormatter(); f.dateFormat = "HH:mm"; return f
     }()
     private static let weekday: DateFormatter = {
-        let f = DateFormatter(); f.locale = Locale(identifier: "zh_Hant_TW"); f.dateFormat = "EEEEE HH:mm"; return f
+        // "週一 08:00" — a bare 一 in a mono face reads as a dash.
+        let f = DateFormatter(); f.locale = Locale(identifier: "zh_Hant_TW"); f.dateFormat = "EEE HH:mm"; return f
     }()
 
+    /// "claude-ext2" → "ext2": the column is narrow and every row is a claude
+    /// account unless it says otherwise; the full alias is in the tooltip.
+    static func shortAlias(_ alias: String) -> String {
+        alias.hasPrefix("claude-") ? String(alias.dropFirst("claude-".count)) : alias
+    }
+
+    /// The tightest window that actually resets (credits have no reset date).
     private func resetText(_ account: AppModel.QuotaAccount) -> String {
-        guard let reset = tightest(account)?.resetsAt else { return account.error == nil ? "—" : "未登入" }
+        if account.error != nil { return "未登入" }
+        guard let reset = account.buckets.values
+            .filter({ $0.resetsAt != nil }).max(by: { $0.percent < $1.percent })?.resetsAt else { return "—" }
         return reset.timeIntervalSinceNow < 20 * 3600
             ? Self.clock.string(from: reset) : Self.weekday.string(from: reset)
     }

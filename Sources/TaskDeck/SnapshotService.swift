@@ -77,6 +77,13 @@ final class SnapshotService {
                 "file": file.lastPathComponent,
                 "frame": [Int(frame.origin.x), Int(frame.origin.y), Int(frame.width), Int(frame.height)],
                 "scale": window.backingScaleFactor,
+                // List rows: count + visible count, so an empty sidebar in the
+                // PNG can be told apart from a capture miss.
+                "tables": Self.tables(in: view).map { table -> [String: Any] in
+                    let visible = table.rows(in: table.visibleRect)
+                    return ["rows": table.numberOfRows, "visible": visible.length,
+                            "frame": [Int(table.frame.width), Int(table.frame.height)]]
+                },
             ])
         }
 
@@ -99,6 +106,16 @@ final class SnapshotService {
         try? data.write(to: latest)
         try? data.write(to: directory.appendingPathComponent("\(stamp).json"))
         return latest
+    }
+
+    private static func tables(in root: NSView) -> [NSTableView] {
+        var found: [NSTableView] = []
+        var stack: [NSView] = [root]
+        while let view = stack.popLast() {
+            if let table = view as? NSTableView { found.append(table) }
+            stack.append(contentsOf: view.subviews)
+        }
+        return found
     }
 
     /// "main" for the app window, "task-<slug>" for a popout; the SwiftUI
@@ -142,6 +159,14 @@ final class SnapshotService {
         } else if let rep = view.bitmapImageRepForCachingDisplay(in: bounds) {
             view.cacheDisplay(in: bounds, to: rep)
             rep.draw(in: NSRect(origin: .zero, size: bounds.size))
+        }
+        // SwiftUI List rows (NSTableView cells) do not come through the layer
+        // render; draw each table on top through the drawRect path.
+        for table in Self.tables(in: view) {
+            guard let rep = table.bitmapImageRepForCachingDisplay(in: table.bounds) else { continue }
+            table.cacheDisplay(in: table.bounds, to: rep)
+            let inWindow = table.convert(table.bounds, to: nil) // window coords, y-up
+            rep.draw(in: inWindow)
         }
         context.flushGraphics()
         return canvas.representation(using: .png, properties: [:])
