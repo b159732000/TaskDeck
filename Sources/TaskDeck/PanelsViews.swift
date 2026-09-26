@@ -993,6 +993,47 @@ struct ColumnDividerHandle: View {
     }
 }
 
+/// Draggable divider between stacked sections of the notes column. The
+/// section BELOW the handle grows when dragging up. A stored height of 0
+/// means "natural"; the first drag starts from `fallback`. Double-click
+/// restores the default.
+struct RowDividerHandle: View {
+    @Binding var height: Double
+    var fallback: Double
+    var minH: Double = 60
+    var maxH: Double = 600
+    var reset: () -> Void
+    @State private var start: Double?
+    @State private var hovering = false
+
+    var body: some View {
+        Rectangle()
+            .fill(Color.clear)
+            .overlay(
+                Capsule()
+                    .fill(hovering || start != nil ? Theme.accent.opacity(0.8) : Theme.text4.opacity(0.5))
+                    .frame(width: 36, height: 3)
+            )
+            .frame(height: 10)
+            .contentShape(Rectangle())
+            .onHover { h in
+                hovering = h
+                if h { NSCursor.resizeUpDown.push() } else { NSCursor.pop() }
+            }
+            .gesture(
+                DragGesture(minimumDistance: 1, coordinateSpace: .global)
+                    .onChanged { v in
+                        if start == nil { start = height > 0 ? height : fallback }
+                        let next = (start ?? fallback) - Double(v.translation.height)
+                        height = min(max(minH, next), maxH)
+                    }
+                    .onEnded { _ in start = nil }
+            )
+            .onTapGesture(count: 2) { reset() }
+            .help("拖曳調整高度；雙擊回預設")
+    }
+}
+
 /// Icon-only lifecycle switches inlined on the SELECTED sidebar row —
 /// same row height as every other row, so rapid top-down triage never
 /// misclicks from layout shift.（危險動作留在右鍵選單。）
@@ -1113,6 +1154,10 @@ struct NewPaneMenu: View {
 struct NotesColumn: View {
     @EnvironmentObject var model: AppModel
     @EnvironmentObject var session: TaskSession
+    /// Remembered section heights, global like the column width: the small
+    /// terminals block and the quota block. 0 = the quota's natural height.
+    @AppStorage("sidePanesHeight") private var sidePanesHeight: Double = 232
+    @AppStorage("quotaContentHeight") private var quotaContentHeight: Double = 0
 
     var body: some View {
         VStack(spacing: 0) {
@@ -1152,7 +1197,12 @@ struct NotesColumn: View {
             // grid so they never steal split space from the big panes.
             let sideIDs = session.sidePaneIDs
             if !sideIDs.isEmpty {
-                Rectangle().fill(Theme.border).frame(height: 1)
+                // Drag the handle up to give the small terminals more room;
+                // double-click restores the default. Each terminal keeps its
+                // 220 pt and the block scrolls when there are several.
+                RowDividerHandle(height: $sidePanesHeight, fallback: 232, minH: 120, maxH: 640) {
+                    sidePanesHeight = 232
+                }
                 ScrollView {
                     VStack(spacing: 6) {
                         ForEach(sideIDs, id: \.self) { id in
@@ -1162,20 +1212,24 @@ struct NotesColumn: View {
                     }
                     .padding(6)
                 }
-                .frame(maxHeight: sideIDs.count == 1 ? 232 : 458)
+                .frame(height: CGFloat(sidePanesHeight))
             }
 
             if model.config.quotaCommand != nil {
-                Rectangle().fill(Theme.border).frame(height: 1)
-                QuotaFooterView()
+                let natural = QuotaGrid.naturalHeight(rows: max(3, model.quotaAccounts.count),
+                                                      scale: model.uiScale, compact: false)
+                RowDividerHandle(height: $quotaContentHeight, fallback: natural, minH: 44, maxH: 520) {
+                    quotaContentHeight = 0
+                }
+                QuotaFooterView(contentHeight: quotaContentHeight > 0 ? quotaContentHeight : nil)
             }
         }
         .background(Theme.panelBG)
-        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.l, style: .continuous))
         // 筆記為焦點區時整欄外框高亮（與 terminal pane 的高亮互斥）。
         .overlay(
-            RoundedRectangle(cornerRadius: 8)
-                .stroke(session.focusZone == .notes ? Theme.accent.opacity(0.65) : Theme.border,
+            RoundedRectangle(cornerRadius: Theme.Radius.l, style: .continuous)
+                .stroke(session.focusZone == .notes ? Theme.accent.opacity(0.55) : Theme.border,
                         lineWidth: session.focusZone == .notes ? 1.5 : 1)
         )
         .padding(.vertical, 8)
@@ -1222,6 +1276,17 @@ struct HeaderIconButton: View {
 struct QuotaGrid: View {
     let accounts: [AppModel.QuotaAccount]
     let scale: Double
+    /// Squeezed: no bars, half the row spacing — every number stays.
+    var compact = false
+
+    /// Height the grid wants (including its 8 pt paddings) for `rows`
+    /// accounts, so the section can decide between full, compact and
+    /// scrolling. Row: text ~13 pt + bar 5 pt + spacing.
+    static func naturalHeight(rows: Int, scale: Double, compact: Bool) -> Double {
+        let header = 14 * scale + (compact ? 3 : 6)
+        let row = compact ? 13 * scale + 3 : 18 * scale + 6
+        return 16 + header + Double(rows) * row
+    }
 
     private static let columns: [(title: String, match: (String) -> Bool)] = [
         ("5h", { $0.lowercased().contains("5h") }),
@@ -1232,7 +1297,7 @@ struct QuotaGrid: View {
 
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
-        Grid(alignment: .leading, horizontalSpacing: 6, verticalSpacing: 6) {
+        Grid(alignment: .leading, horizontalSpacing: 6, verticalSpacing: compact ? 3 : 6) {
             GridRow {
                 Text("帳號").gridColumnAlignment(.leading)
                 ForEach(Self.columns, id: \.title) { Text($0.title) }
@@ -1278,14 +1343,16 @@ struct QuotaGrid: View {
                 .font(Theme.Fonts.mono(10.5 * scale, .medium))
                 .foregroundStyle(tint(bucket.percent))
                 .monospacedDigit()
-            GeometryReader { geo in
-                ZStack(alignment: .leading) {
-                    Capsule().fill(Color.white.opacity(0.08))
-                    Capsule().fill(tint(bucket.percent))
-                        .frame(width: max(0, geo.size.width * min(1, Double(bucket.percent) / 100)))
+            if !compact {
+                GeometryReader { geo in
+                    ZStack(alignment: .leading) {
+                        Capsule().fill(Color.white.opacity(0.08))
+                        Capsule().fill(tint(bucket.percent))
+                            .frame(width: max(0, geo.size.width * min(1, Double(bucket.percent) / 100)))
+                    }
                 }
+                .frame(height: 3)
             }
-            .frame(height: 3)
         }
         .frame(minWidth: 30)
     }
@@ -1333,6 +1400,10 @@ struct QuotaGrid: View {
 
 struct QuotaFooterView: View {
     @EnvironmentObject var model: AppModel
+    /// nil = natural height. When the user drags the section shorter the grid
+    /// degrades in two steps — first compact (bars off, tighter rows), then a
+    /// vertical scroll — so no account ever drops off the bottom.
+    var contentHeight: Double? = nil
     @AppStorage("quotaExpanded") private var expanded = true
     /// 額度表的獨立縮放（疊在全局 uiScale 之上）：右欄變窄（小螢幕給主終端
     /// 讓位）時，把表縮小到塞得下。
@@ -1385,9 +1456,21 @@ struct QuotaFooterView: View {
 
             if expanded {
                 if !model.quotaAccounts.isEmpty {
-                    QuotaGrid(accounts: model.quotaAccounts, scale: model.uiScale * quotaScale)
+                    let scale = model.uiScale * quotaScale
+                    let rows = model.quotaAccounts.count
+                    let full = QuotaGrid.naturalHeight(rows: rows, scale: scale, compact: false)
+                    let compactH = QuotaGrid.naturalHeight(rows: rows, scale: scale, compact: true)
+                    let height = contentHeight ?? full
+                    let compact = height < full - 1
+                    let grid = QuotaGrid(accounts: model.quotaAccounts, scale: scale, compact: compact)
                         .padding(.horizontal, 12)
                         .padding(.vertical, 8)
+                    if height < compactH - 1 {
+                        ScrollView(.vertical, showsIndicators: false) { grid }
+                            .frame(height: height)
+                    } else {
+                        grid.frame(height: height, alignment: .top)
+                    }
                 } else {
                     ScrollView([.horizontal, .vertical], showsIndicators: false) {
                         Text(AnsiRenderer.render(model.quotaText.isEmpty ? "（讀取中…）" : model.quotaText,
@@ -1397,7 +1480,7 @@ struct QuotaFooterView: View {
                             .padding(.horizontal, 12)
                             .padding(.vertical, 8)
                     }
-                    .frame(height: quotaHeight)
+                    .frame(height: contentHeight.map { CGFloat($0) } ?? quotaHeight)
                 }
             }
         }
