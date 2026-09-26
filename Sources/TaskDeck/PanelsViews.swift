@@ -1399,8 +1399,8 @@ struct QuotaGrid: View {
                               : "")
                 }
                 Color.clear.frame(width: 1)
-                Text("週重置").gridColumnAlignment(.trailing)
-                    .help("週額度（週 / Fable 共用同一個窗口）還有多久重置；codex / opencode 是它們唯一的那個窗口。確切的日期時間在列的提示裡；5h 窗口的倒數在 5h 那格。")
+                Text("重置").gridColumnAlignment(.trailing)
+                    .help("長窗口還有多久重置。週 = 週額度（週 / Fable 共用同一個窗口；opencode 的週預算也是）、月 = 月額度（codex 的點數）。確切的日期時間在列的提示裡；5h 窗口的倒數在 5h 那格。")
             }
             .font(Theme.Fonts.mono(9 * scale))
             .foregroundStyle(Theme.text4)
@@ -1434,7 +1434,7 @@ struct QuotaGrid: View {
                     // A hairline keeps the reset column from reading as part
                     // of the 點數 column, which is mostly "—".
                     Rectangle().fill(Theme.border).frame(width: 1).frame(maxHeight: .infinity)
-                    resetCell(account, Self.weeklyBucket(account.buckets), stale: stale, now: now)
+                    resetCell(account, Self.longWindow(account.buckets), stale: stale, now: now)
                 }
                 .help(rowHelp(account))
             }
@@ -1498,33 +1498,46 @@ struct QuotaGrid: View {
         return minutes >= 60 ? "\(minutes / 60)h\(minutes % 60)m" : "\(minutes)m"
     }
 
-    /// The longer window: the earliest-resetting one that is not the 5h
-    /// session. 週 and Fable share a reset, so the fuller of the two speaks
-    /// for it (its colour is what turns the cell red when Fable is spent).
-    /// codex / opencode have a single window; it lands here.
-    static func weeklyBucket(_ buckets: [String: AppModel.QuotaBucket]) -> AppModel.QuotaBucket? {
+    /// The long window: the earliest-resetting one that is not the 5h
+    /// session, with the unit it counts in. 週 and Fable share a reset, so
+    /// the fuller of the two speaks for it (its colour is what turns the
+    /// cell red when Fable is spent). Not every account's long window is a
+    /// week: codex's 點數 is a monthly spend limit, opencode's is a weekly
+    /// budget — the unit says which, instead of a header that lies for one.
+    static func longWindow(_ buckets: [String: AppModel.QuotaBucket])
+        -> (bucket: AppModel.QuotaBucket, unit: String)? {
         buckets
             .filter { !$0.key.lowercased().contains("5h") && $0.value.resetsAt != nil }
-            .map(\.value)
             .min { a, b in
-                a.resetsAt! != b.resetsAt! ? a.resetsAt! < b.resetsAt! : a.percent > b.percent
+                a.value.resetsAt! != b.value.resetsAt!
+                    ? a.value.resetsAt! < b.value.resetsAt! : a.value.percent > b.value.percent
             }
+            .map { ($0.value, $0.key.lowercased().contains("credit") ? "月" : "週") }
     }
 
-    /// Time left, not a weekday: "5d19h" answers the question directly; the
-    /// exact day and time stay in the row tooltip.
+    /// "週 5d19h" / "月 4d10h": time left, not a weekday — it answers the
+    /// question directly — and the unit names the window. The exact day and
+    /// time stay in the row tooltip.
     private func resetCell(_ account: AppModel.QuotaAccount,
-                           _ bucket: AppModel.QuotaBucket?, stale: Bool, now: Date) -> some View {
-        let text = account.error != nil ? "未登入"
-            : bucket?.resetsAt.flatMap { Self.remaining(until: $0, now: now) } ?? "—"
-        return Text(text)
-            .font(Theme.Fonts.mono(9.5 * scale))
-            .foregroundStyle(bucket.map { tint($0.percent) } ?? Theme.text4)
-            .monospacedDigit()
-            .opacity(stale ? 0.45 : 1)
-            .gridColumnAlignment(.trailing)
-            .lineLimit(1)
-            .fixedSize()
+                           _ window: (bucket: AppModel.QuotaBucket, unit: String)?,
+                           stale: Bool, now: Date) -> some View {
+        let countdown = window?.bucket.resetsAt.flatMap { Self.remaining(until: $0, now: now) }
+        return HStack(spacing: 3) {
+            if account.error != nil {
+                Text("未登入")
+            } else if let window, let countdown {
+                Text(window.unit).foregroundStyle(Theme.text4)
+                Text(countdown).foregroundStyle(tint(window.bucket.percent)).monospacedDigit()
+            } else {
+                Text("—")
+            }
+        }
+        .font(Theme.Fonts.mono(9.5 * scale))
+        .foregroundStyle(Theme.text4)
+        .opacity(stale ? 0.45 : 1)
+        .gridColumnAlignment(.trailing)
+        .lineLimit(1)
+        .fixedSize()
     }
 
     private static let clock: DateFormatter = {
