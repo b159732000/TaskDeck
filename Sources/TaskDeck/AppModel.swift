@@ -87,6 +87,11 @@ final class AppModel: ObservableObject {
     private let statusLoader = AIStatusLoader()
     private var statusReloadTask: Task<Void, Never>?
     private var statusReloadGeneration = 0
+    /// True once the hook status directory has been read at least once (by the
+    /// synchronous prime below or by an applied snapshot). Until then every
+    /// task looks silent no matter how recently its AI ran, so nothing that
+    /// judges silence may run.
+    private var hasAIStatusPicture = false
     /// Prevent a cold launch's first status snapshot from being mistaken for a
     /// new completion. It may restore a persisted quiet reminder, never pulse.
     private var hasLoadedAIStatusSnapshot = false
@@ -385,6 +390,7 @@ final class AppModel: ObservableObject {
         list.sort { (index[$0.id] ?? .max) < (index[$1.id] ?? .max) }
         let tasksChanged = tasks != list
         if tasksChanged { tasks = list }
+        primeAIStatusIfNeeded() // the FIRST frame must not render a signal-less sidebar
         refreshDerived() // sweep below must judge on FRESH derived state
         autoArchiveSweep()
         // A rename changes the task_key → current-slug mapping while an older
@@ -1275,6 +1281,11 @@ final class AppModel: ObservableObject {
     /// Runs on every rescan; idempotent (done tasks are skipped, the
     /// annotation is stamped once via the auto_archived frontmatter key).
     private func autoArchiveSweep() {
+        // Archiving rewrites the user's note and moves the task into 已完成, so
+        // it must never judge on a signal-less view of the world: before the
+        // status picture is loaded, a task parked months ago but worked on
+        // yesterday looks like it has been silent the whole time.
+        guard hasAIStatusPicture else { return }
         for t in tasks where t.status == "active" {
             guard sidebarGroup(t) == .semiArchived,
                   let quiet = silence(t), quiet > Self.autoDoneAfter else { continue }
@@ -1323,16 +1334,44 @@ final class AppModel: ObservableObject {
         statusWatcher = src
     }
 
+    /// task_key (permanent frontmatter uuid) → CURRENT slug. The slug the hook
+    /// recorded goes stale on rename; the uuid does not. Duplicated ids (a note
+    /// copied by hand) keep the first task rather than trapping.
+    private func taskKeyToSlug() -> [String: String] {
+        Dictionary(tasks.compactMap { task in task.permanentID.map { ($0, task.id) } },
+                   uniquingKeysWith: { first, _ in first })
+    }
+
+    /// Read the hook status files synchronously, once, before the first frame.
+    ///
+    /// Sidebar groups are signal-driven: with no status loaded, every task that
+    /// owes the user a review falls back to its manual frontmatter flag, so 等你
+    /// renders empty and its tasks sit in 待開工 / 已讀 / 等待外部 / 半封存. The
+    /// loader that fills this in is async and can only resume once the main
+    /// actor is free — at launch that is after the daemon handshake and the
+    /// terminal restores, i.e. long enough to see and act on the wrong groups.
+    /// The directory is a handful of small JSON files (all the expensive
+    /// transcript work stays on the async pass), so reading it here costs a few
+    /// ms and makes the first render already correct.
+    private func primeAIStatusIfNeeded() {
+        guard !hasAIStatusPicture else { return }
+        // An unreadable directory is transient: claim no picture and let the
+        // async loader (or the next rescan) establish it.
+        guard let scan = AIStatusFiles.scan(directory: Paths.statusDir,
+                                            keyToSlug: taskKeyToSlug(),
+                                            now: Date(),
+                                            signalWindow: Self.signalWindow) else { return }
+        aiStatus = scan.records.mapValues { AIStatusEntry(state: $0.state, ts: $0.ts) }
+        hookSessionsByTask = scan.sessionsByTask
+        hasAIStatusPicture = true
+    }
+
     private func scheduleAIStatusReload(after delay: TimeInterval = 0,
                                         includeTaskSources: Bool) {
         statusReloadGeneration &+= 1
         let generation = statusReloadGeneration
         statusReloadTask?.cancel()
-        // task_key (permanent frontmatter uuid) → CURRENT slug; the slug tag
-        // alone goes stale when a task is renamed mid-session.
-        let keyToSlug = Dictionary(uniqueKeysWithValues: tasks.compactMap { t in
-            t.permanentID.map { ($0, t.id) }
-        })
+        let keyToSlug = taskKeyToSlug()
         let loader = statusLoader
         let statusDirectory = Paths.statusDir
         let statusIDs = Set(aiStatus.keys)
@@ -1387,6 +1426,7 @@ final class AppModel: ObservableObject {
         // because the app was relaunched after that completion.
         let allowPriorityAlertTriggers = hasLoadedAIStatusSnapshot
         hasLoadedAIStatusSnapshot = true
+        hasAIStatusPicture = true
         if aiStatus != snapshot.statusBySession {
             aiStatus = snapshot.statusBySession
         }

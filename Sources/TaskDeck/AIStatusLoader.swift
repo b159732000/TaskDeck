@@ -52,20 +52,6 @@ actor AIStatusLoader {
         var accumulator = BackgroundTaskAccumulator()
     }
 
-    private struct StatusFile: Decodable {
-        let state: String
-        let ts: Double?
-        let task: String?
-        let taskKey: String?
-        let transcriptPath: String?
-
-        enum CodingKeys: String, CodingKey {
-            case state, ts, task
-            case taskKey = "task_key"
-            case transcriptPath = "transcript_path"
-        }
-    }
-
     private var transcriptProgress: [String: TranscriptProgress] = [:]
     private var transcriptActivityCache: [String: CachedTranscriptActivity] = [:]
 
@@ -73,41 +59,24 @@ actor AIStatusLoader {
               taskSourceRequests: [TaskAISourceRequest]?,
               transcriptRequests: [TranscriptActivityRequest],
               now: Date, signalWindow: TimeInterval) -> AIStatusSnapshot? {
-        let fm = FileManager.default
-        guard let files = try? fm.contentsOfDirectory(
-            at: directory, includingPropertiesForKeys: nil
-        ) else { return nil }
+        // Same read as AppModel's synchronous pre-first-frame prime, so the
+        // two can never disagree about what a status file means.
+        guard let scan = AIStatusFiles.scan(directory: directory, keyToSlug: keyToSlug,
+                                            now: now, signalWindow: signalWindow) else { return nil }
+        // Deleting aged-out files belongs on this (background) pass only: it is
+        // a write in the watched directory, and doing it before the first frame
+        // would immediately re-trigger the reload it is supposed to feed.
+        for file in scan.expired { try? FileManager.default.removeItem(at: file) }
 
-        var statuses: [String: AIStatusEntry] = [:]
-        var byTask: [String: Set<String>] = [:]
+        var statuses = scan.records.mapValues { AIStatusEntry(state: $0.state, ts: $0.ts) }
+        let byTask = scan.sessionsByTask
         var backgroundTasks: [String: Int] = [:]
         var liveTranscriptPaths = Set<String>()
-        let decoder = JSONDecoder()
-
-        for file in files where file.pathExtension == "json" {
-            guard let data = try? Data(contentsOf: file),
-                  let record = try? decoder.decode(StatusFile.self, from: data) else { continue }
-            let sid = file.deletingPathExtension().lastPathComponent.lowercased()
-            let timestamp = record.ts.map(Date.init(timeIntervalSince1970:)) ?? .distantPast
-            if now.timeIntervalSince(timestamp) > signalWindow {
-                try? fm.removeItem(at: file)
-                continue
-            }
-            statuses[sid] = AIStatusEntry(state: record.state, ts: timestamp)
-            let slug: String?
-            if let key = record.taskKey, let currentSlug = keyToSlug[key] {
-                slug = currentSlug
-            } else {
-                slug = record.task?.isEmpty == false ? record.task : nil
-            }
-            if let slug { byTask[slug, default: []].insert(sid) }
-
-            if record.state != "ended",
-               let path = record.transcriptPath, !path.isEmpty {
-                liveTranscriptPaths.insert(path)
-                let count = backgroundTaskCount(at: path)
-                if count > 0 { backgroundTasks[sid] = count }
-            }
+        for (sid, record) in scan.records {
+            guard let path = record.transcriptPath else { continue }
+            liveTranscriptPaths.insert(path)
+            let count = backgroundTaskCount(at: path)
+            if count > 0 { backgroundTasks[sid] = count }
         }
         transcriptProgress = transcriptProgress.filter { liveTranscriptPaths.contains($0.key) }
 

@@ -796,6 +796,70 @@ check("ack: genuinely newer AI signal resurfaces to 等你",
           ),
       ]) == .needsYou)
 
+// MARK: hook status directory — the read that feeds grouping (sync prime + async loader)
+
+let statusTemp = FileManager.default.temporaryDirectory
+    .appendingPathComponent("taskdeck-selftest-status-\(UUID().uuidString)")
+try? FileManager.default.createDirectory(at: statusTemp, withIntermediateDirectories: true)
+
+let statusWindow: TimeInterval = 7 * 24 * 3600
+let statusNow = Date()
+func writeStatus(_ name: String, _ json: String) {
+    try? json.data(using: .utf8)?
+        .write(to: statusTemp.appendingPathComponent(name), options: .atomic)
+}
+func epoch(_ agoSec: TimeInterval) -> String {
+    String(format: "%.0f", statusNow.addingTimeInterval(-agoSec).timeIntervalSince1970)
+}
+
+writeStatus("AABBCCDD-0000-0000-0000-000000000001.json", """
+{"state":"waiting","ts":\(epoch(60)),"task_key":"key-renamed","task":"old-slug",
+ "transcript_path":"/tmp/live.jsonl"}
+""")
+writeStatus("aabbccdd-0000-0000-0000-000000000002.json", """
+{"state":"ended","ts":\(epoch(120)),"task":"plain-slug","transcript_path":"/tmp/done.jsonl"}
+""")
+writeStatus("aabbccdd-0000-0000-0000-000000000003.json", """
+{"state":"waiting","ts":\(epoch(statusWindow + 600)),"task":"ancient"}
+""")
+writeStatus("aabbccdd-0000-0000-0000-000000000004.json", "{ not json at all")
+writeStatus("notes.txt", "ignored, not a status file")
+
+let statusScan = AIStatusFiles.scan(directory: statusTemp,
+                                    keyToSlug: ["key-renamed": "current-slug"],
+                                    now: statusNow, signalWindow: statusWindow)
+let live = "aabbccdd-0000-0000-0000-000000000001"
+let ended = "aabbccdd-0000-0000-0000-000000000002"
+check("status-dir: an unreadable directory is nil, never an empty scan",
+      AIStatusFiles.scan(directory: statusTemp.appendingPathComponent("missing"),
+                         keyToSlug: [:], now: statusNow, signalWindow: statusWindow) == nil)
+check("status-dir: fresh records survive, sid comes from the filename lowercased",
+      statusScan?.records[live]?.state == "waiting")
+check("status-dir: a corrupt file is skipped without losing its neighbours",
+      statusScan?.records.count == 2)
+check("status-dir: task_key wins over the slug the hook recorded",
+      statusScan?.sessionsByTask["current-slug"] == [live]
+      && statusScan?.sessionsByTask["old-slug"] == nil)
+check("status-dir: a session without task_key keeps its recorded slug",
+      statusScan?.sessionsByTask["plain-slug"] == [ended])
+check("status-dir: only a live session carries a transcript to follow",
+      statusScan?.records[live]?.transcriptPath == "/tmp/live.jsonl"
+      && statusScan?.records[ended]?.transcriptPath == nil)
+check("status-dir: an aged-out signal is reported, not returned as a signal",
+      statusScan?.expired.count == 1
+      && statusScan?.expired.first?.lastPathComponent
+          == "aabbccdd-0000-0000-0000-000000000003.json")
+check("status-dir: scanning never writes — deleting expired files is the caller's job",
+      FileManager.default.fileExists(
+          atPath: statusTemp.appendingPathComponent(
+              "aabbccdd-0000-0000-0000-000000000003.json").path))
+check("status-dir: an unmatched task_key still falls back to the recorded slug",
+      AIStatusFiles.slug(for: "unknown-key", task: "recorded", keyToSlug: [:]) == "recorded")
+check("status-dir: no attribution at all stays unattributed",
+      AIStatusFiles.slug(for: nil, task: "", keyToSlug: [:]) == nil)
+
+try? FileManager.default.removeItem(at: statusTemp)
+
 // MARK: priority alert — only the unseen mainline AI-running → needs-you edge
 
 check("priority-alert: mainline AI completion triggers",
