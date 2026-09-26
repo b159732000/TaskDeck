@@ -79,16 +79,14 @@ struct SidebarView: View {
                 sidebarSection(isExpanded: $needsYouExpanded) {
                     ForEach(needsYou) { row($0, group: .needsYou) }
                 } header: {
-                    Text("等你（\(needsYou.count)）")
-                        .font(.system(size: 11, weight: .bold))
-                        .foregroundStyle(Theme.accent)
+                    laneHeader(.needsYou, needsYou.count, owedText(needsYou))
                 }
             }
             if !aiRunning.isEmpty {
                 sidebarSection(isExpanded: $aiRunningExpanded) {
                     ForEach(aiRunning) { row($0, group: .aiRunning) }
                 } header: {
-                    Text("AI 執行中（\(aiRunning.count)）")
+                    laneHeader(.aiRunning, aiRunning.count, accountsText(aiRunning))
                 }
             }
             if !idle.isEmpty || !searchActive {
@@ -102,35 +100,35 @@ struct SidebarView: View {
                             }
                     }
                 } header: {
-                    Text("待開工（\(idle.count)）")
+                    laneHeader(.idle, idle.count, "")
                 }
             }
             if !read.isEmpty {
                 sidebarSection(isExpanded: $readExpanded) {
                     ForEach(read) { row($0, group: .read) }
                 } header: {
-                    Text("已讀（看過待回，\(read.count)）")
+                    laneHeader(.read, read.count, "看過待回")
                 }
             }
             if !waiting.isEmpty {
                 sidebarSection(isExpanded: $waitingExpanded) {
                     ForEach(waiting) { row($0, group: .waitingExt) }
                 } header: {
-                    Text("等待外部（\(waiting.count)）")
+                    laneHeader(.waitingExt, waiting.count, "同事 / CI")
                 }
             }
             if !semi.isEmpty {
                 sidebarSection(isExpanded: $sunkExpanded) {
                     ForEach(semi) { row($0, group: .semiArchived) }
                 } header: {
-                    Text("半封存 >3 天（\(semi.count)）")
+                    laneHeader(.semiArchived, semi.count, ">3 天")
                 }
             }
             if !done.isEmpty {
                 sidebarSection(isExpanded: $doneExpanded) {
                     ForEach(done) { row($0, group: .done) }
                 } header: {
-                    Text("已完成（\(done.count)）")
+                    laneHeader(.done, done.count, "")
                 }
             }
             if searchActive && visibleTasks.isEmpty {
@@ -143,23 +141,11 @@ struct SidebarView: View {
             searchHeader(resultCount: visibleTasks.count)
         }
         .safeAreaInset(edge: .bottom) {
-            VStack(spacing: 6) {
-                if model.activityTotals.panes > 0 { ActivitySummaryView() }
-                HStack {
-                    Button {
-                        model.newTask()
-                    } label: {
-                        Label("新任務", systemImage: "plus")
-                            .font(.system(size: 12, weight: .medium))
-                    }
-                    .buttonStyle(.borderless)
-                    Spacer()
-                    DaemonStatusView()
-                }
-            }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 8)
-            .modifier(SidebarChrome(edge: .bottom))
+            // A floating pill, not a strip: it is opaque enough to read over
+            // rows scrolling beneath it, and the list keeps its glass.
+            DockView()
+                .padding(.horizontal, 10)
+                .padding(.vertical, 8)
         }
         // Tint + border run under the titlebar so the strip above the
         // sidebar matches the sidebar (see ContentView's root tint note).
@@ -247,6 +233,53 @@ struct SidebarView: View {
         }
     }
 
+    /// Lane header: the count is the loudest element (display face, lane
+    /// colour), the name reads as its label, and a short mono subtitle says
+    /// what the lane means or how long the oldest item has waited.
+    private func laneHeader(_ group: AppModel.SidebarGroup, _ count: Int, _ sub: String) -> some View {
+        let quiet = group == .idle || group == .semiArchived || group == .done
+        return HStack(alignment: .firstTextBaseline, spacing: 7) {
+            Text("\(count)")
+                .font(Theme.Fonts.display(18, .heavy))
+                .monospacedDigit()
+            Text(Self.laneName(group))
+                .font(Theme.Fonts.display(13, .bold))
+            if !sub.isEmpty {
+                Spacer(minLength: 6)
+                Text(sub)
+                    .font(Theme.Fonts.mono(10))
+                    .foregroundStyle(Theme.text3)
+                    .lineLimit(1)
+            }
+        }
+        .foregroundStyle(quiet ? Theme.text3 : Theme.laneColor(group))
+        .padding(.vertical, 3)
+        .textCase(nil)
+    }
+
+    static func laneName(_ group: AppModel.SidebarGroup) -> String {
+        switch group {
+        case .needsYou: return "等你"
+        case .aiRunning: return "AI 執行中"
+        case .idle: return "待開工"
+        case .read: return "已讀"
+        case .waitingExt: return "等待外部"
+        case .semiArchived: return "半封存"
+        case .done: return "已完成"
+        }
+    }
+
+    /// "最久 2 天" — how long the oldest unanswered task has been waiting.
+    private func owedText(_ tasks: [TaskNote]) -> String {
+        guard let oldest = tasks.compactMap({ model.aiAttention($0.id)?.since }).min() else { return "" }
+        return "最久 " + activityDuration(Date().timeIntervalSince(oldest))
+    }
+
+    private func accountsText(_ tasks: [TaskNote]) -> String {
+        let teams = Set(tasks.compactMap { model.activeTeam($0.id) })
+        return teams.isEmpty ? "" : "\(teams.count) 帳號"
+    }
+
     private func searchHeader(resultCount: Int) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 6) {
@@ -255,9 +288,9 @@ struct SidebarView: View {
                     .foregroundStyle(searchFocused ? Theme.accent : .secondary)
                     .accessibilityHidden(true)
 
-                TextField("搜尋標題", text: $searchText)
+                TextField("搜尋任務", text: $searchText)
                     .textFieldStyle(.plain)
-                    .font(.system(size: 12))
+                    .font(Theme.Fonts.ui(12.5))
                     .focused($searchFocused)
                     .onExitCommand {
                         if !searchText.isEmpty {
@@ -282,21 +315,30 @@ struct SidebarView: View {
                     .buttonStyle(.plain)
                     .help("清除搜尋")
                     .accessibilityLabel("清除搜尋")
+                } else if !searchFocused {
+                    Text("⇧⌘F")
+                        .font(Theme.Fonts.mono(9.5))
+                        .foregroundStyle(Theme.text4)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1.5)
+                        .overlay(RoundedRectangle(cornerRadius: 4).stroke(Theme.border, lineWidth: 1))
+                        .accessibilityHidden(true)
                 }
             }
-            .padding(.horizontal, 7)
-            .frame(height: 29)
-            .background(Color.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 6))
+            .padding(.leading, 11)
+            .padding(.trailing, 6)
+            .frame(height: 32)
+            .background(Color.white.opacity(0.05), in: Capsule())
             .overlay {
-                RoundedRectangle(cornerRadius: 6)
+                Capsule()
                     .stroke(searchFocused ? Theme.accent.opacity(0.7) : Theme.border,
                             lineWidth: searchFocused ? 1.25 : 1)
             }
 
             if searchActive {
                 Text("\(resultCount) 個結果")
-                    .font(.system(size: 9.5))
-                    .foregroundStyle(.secondary)
+                    .font(Theme.Fonts.mono(10))
+                    .foregroundStyle(Theme.text3)
                     .lineLimit(1)
             }
         }
@@ -354,11 +396,20 @@ struct SidebarView: View {
     /// color — brightness alone ranks them.
     private func rowFill(selected: Bool, needsYou: Bool,
                          priorityAlert: Bool, hovered: Bool) -> Color {
-        if priorityAlert { return Color(hex: 0xFF435A).opacity(selected ? 0.30 : 0.16) }
-        if selected { return Theme.accent.opacity(0.30) }
-        if needsYou { return Theme.accent.opacity(0.11) }
-        if hovered { return Color.white.opacity(0.05) }
+        if priorityAlert { return Theme.Lane.you.opacity(selected ? 0.26 : 0.14) }
+        if selected { return Theme.accent.opacity(0.14) }
+        if needsYou { return Theme.Lane.you.opacity(0.07) }
+        if hovered { return Color.white.opacity(0.045) }
         return .clear
+    }
+
+    /// The 3 pt colour rail on the leading edge: the lane's hue, only in the
+    /// lanes that mean something is happening (等你 / AI / 已讀 / 等待外部).
+    private func laneRail(_ group: AppModel.SidebarGroup) -> Color? {
+        switch group {
+        case .needsYou, .aiRunning, .read, .waitingExt: return Theme.laneColor(group)
+        default: return nil
+        }
     }
 
     // The section passes its group (it already knows it) so the row never
@@ -373,14 +424,15 @@ struct SidebarView: View {
         return HStack(spacing: 8) {
             VStack(alignment: .leading, spacing: 1) {
                 highlightedTitle(t.title)
-                    .font(.system(size: 12.5 * model.uiScale))
+                    .font(Theme.Fonts.ui(13 * model.uiScale, .semibold))
+                    .foregroundStyle(group == .semiArchived || group == .done ? Theme.text3 : Theme.text)
                     .lineLimit(searchActive ? 2 : 1)
                     .help(t.title)
                 HStack(spacing: 5) {
                     if let created = t.created {
                         Text(created)
-                            .font(.system(size: 9.5 * model.uiScale))
-                            .foregroundStyle(.tertiary)
+                            .font(Theme.Fonts.mono(10 * model.uiScale))
+                            .foregroundStyle(Theme.text3)
                             .lineLimit(1)
                     }
                     if t.isMainline {
@@ -388,32 +440,32 @@ struct SidebarView: View {
                             Image(systemName: "star.fill")
                             Text("主線")
                         }
-                        .font(.system(size: 8.5 * model.uiScale, weight: .bold))
-                        .foregroundStyle(Color(hex: 0xFF6A67))
+                        .font(Theme.Fonts.ui(9 * model.uiScale, .bold))
+                        .foregroundStyle(Theme.Lane.you)
                         .lineLimit(1)
-                        .padding(.horizontal, 4)
-                        .padding(.vertical, 0.5)
-                        .background(Color(hex: 0xFF435A).opacity(0.14), in: Capsule())
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1)
+                        .background(Theme.Lane.you.opacity(0.16), in: Capsule())
                         .help(priorityAlert ? "主線 AI 已完成，正在等你查看" : "主線任務")
                     }
                     // 主 AI（主力 if set, else 現用）— cached, no per-render disk.
                     if let team = model.mainTeam(t.id) {
                         Text(team)
-                            .font(.system(size: 8.5 * model.uiScale, weight: .medium))
-                            .foregroundStyle(Theme.accent.opacity(0.9))
+                            .font(Theme.Fonts.mono(9 * model.uiScale, .medium))
+                            .foregroundStyle(Theme.accent)
                             .lineLimit(1)
-                            .padding(.horizontal, 4)
-                            .padding(.vertical, 0.5)
-                            .background(Theme.accent.opacity(0.12), in: Capsule())
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1)
+                            .background(Theme.accent.opacity(0.14), in: Capsule())
                     }
                     if backgroundCount > 0 {
                         Text("背景 \(backgroundCount)")
-                            .font(.system(size: 8.5 * model.uiScale, weight: .medium))
-                            .foregroundStyle(.secondary)
+                            .font(Theme.Fonts.ui(9 * model.uiScale, .medium))
+                            .foregroundStyle(Theme.text2)
                             .lineLimit(1)
-                            .padding(.horizontal, 4)
-                            .padding(.vertical, 0.5)
-                            .background(Color.white.opacity(0.07), in: Capsule())
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1)
+                            .background(Color.white.opacity(0.06), in: Capsule())
                             .help("Claude 背景工作仍在執行；不影響目前任務分組")
                     }
                     // 本機服務（dev server / DB / watcher）——這個任務有東西還開著。
@@ -423,26 +475,27 @@ struct SidebarView: View {
                             Image(systemName: "play.fill")
                             Text("\(services.count)")
                         }
-                        .font(.system(size: 8.5 * model.uiScale, weight: .bold))
-                        .foregroundStyle(Theme.serviceTint)
+                        .font(Theme.Fonts.mono(9 * model.uiScale, .bold))
+                        .foregroundStyle(Theme.good)
                         .lineLimit(1)
-                        .padding(.horizontal, 4)
-                        .padding(.vertical, 0.5)
-                        .background(Theme.serviceTint.opacity(0.14), in: Capsule())
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1)
+                        .background(Theme.good.opacity(0.14), in: Capsule())
                         .help(servicesHelp(services))
                     }
                 }
                 // User-typed latest status（詳情頁頂端可編輯；設定檔案 frontmatter latest）
                 if let s = t.statusLine, !s.isEmpty {
                     Text(s)
-                        .font(.system(size: 10 * model.uiScale))
-                        .foregroundStyle(Theme.accent.opacity(0.9))
+                        .font(Theme.Fonts.ui(11 * model.uiScale))
+                        .foregroundStyle(Theme.text2)
                         .lineLimit(1)
                 }
             }
             Spacer(minLength: 4)
         }
-        .padding(.vertical, 1)
+        .padding(.vertical, 3)
+        .padding(.leading, 4)
         // (d) hover 才浮出狀態切換：以 overlay 疊在列的右端——不進版面流，
         // 列高列寬零變化。chips 常駐掛載、以 opacity/scale 做進出漸變：
         // 比 if 插入/移除的 transition 可靠（List 列裡移除過渡常直接跳失）。
@@ -475,11 +528,22 @@ struct SidebarView: View {
         // 條，選中再加深，不引入額外色相。
         .listRowBackground(
             ZStack(alignment: .leading) {
-                RoundedRectangle(cornerRadius: 6)
+                RoundedRectangle(cornerRadius: 10)
                     .fill(rowFill(selected: model.selection == t.id,
                                   needsYou: needsYou,
                                   priorityAlert: priorityAlert,
                                   hovered: hoveredSlug == t.id))
+                if model.selection == t.id {
+                    RoundedRectangle(cornerRadius: 10)
+                        .stroke(Theme.accent.opacity(0.28), lineWidth: 1)
+                }
+                if let rail = laneRail(group) {
+                    RoundedRectangle(cornerRadius: 2)
+                        .fill(rail)
+                        .frame(width: 3)
+                        .padding(.vertical, 8)
+                        .padding(.leading, 3)
+                }
                 if priorityAlert {
                     RoundedRectangle(cornerRadius: 6)
                         .stroke(Color(hex: 0xFF5267).opacity(0.9), lineWidth: 1.25)
@@ -591,38 +655,73 @@ func activityMemory(_ bytes: UInt64) -> String {
     return mb >= 1024 ? String(format: "%.1fG", mb / 1024) : String(format: "%.0fM", mb)
 }
 
-/// Terminal-level glance: what the panes are running right now.
-///
-/// Worded as terminals, never tasks: whether an AI owes you a reply is the
-/// sidebar's 等你 / AI 執行中 grouping (hook signals, which can tell thinking
-/// from waiting). This row only knows a CLI is open — the value it adds is the
-/// 服務 count, which nothing else in the app can see.
-struct ActivitySummaryView: View {
+/// The floating dock under the task list: what the terminals are running
+/// (服務 / AI / 閒置 counts, memory of the pane process trees), the daemon
+/// dot, and the new-task button. Counts are terminal facts, not AI-turn
+/// facts — whether an AI owes a reply is the lane grouping above, which reads
+/// the hook signals and can tell thinking from waiting.
+struct DockView: View {
     @EnvironmentObject var model: AppModel
 
     var body: some View {
         let totals = model.activityTotals
-        HStack(spacing: 9) {
-            item("play.fill", totals.service, tint: Theme.serviceTint, always: true)
-            item("cpu", totals.ai, tint: .secondary)
-            item("moon.zzz.fill", totals.idle, tint: .secondary)
-            Spacer(minLength: 0)
-            Text(activityMemory(totals.residentBytes))
-                .font(.system(size: 9, weight: .medium, design: .rounded))
-                .foregroundStyle(.tertiary)
+        HStack(spacing: 11) {
+            dot(Theme.good, totals.service, "服務")
+            dot(Theme.Lane.ai, totals.ai, "AI")
+            dot(Theme.text4, totals.idle, "閒置")
+            if totals.panes > 0 {
+                Text(activityMemory(totals.residentBytes))
+                    .font(Theme.Fonts.mono(10.5, .medium))
+                    .foregroundStyle(Theme.text3)
+            }
+            Spacer(minLength: 4)
+            daemon
+            Button { model.newTask() } label: {
+                Image(systemName: "plus")
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundStyle(Color(hex: 0x0A0C11))
+                    .frame(width: 24, height: 24)
+                    .background(Theme.accent, in: Circle())
+            }
+            .buttonStyle(.plain)
+            .help("新任務（⇧⌘N）")
         }
+        .lineLimit(1)
+        .padding(.leading, 13)
+        .padding(.trailing, 5)
+        .padding(.vertical, 5)
+        .background(Theme.raisedBG, in: Capsule())
+        .overlay(Capsule().stroke(Theme.border, lineWidth: 1))
+        .shadow(color: .black.opacity(0.35), radius: 12, y: 6)
         .help(helpText(totals))
     }
 
-    @ViewBuilder
-    private func item(_ symbol: String, _ count: Int, tint: Color, always: Bool = false) -> some View {
-        if count > 0 || always {
-            HStack(spacing: 2.5) {
-                Image(systemName: symbol).font(.system(size: 8))
-                Text("\(count)").font(.system(size: 9.5, weight: .medium, design: .rounded))
-            }
-            .foregroundStyle(count > 0 ? AnyShapeStyle(tint) : AnyShapeStyle(.tertiary))
+    private func dot(_ tint: Color, _ count: Int, _ label: String) -> some View {
+        HStack(spacing: 5) {
+            Circle().fill(count > 0 ? tint : Theme.text4.opacity(0.6)).frame(width: 7, height: 7)
+            Text("\(count)")
+                .font(Theme.Fonts.mono(11, .medium))
+                .foregroundStyle(count > 0 ? Theme.text2 : Theme.text3)
         }
+        .accessibilityLabel("\(label) \(count)")
+    }
+
+    private var daemon: some View {
+        HStack(spacing: 5) {
+            Circle()
+                .fill(model.daemonOK
+                    ? (model.daemonNote == nil ? Theme.good : Theme.warn)
+                    : Theme.crit)
+                .frame(width: 7, height: 7)
+            if !model.daemonOK {
+                Button("重連") { model.reconnectDaemon() }
+                    .font(Theme.Fonts.ui(10.5, .semibold))
+                    .buttonStyle(.borderless)
+            }
+        }
+        .help(model.daemonOK
+            ? (model.daemonNote ?? "taskdeckd 連線中（GUI 重開不影響終端）")
+            : "daemon 未連線")
     }
 
     private func helpText(_ totals: AppModel.ActivityTotals) -> String {
@@ -633,7 +732,7 @@ struct ActivitySummaryView: View {
             "· 閒置 \(totals.idle) 停在提示字元",
             "· 記憶體 \(activityMemory(totals.residentBytes))（所有 pane 的行程樹）",
             "",
-            "AI 是不是正在跑 / 在等你，看左邊的分組（那是 hook 訊號，比行程準）。",
+            "AI 是不是正在跑 / 在等你，看上面的車道（那是 hook 訊號，比行程準）。",
         ]
         let services = model.serviceOverview()
         if !services.isEmpty {
@@ -644,31 +743,6 @@ struct ActivitySummaryView: View {
             }
         }
         return lines.joined(separator: "\n")
-    }
-}
-
-struct DaemonStatusView: View {
-    @EnvironmentObject var model: AppModel
-
-    var body: some View {
-        HStack(spacing: 5) {
-            Circle()
-                .fill(model.daemonOK
-                    ? (model.daemonNote == nil ? Color(hex: 0x8FCF7F) : Color(hex: 0xE8B34B))
-                    : Color(hex: 0xE8646E))
-                .frame(width: 7, height: 7)
-            if let note = model.daemonNote, model.daemonOK {
-                Text(note).font(.system(size: 9)).foregroundStyle(.secondary).lineLimit(1)
-            }
-            if !model.daemonOK {
-                Button("重連") { model.reconnectDaemon() }
-                    .font(.caption)
-                    .buttonStyle(.borderless)
-            }
-        }
-        .help(model.daemonOK
-            ? (model.daemonNote ?? "taskdeckd 連線中（GUI 重開不影響終端）")
-            : "daemon 未連線")
     }
 }
 

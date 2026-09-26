@@ -67,8 +67,7 @@ final class SnapshotService {
 
         for window in NSApp.windows where window.isVisible {
             guard let view = window.contentView, view.bounds.width > 0, view.bounds.height > 0 else { continue }
-            let name = window.frameAutosaveName.isEmpty
-                ? "window-\(window.windowNumber)" : window.frameAutosaveName
+            let name = Self.shortName(window)
             guard let image = render(view) else { continue }
             let file = directory.appendingPathComponent("\(stamp)-\(name).png")
             try? image.write(to: file)
@@ -102,13 +101,22 @@ final class SnapshotService {
         return latest
     }
 
-    /// The behind-window blur lives in the compositor, so a cached display of
-    /// the view tree has transparent glass. Composite over the window ink so
-    /// the PNG reads the way the window does on a dark desktop.
+    /// "main" for the app window, "task-<slug>" for a popout; the SwiftUI
+    /// autosave names are unreadable type paths.
+    private static func shortName(_ window: NSWindow) -> String {
+        let auto = window.frameAutosaveName
+        if auto.hasPrefix("JamesDesk.task.") { return "task-" + auto.dropFirst("JamesDesk.task.".count) }
+        if auto.contains("AppWindow") || auto == "JamesDesk.main" || auto.isEmpty { return "main" }
+        return auto.replacingOccurrences(of: "/", with: "_")
+    }
+
+    /// Rendered from the layer tree, not `cacheDisplay`: SwiftUI's List rows
+    /// are layer-backed table cells that the drawRect path leaves blank. The
+    /// behind-window blur lives in the compositor, so glass comes out
+    /// transparent — composite over the window ink so the PNG reads the way
+    /// the window does on a dark desktop.
     private func render(_ view: NSView) -> Data? {
         let bounds = view.bounds
-        guard let rep = view.bitmapImageRepForCachingDisplay(in: bounds) else { return nil }
-        view.cacheDisplay(in: bounds, to: rep)
         let scale = view.window?.backingScaleFactor ?? 2
         let pixels = NSSize(width: bounds.width * scale, height: bounds.height * scale)
         guard let canvas = NSBitmapImageRep(
@@ -123,7 +131,18 @@ final class SnapshotService {
         NSGraphicsContext.current = context
         NSColor(hex: 0x0B0D12).setFill()
         NSRect(origin: .zero, size: bounds.size).fill()
-        rep.draw(in: NSRect(origin: .zero, size: bounds.size))
+        if let layer = view.layer {
+            // CALayer.render draws in layer (points) coordinates, y-down.
+            let cg = context.cgContext
+            cg.saveGState()
+            cg.translateBy(x: 0, y: bounds.height)
+            cg.scaleBy(x: 1, y: -1)
+            layer.render(in: cg)
+            cg.restoreGState()
+        } else if let rep = view.bitmapImageRepForCachingDisplay(in: bounds) {
+            view.cacheDisplay(in: bounds, to: rep)
+            rep.draw(in: NSRect(origin: .zero, size: bounds.size))
+        }
         context.flushGraphics()
         return canvas.representation(using: .png, properties: [:])
     }
