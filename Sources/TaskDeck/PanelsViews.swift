@@ -1524,8 +1524,8 @@ struct QuotaGrid: View {
 
     /// "週 5d19h" / "月 4d10h": time left, not a weekday — it answers the
     /// question directly — and the unit names the window. Under it, how far
-    /// through the window we are (a week, or the calendar month for 點數),
-    /// in a neutral grey so it never reads as a usage bar. The exact day and
+    /// through the window we are (a week, or the calendar month for 點數).
+    /// Both in neutral grey: neither is a usage signal. The exact day and
     /// time stay in the row tooltip.
     private func resetCell(_ account: AppModel.QuotaAccount,
                            _ window: (bucket: AppModel.QuotaBucket, unit: String)?,
@@ -1539,8 +1539,11 @@ struct QuotaGrid: View {
                 if account.error != nil {
                     Text("未登入")
                 } else if let window, let countdown {
+                    // No usage tint here: the time left says nothing about
+                    // trouble on its own (lots of time + high usage is the
+                    // worrying case), so the colour only misled.
                     Text(window.unit).foregroundStyle(Theme.text4)
-                    Text(countdown).foregroundStyle(tint(window.bucket.percent)).monospacedDigit()
+                    Text(countdown).foregroundStyle(Theme.text2).monospacedDigit()
                 } else {
                     Text("—")
                 }
