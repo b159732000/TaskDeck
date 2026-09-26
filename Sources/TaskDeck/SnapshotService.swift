@@ -182,6 +182,30 @@ final class SnapshotService {
             rep.draw(in: inWindow)
         }
         context.flushGraphics()
-        return canvas.representation(using: .png, properties: [:])
+        return flattened(canvas, size: bounds.size)?.representation(using: .png, properties: [:])
+    }
+
+    /// The glass surfaces (sidebar material, panel tints) come out of
+    /// `layer.render` as CLEARED pixels, not painted ones — the compositor is
+    /// what fills them in on screen. A viewer then shows those holes as white
+    /// and the sidebar reads as light mode. Composite once more over the ink
+    /// so every pixel is opaque and the PNG reads as the window does.
+    private func flattened(_ canvas: NSBitmapImageRep, size: NSSize) -> NSBitmapImageRep? {
+        guard let flat = NSBitmapImageRep(
+            bitmapDataPlanes: nil, pixelsWide: canvas.pixelsWide, pixelsHigh: canvas.pixelsHigh,
+            bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+            colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0
+        ) else { return canvas }
+        flat.size = size
+        NSGraphicsContext.saveGraphicsState()
+        defer { NSGraphicsContext.restoreGraphicsState() }
+        guard let context = NSGraphicsContext(bitmapImageRep: flat) else { return canvas }
+        NSGraphicsContext.current = context
+        NSColor(hex: 0x0B0D12).setFill()
+        NSRect(origin: .zero, size: size).fill()
+        canvas.draw(in: NSRect(origin: .zero, size: size), from: .zero, operation: .sourceOver,
+                    fraction: 1, respectFlipped: false, hints: nil)
+        context.flushGraphics()
+        return flat
     }
 }
