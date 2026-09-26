@@ -1538,6 +1538,17 @@ final class AppModel: ObservableObject {
         let allowPriorityAlertTriggers = hasLoadedAIStatusSnapshot
         hasLoadedAIStatusSnapshot = true
         hasAIStatusPicture = true
+        // A session that ends without a new turn (pane closed, daemon
+        // restarted) re-stamps its status file; an acknowledgement made
+        // against the earlier stamp must survive that, or every 已讀 task in
+        // the app flips back to 等你 in one go. Compared against the PREVIOUS
+        // snapshot, so it must run before aiStatus is replaced.
+        let carried = AIStatusAcknowledgementRules.carryingForward(
+            ackedAI,
+            previous: aiStatus.mapValues { (state: $0.state, ts: $0.ts) },
+            next: snapshot.statusBySession.mapValues { (state: $0.state, ts: $0.ts) }
+        )
+        if carried != ackedAI { ackedAI = carried }
         if aiStatus != snapshot.statusBySession {
             aiStatus = snapshot.statusBySession
         }

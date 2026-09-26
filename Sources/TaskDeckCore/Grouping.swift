@@ -91,6 +91,30 @@ public enum AIStatusAcknowledgementRules {
             now.timeIntervalSince($0.value) < signalWindow
         }
     }
+
+    /// An acknowledged idle session that merely ENDS (terminal closed, daemon
+    /// restarted) produced nothing new, so it stays acknowledged at its new
+    /// stamp. Without this, one daemon restart re-stamps every session in the
+    /// same second and every 已讀 task bounces back to 等你 at once.
+    ///
+    /// Only `ended` qualifies. A real new turn passes through "running" then
+    /// "waiting", but two snapshots can miss the "running" of a fast turn — so
+    /// carrying an ack across a waiting→waiting re-stamp could hide genuine
+    /// output. (The installed hook keeps the old ts for both cases at the
+    /// source; this is the in-app backstop for the snapshot boundary.)
+    public static func carryingForward(_ acknowledgements: [String: Date],
+                                       previous: [String: (state: String, ts: Date)],
+                                       next: [String: (state: String, ts: Date)]) -> [String: Date] {
+        var out = acknowledgements
+        for (sid, new) in next where new.state == "ended" {
+            guard let old = previous[sid],
+                  GroupingRules.attentionStates.contains(old.state),
+                  let acked = acknowledgements[sid],
+                  acked >= old.ts, new.ts > acked else { continue }
+            out[sid] = new.ts
+        }
+        return out
+    }
 }
 
 /// Rising-edge rule for the high-visibility mainline-task alert. Keeping this

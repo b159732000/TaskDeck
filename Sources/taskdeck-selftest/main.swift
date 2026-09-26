@@ -879,6 +879,138 @@ check("activity: the argument vector reader returns this process's argv",
 check("activity: resident memory of a live process is non-zero",
       ProcessTable.residentBytes(getpid()) > 0)
 
+// MARK: acknowledgement carry-forward — a session that merely ENDS keeps its 已讀
+
+let cfNow = Date()
+let cfOld = cfNow.addingTimeInterval(-3600)
+let cfAcks: [String: Date] = ["seen": cfOld, "seen-running": cfOld, "seen-waiting": cfOld]
+let cfCarried = AIStatusAcknowledgementRules.carryingForward(
+    cfAcks,
+    previous: [
+        "seen": (state: "waiting", ts: cfOld),           // acked, then the pane died
+        "unseen": (state: "waiting", ts: cfOld),         // never acked
+        "seen-running": (state: "running", ts: cfOld),  // ack is stale: a turn ran after it
+        "seen-waiting": (state: "waiting", ts: cfOld),  // re-stamped but still waiting
+    ],
+    next: [
+        "seen": (state: "ended", ts: cfNow),
+        "unseen": (state: "ended", ts: cfNow),
+        "seen-running": (state: "ended", ts: cfNow),
+        "seen-waiting": (state: "waiting", ts: cfNow),
+        "brand-new": (state: "ended", ts: cfNow),
+    ]
+)
+check("carry: an acked idle session that ends stays acked at the new stamp",
+      cfCarried["seen"] == cfNow)
+check("carry: a session nobody acknowledged still owes its review",
+      cfCarried["unseen"] == nil)
+check("carry: a session cut off mid-turn is NOT carried (something was lost)",
+      cfCarried["seen-running"] == cfOld)
+check("carry: waiting→waiting is never carried (a fast turn can look identical)",
+      cfCarried["seen-waiting"] == cfOld)
+check("carry: sessions without history are untouched",
+      cfCarried["brand-new"] == nil && cfCarried.count == cfAcks.count)
+
+// MARK: the hook script itself — ts must survive rewrites that carry no new output
+
+func selftestRepoRoot() -> URL? {
+    var dir = URL(fileURLWithPath: CommandLine.arguments[0]).resolvingSymlinksInPath()
+        .deletingLastPathComponent()
+    for _ in 0 ..< 6 {
+        if FileManager.default.fileExists(atPath: dir.appendingPathComponent("Package.swift").path) {
+            return dir
+        }
+        dir = dir.deletingLastPathComponent()
+    }
+    return nil
+}
+
+let hookTemp = FileManager.default.temporaryDirectory
+    .appendingPathComponent("taskdeck-selftest-hook-\(UUID().uuidString)")
+try? FileManager.default.createDirectory(at: hookTemp, withIntermediateDirectories: true)
+
+func runHook(_ script: URL, event: String, payload: [String: Any]) {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/bin/sh")
+    process.arguments = [script.path, event]
+    var environment = ProcessInfo.processInfo.environment
+    environment["HOME"] = hookTemp.path
+    environment.removeValue(forKey: "TASKDECK_TASK")
+    environment.removeValue(forKey: "TASKDECK_TASK_KEY")
+    process.environment = environment
+    let input = Pipe()
+    process.standardInput = input
+    process.standardOutput = FileHandle.nullDevice
+    process.standardError = FileHandle.nullDevice
+    try? process.run()
+    if let data = try? JSONSerialization.data(withJSONObject: payload) {
+        input.fileHandleForWriting.write(data)
+    }
+    try? input.fileHandleForWriting.close()
+    process.waitUntilExit()
+}
+
+func hookStatus(_ sid: String) -> [String: Any]? {
+    let url = hookTemp.appendingPathComponent(
+        "Library/Application Support/TaskDeck/status/\(sid).json")
+    guard let data = try? Data(contentsOf: url) else { return nil }
+    return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+}
+
+if let root = selftestRepoRoot() {
+    let hook = root.appendingPathComponent("Scripts/taskdeck-ai-status.sh")
+    let idle = "hook-idle-session"
+    runHook(hook, event: "Stop", payload: ["session_id": idle])
+    let waitingTS = hookStatus(idle)?["ts"] as? Double
+    check("hook: Stop writes waiting with a timestamp",
+          hookStatus(idle)?["state"] as? String == "waiting" && waitingTS != nil)
+
+    runHook(hook, event: "Notification",
+            payload: ["session_id": idle, "message": "Claude is waiting for your input",
+                      "notification_type": "idle_prompt"])
+    check("hook: an idle notification while already waiting keeps the old ts",
+          hookStatus(idle)?["state"] as? String == "waiting"
+          && hookStatus(idle)?["ts"] as? Double == waitingTS)
+
+    runHook(hook, event: "SessionEnd", payload: ["session_id": idle, "reason": "other"])
+    check("hook: SessionEnd after waiting becomes ended but KEEPS the ts (nothing new was said)",
+          hookStatus(idle)?["state"] as? String == "ended"
+          && hookStatus(idle)?["ts"] as? Double == waitingTS)
+    check("hook: SessionEnd records why (diagnostic only)",
+          hookStatus(idle)?["reason"] as? String == "other")
+
+    let busy = "hook-busy-session"
+    runHook(hook, event: "UserPromptSubmit", payload: ["session_id": busy])
+    let runningTS = hookStatus(busy)?["ts"] as? Double
+    runHook(hook, event: "PreToolUse", payload: ["session_id": busy])
+    check("hook: PreToolUse within 60 s of a fresh running does not rewrite",
+          hookStatus(busy)?["ts"] as? Double == runningTS)
+    runHook(hook, event: "SessionEnd", payload: ["session_id": busy, "reason": "other"])
+    let cutOffTS = hookStatus(busy)?["ts"] as? Double
+    check("hook: a session killed mid-turn gets a FRESH stamp (that is worth a look)",
+          hookStatus(busy)?["state"] as? String == "ended"
+          && cutOffTS != nil && runningTS != nil && cutOffTS! > runningTS!)
+
+    let prompt = "hook-permission-session"
+    runHook(hook, event: "Stop", payload: ["session_id": prompt])
+    let promptWaitingTS = hookStatus(prompt)?["ts"] as? Double
+    runHook(hook, event: "Notification",
+            payload: ["session_id": prompt, "message": "Claude needs your permission to use Bash",
+                      "notification_type": "permission_prompt"])
+    check("hook: a permission prompt is new — fresh stamp, state permission",
+          hookStatus(prompt)?["state"] as? String == "permission"
+          && (hookStatus(prompt)?["ts"] as? Double ?? 0) > (promptWaitingTS ?? .infinity))
+
+    let orphan = "hook-orphan-session"
+    runHook(hook, event: "SessionEnd", payload: ["session_id": orphan])
+    check("hook: SessionEnd with no prior file still records ended",
+          hookStatus(orphan)?["state"] as? String == "ended" && hookStatus(orphan)?["ts"] != nil)
+} else {
+    print("skip hook: repo root not found from \(CommandLine.arguments[0])")
+    failures += 1
+}
+try? FileManager.default.removeItem(at: hookTemp)
+
 // MARK: hook status directory — the read that feeds grouping (sync prime + async loader)
 
 let statusTemp = FileManager.default.temporaryDirectory
