@@ -48,7 +48,11 @@ touch "$HOME/Library/Application Support/TaskDeck/snapshots/request"
 `latest.json` lists window frames, which bundled font families resolved,
 the active background preset, and per-List row counts (so an empty sidebar
 in the PNG can be told from a capture miss). Metal terminal cells are drawn
-through the layer tree; List rows through `cacheDisplay`. See
+through the layer tree; List rows through `cacheDisplay`; the result is
+flattened over the window ink (0x0B0D12) because glass surfaces render as
+cleared pixels. So the PNG is faithful for layout, type and tint, but NOT
+for glass depth — the behind-window blur only exists in the compositor;
+judging that needs a real screenshot from the user. See
 `SnapshotService.swift`. Prefer this over `screencapture`, which fails from
 a pane-hosted shell without a TCC grant.
 
