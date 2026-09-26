@@ -796,6 +796,89 @@ check("ack: genuinely newer AI signal resurfaces to 等你",
           ),
       ]) == .needsYou)
 
+// MARK: pane activity — what a terminal is running (process-table rules)
+
+check("activity: an interpreter names the tool, not itself",
+      PaneActivityRules.label(argv: [
+          "node",
+          "/Users/x/.local/state/fnm_multishells/92172_1789548477753/bin/yarn",
+          "dev",
+      ]) == "yarn dev")
+check("activity: a bare shell is just the shell",
+      PaneActivityRules.label(argv: ["/bin/zsh", "-il"]) == "zsh")
+check("activity: flags and session uuids never become the second word",
+      PaneActivityRules.label(argv: [
+          "claude", "--dangerously-skip-permissions",
+          "-r", "25d9d1bc-0a67-41b2-83e1-fa17000b617a",
+      ]) == "claude")
+check("activity: a path argument is not a subcommand",
+      PaneActivityRules.label(argv: [
+          "/opt/homebrew/opt/postgresql@16/bin/postgres", "-D", "/opt/homebrew/var/pg",
+      ]) == "postgres")
+check("activity: a port number is not a subcommand",
+      PaneActivityRules.label(argv: ["python3", "tools/serve.py", "8000"]) == "serve.py")
+check("activity: a self-renamed process keeps its own name",
+      PaneActivityRules.label(argv: ["next-server (v16.2.12)"]) == "next-server (v16.2.12)")
+check("activity: no argv falls back to the kernel name",
+      PaneActivityRules.label(argv: [], fallbackName: "postgres") == "postgres")
+
+let actNow = Date()
+func proc(_ pid: Int32, parent: Int32 = 1, group: Int32? = nil, fg: Int32 = -1,
+          name: String = "zsh", agoSec: TimeInterval = 0) -> ProcessRecord {
+    ProcessRecord(pid: pid, parent: parent, group: group ?? pid,
+                  terminalForegroundGroup: fg, name: name,
+                  started: actNow.addingTimeInterval(-agoSec))
+}
+let actTable = [
+    proc(100, fg: 100),                                               // idle shell
+    proc(101, parent: 100, group: 100, fg: 100, name: "zsh"),         // its child
+    proc(200, fg: 300),                                               // shell w/ AI
+    proc(300, parent: 200, fg: 300, name: "2.1.276", agoSec: 5),      // claude, young
+    proc(400, fg: 500),                                               // shell w/ server
+    proc(500, parent: 400, fg: 500, name: "node", agoSec: 600),
+    proc(600, fg: 700),                                               // shell w/ command
+    proc(700, parent: 600, fg: 700, name: "rg", agoSec: 3),
+    proc(800, fg: 900, name: "zsh"),                                  // leader exited
+    proc(901, parent: 800, group: 900, fg: 900, name: "node", agoSec: 900),
+]
+let actArgv: [Int32: [String]] = [
+    300: ["claude", "--dangerously-skip-permissions"],
+    500: ["node", "/x/bin/yarn", "dev"],
+    700: ["rg", "TODO"],
+    901: ["node", "/x/bin/vite", "preview"],
+]
+let activity = PaneActivityRules.classify(
+    shells: [100, 200, 400, 600, 800, 999], processes: actTable,
+    aiCommands: ["claude", "codex", "opencode"], now: actNow,
+    argv: { actArgv[$0] ?? [] },
+    residentBytes: { _ in 1_048_576 }
+)
+check("activity: a shell owning its own terminal is idle",
+      activity[100]?.kind == .idle && activity[100]?.label == "")
+check("activity: memory covers the whole pane tree, not just the shell",
+      activity[100]?.residentBytes == 2_097_152)
+check("activity: an AI CLI is AI however young the process is",
+      activity[200]?.kind == .ai && activity[200]?.label == "claude")
+check("activity: a long-running foreground job is a service",
+      activity[400]?.kind == .service && activity[400]?.label == "yarn dev")
+check("activity: a just-typed command is not yet a service",
+      activity[600]?.kind == .command && activity[600]?.label == "rg TODO")
+check("activity: an exited group leader falls back to the oldest member",
+      activity[800]?.kind == .service && activity[800]?.label == "vite preview")
+check("activity: a pane whose process is gone is simply absent",
+      activity[999] == nil)
+check("activity: the service threshold is the only clock involved",
+      PaneActivityRules.serviceAfter == 30)
+
+// The live reader must at least see this very process, or the sampler is blind.
+let liveTable = ProcessTable.snapshot()
+check("activity: the process table reader finds this process",
+      liveTable.contains { $0.pid == getpid() })
+check("activity: the argument vector reader returns this process's argv",
+      ProcessTable.commandLine(getpid()).first?.contains("taskdeck-selftest") == true)
+check("activity: resident memory of a live process is non-zero",
+      ProcessTable.residentBytes(getpid()) > 0)
+
 // MARK: hook status directory — the read that feeds grouping (sync prime + async loader)
 
 let statusTemp = FileManager.default.temporaryDirectory

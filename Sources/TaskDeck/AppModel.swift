@@ -55,6 +55,18 @@ final class AppModel: ObservableObject {
     /// Manual sidebar ordering (drag to reorder); slugs, persisted per machine.
     @Published var taskOrder: [String] = []
 
+    /// specID → what that pane's terminal is running right now (process-level,
+    /// sampled every couple of seconds). Separate from AI status on purpose:
+    /// this says "an AI CLI is open", the hook files say "the AI is thinking".
+    @Published private(set) var paneActivity: [String: PaneActivity] = [:]
+    /// slug → its long-running commands, longest first. Built with the sample
+    /// (not in a view body): resolving pane → task can touch machine state, and
+    /// the sidebar re-renders on every hover.
+    @Published private(set) var servicesByTask: [String: [PaneActivity]] = [:]
+    private let activitySampler = PaneActivitySampler()
+    private var activityTimer: Timer?
+    private var activitySampleInFlight = false
+
     private var sessions: [String: TaskSession] = [:]
     private var dirWatcher: DispatchSourceFileSystemObject?
     private var dirFD: Int32 = -1
@@ -158,6 +170,13 @@ final class AppModel: ObservableObject {
                 self?.scheduleAIStatusReload(includeTaskSources: true)
                 self?.reloadOpenNotes()
             }
+        }
+
+        // Terminal activity is cheap to read (one process-table syscall, ~1 ms
+        // for the whole machine) and changes on a human timescale, so a short
+        // fixed interval beats trying to be clever about when to look.
+        activityTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.sampleActivity() }
         }
 
         // Reload notes the instant the app regains focus (e.g. switching back
@@ -656,6 +675,98 @@ final class AppModel: ObservableObject {
     /// How many live terminals the delete confirmation should warn about.
     func livePaneCount(_ slug: String) -> Int {
         paneRuntime.values.filter { $0.running && paneBelongs($0, to: slug) }.count
+    }
+
+    // MARK: - Terminal activity (what each pane is running)
+
+    /// The binaries the AI teams actually run. Every claude-family alias execs
+    /// the same `claude` binary (they differ only by CLAUDE_CONFIG_DIR), so the
+    /// team id is not what shows up in the process table.
+    private var aiCommandNames: Set<String> {
+        Set(config.teams.map { $0.kind == "claude" ? "claude" : $0.id })
+    }
+
+    private func sampleActivity() {
+        guard !activitySampleInFlight else { return } // never queue up samples
+        let live = paneRuntime.values.filter { $0.running && $0.pid > 0 }
+        guard !live.isEmpty else {
+            if !paneActivity.isEmpty { paneActivity = [:] }
+            if !servicesByTask.isEmpty { servicesByTask = [:] }
+            return
+        }
+        // Two panes cannot share a pid; the uniquing keeps a stale duplicate
+        // from trapping if the daemon list lags a respawn.
+        let specByPID = Dictionary(live.map { ($0.pid, $0.specID) },
+                                   uniquingKeysWith: { first, _ in first })
+        let commands = aiCommandNames
+        activitySampleInFlight = true
+        Task { [weak self] in
+            guard let self else { return }
+            let sampled = await activitySampler.sample(shells: Array(specByPID.keys),
+                                                       aiCommands: commands, now: Date())
+            activitySampleInFlight = false
+            var next: [String: PaneActivity] = [:]
+            next.reserveCapacity(sampled.count)
+            for (pid, activity) in sampled {
+                if let spec = specByPID[pid] { next[spec] = activity }
+            }
+            if next != paneActivity { paneActivity = next }
+
+            var services: [String: [PaneActivity]] = [:]
+            for info in live {
+                guard let activity = next[info.specID], activity.kind == .service,
+                      let slug = slug(forPane: info) else { continue }
+                services[slug, default: []].append(activity)
+            }
+            for slug in services.keys {
+                services[slug]?.sort { $0.runningFor > $1.runningFor }
+            }
+            if services != servicesByTask { servicesByTask = services }
+        }
+    }
+
+    /// Which task owns this pane. The daemon's taskID is the slug at spawn time
+    /// and covers everything that was not renamed since; the spec-based match
+    /// behind `paneBelongs` covers the rest.
+    private func slug(forPane info: PaneInfo) -> String? {
+        if tasks.contains(where: { $0.id == info.taskID }) { return info.taskID }
+        return tasks.first { paneBelongs(info, to: $0.id) }?.id
+    }
+
+    struct ActivityTotals: Equatable {
+        var ai = 0
+        var service = 0
+        var idle = 0
+        var command = 0
+        var residentBytes: UInt64 = 0
+        var panes: Int { ai + service + idle + command }
+    }
+
+    var activityTotals: ActivityTotals {
+        var totals = ActivityTotals()
+        for activity in paneActivity.values {
+            switch activity.kind {
+            case .ai: totals.ai += 1
+            case .service: totals.service += 1
+            case .idle: totals.idle += 1
+            case .command: totals.command += 1
+            }
+            totals.residentBytes += activity.residentBytes
+        }
+        return totals
+    }
+
+    /// Long-running commands (dev server, DB, watcher) in this task's panes,
+    /// longest-running first — the ones worth noticing you left behind.
+    func services(_ slug: String) -> [PaneActivity] { servicesByTask[slug] ?? [] }
+
+    /// Every service pane with the task it belongs to, for the summary tooltip.
+    func serviceOverview() -> [(task: String, activity: PaneActivity)] {
+        servicesByTask.flatMap { slug, activities in
+            let title = tasks.first { $0.id == slug }?.title ?? slug
+            return activities.map { (task: title, activity: $0) }
+        }
+        .sorted { $0.activity.runningFor > $1.activity.runningFor }
     }
 
     // MARK: - AI status badges

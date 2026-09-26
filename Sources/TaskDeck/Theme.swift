@@ -82,6 +82,10 @@ enum Theme {
         UserDefaults.standard.object(forKey: "accentHex") as? UInt32 ?? 0x5B9DFF
     static var accent: Color { Color(hex: accentHexCurrent) }
 
+    /// Long-running local services (dev server / DB / watcher). Same green as
+    /// the daemon dot: "something of yours is alive", not "something is wrong".
+    static let serviceTint = Color(hex: 0x8FCF7F)
+
     /// Solid, alpha-1 value: SwiftTerm uses it for inverse-video math
     /// (zsh highlights pasted text with standout = fg/bg swap — a clear
     /// color here painted pasted text invisibly). Glass is unaffected:

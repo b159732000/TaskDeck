@@ -143,16 +143,19 @@ struct SidebarView: View {
             searchHeader(resultCount: visibleTasks.count)
         }
         .safeAreaInset(edge: .bottom) {
-            HStack {
-                Button {
-                    model.newTask()
-                } label: {
-                    Label("新任務", systemImage: "plus")
-                        .font(.system(size: 12, weight: .medium))
+            VStack(spacing: 6) {
+                if model.activityTotals.panes > 0 { ActivitySummaryView() }
+                HStack {
+                    Button {
+                        model.newTask()
+                    } label: {
+                        Label("新任務", systemImage: "plus")
+                            .font(.system(size: 12, weight: .medium))
+                    }
+                    .buttonStyle(.borderless)
+                    Spacer()
+                    DaemonStatusView()
                 }
-                .buttonStyle(.borderless)
-                Spacer()
-                DaemonStatusView()
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 8)
@@ -415,6 +418,21 @@ struct SidebarView: View {
                             .background(Color.white.opacity(0.07), in: Capsule())
                             .help("Claude 背景工作仍在執行；不影響目前任務分組")
                     }
+                    // 本機服務（dev server / DB / watcher）——這個任務有東西還開著。
+                    let services = model.services(t.id)
+                    if !services.isEmpty {
+                        HStack(spacing: 2) {
+                            Image(systemName: "play.fill")
+                            Text("\(services.count)")
+                        }
+                        .font(.system(size: 8.5 * model.uiScale, weight: .bold))
+                        .foregroundStyle(Theme.serviceTint)
+                        .lineLimit(1)
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 0.5)
+                        .background(Theme.serviceTint.opacity(0.14), in: Capsule())
+                        .help(servicesHelp(services))
+                    }
                 }
                 // User-typed latest status（詳情頁頂端可編輯；設定檔案 frontmatter latest）
                 if let s = t.statusLine, !s.isEmpty {
@@ -531,6 +549,82 @@ struct SidebarView: View {
             }
             Button("徹底刪除…", role: .destructive) { deletingSlug = t.id }
         }
+    }
+}
+
+/// "yarn dev（2 天）" lines for a badge tooltip.
+func servicesHelp(_ services: [PaneActivity]) -> String {
+    let lines = services.map { "· \($0.label)（\(activityDuration($0.runningFor))）" }
+    return (["這個任務有本機服務還開著："] + lines).joined(separator: "\n")
+}
+
+/// Coarse on purpose: the question is "did I leave this running?", never the
+/// exact second.
+func activityDuration(_ seconds: TimeInterval) -> String {
+    if seconds < 90 { return "\(Int(seconds)) 秒" }
+    if seconds < 5400 { return "\(Int(seconds / 60)) 分" }
+    if seconds < 172_800 { return "\(Int(seconds / 3600)) 小時" }
+    return "\(Int(seconds / 86400)) 天"
+}
+
+func activityMemory(_ bytes: UInt64) -> String {
+    let mb = Double(bytes) / 1_048_576
+    return mb >= 1024 ? String(format: "%.1fG", mb / 1024) : String(format: "%.0fM", mb)
+}
+
+/// Terminal-level glance: what the panes are running right now.
+///
+/// Worded as terminals, never tasks: whether an AI owes you a reply is the
+/// sidebar's 等你 / AI 執行中 grouping (hook signals, which can tell thinking
+/// from waiting). This row only knows a CLI is open — the value it adds is the
+/// 服務 count, which nothing else in the app can see.
+struct ActivitySummaryView: View {
+    @EnvironmentObject var model: AppModel
+
+    var body: some View {
+        let totals = model.activityTotals
+        HStack(spacing: 9) {
+            item("play.fill", totals.service, tint: Theme.serviceTint, always: true)
+            item("cpu", totals.ai, tint: .secondary)
+            item("moon.zzz.fill", totals.idle, tint: .secondary)
+            Spacer(minLength: 0)
+            Text(activityMemory(totals.residentBytes))
+                .font(.system(size: 9, weight: .medium, design: .rounded))
+                .foregroundStyle(.tertiary)
+        }
+        .help(helpText(totals))
+    }
+
+    @ViewBuilder
+    private func item(_ symbol: String, _ count: Int, tint: Color, always: Bool = false) -> some View {
+        if count > 0 || always {
+            HStack(spacing: 2.5) {
+                Image(systemName: symbol).font(.system(size: 8))
+                Text("\(count)").font(.system(size: 9.5, weight: .medium, design: .rounded))
+            }
+            .foregroundStyle(count > 0 ? AnyShapeStyle(tint) : AnyShapeStyle(.tertiary))
+        }
+    }
+
+    private func helpText(_ totals: AppModel.ActivityTotals) -> String {
+        var lines = [
+            "終端機在跑什麼（\(totals.panes) 個 pane）：",
+            "· 服務 \(totals.service)（dev server / DB / watcher 等長跑指令）",
+            "· AI \(totals.ai) 個 pane 開著 AI CLI",
+            "· 閒置 \(totals.idle) 停在提示字元",
+            "· 記憶體 \(activityMemory(totals.residentBytes))（所有 pane 的行程樹）",
+            "",
+            "AI 是不是正在跑 / 在等你，看左邊的分組（那是 hook 訊號，比行程準）。",
+        ]
+        let services = model.serviceOverview()
+        if !services.isEmpty {
+            lines.append("")
+            lines.append("服務：")
+            lines += services.map {
+                "· \($0.activity.label) — \($0.task)（\(activityDuration($0.activity.runningFor))）"
+            }
+        }
+        return lines.joined(separator: "\n")
     }
 }
 
