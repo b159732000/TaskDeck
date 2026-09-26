@@ -91,6 +91,15 @@ enum Theme {
     static var border: Color { bg(preset.border, 1.0) }
     /// One step above the panel: chips, dock, raised cards.
     static var raisedBG: Color { bg(preset.header, min(1, preset.alphas.header + 0.08)) }
+    /// The notes card: barely more than the window so the editor and the
+    /// small terminals under it stay as glassy as the main terminals.
+    static var notesBG: Color { bg(preset.panel, min(preset.alphas.panel, 0.20)) }
+    /// A small terminal sits on the notes card, one layer deeper than the
+    /// grid, so its own tint is lighter to land at the same effective tone.
+    static var terminalBGSide: Color { bg(preset.terminal, preset.alphas.terminal * 0.65) }
+    /// Header strips (pane, notes, quota) are a faint lift, not a surface:
+    /// one hairline and 3.5% white is enough to read as a title bar.
+    static let headerStrip = Color.white.opacity(0.035)
 
     /// Accent presets（強調色：焦點框、主力徽章等）。
     static let accentPresets: [(name: String, hex: UInt32)] = [

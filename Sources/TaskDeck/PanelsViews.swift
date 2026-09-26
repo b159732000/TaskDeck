@@ -1180,7 +1180,8 @@ struct NotesColumn: View {
             }
             .padding(.horizontal, 12)
             .frame(height: 30)
-            .background(Theme.paneHeaderBG)
+            .background(Theme.headerStrip)
+            .overlay(alignment: .bottom) { Rectangle().fill(Theme.border).frame(height: 1) }
             .contentShape(Rectangle())
             .simultaneousGesture(TapGesture().onEnded { session.focusZone = .notes })
 
@@ -1224,7 +1225,7 @@ struct NotesColumn: View {
                 QuotaFooterView(contentHeight: quotaContentHeight > 0 ? quotaContentHeight : nil)
             }
         }
-        .background(Theme.panelBG)
+        .background(Theme.notesBG)
         .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.l, style: .continuous))
         // 筆記為焦點區時整欄外框高亮（與 terminal pane 的高亮互斥）。
         .overlay(
@@ -1296,7 +1297,6 @@ struct QuotaGrid: View {
     ]
 
     var body: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
         Grid(alignment: .leading, horizontalSpacing: 6, verticalSpacing: compact ? 3 : 6) {
             GridRow {
                 Text("帳號").gridColumnAlignment(.leading)
@@ -1329,7 +1329,7 @@ struct QuotaGrid: View {
                 .help(rowHelp(account))
             }
         }
-        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private func bucket(_ account: AppModel.QuotaAccount,
@@ -1343,6 +1343,8 @@ struct QuotaGrid: View {
                 .font(Theme.Fonts.mono(10.5 * scale, .medium))
                 .foregroundStyle(tint(bucket.percent))
                 .monospacedDigit()
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
             if !compact {
                 GeometryReader { geo in
                     ZStack(alignment: .leading) {
@@ -1354,7 +1356,9 @@ struct QuotaGrid: View {
                 .frame(height: 3)
             }
         }
-        .frame(minWidth: 30)
+        // Flexible: the four window columns share whatever width the notes
+        // column has, so the grid fills a wide column and squeezes to ~245 pt.
+        .frame(minWidth: 30, maxWidth: .infinity, alignment: .leading)
     }
 
     private func tint(_ percent: Int) -> Color {
@@ -1452,7 +1456,8 @@ struct QuotaFooterView: View {
             }
             .padding(.horizontal, 12)
             .frame(height: 28)
-            .background(Theme.paneHeaderBG)
+            .background(Theme.headerStrip)
+            .overlay(alignment: .top) { Rectangle().fill(Theme.border).frame(height: 1) }
 
             if expanded {
                 if !model.quotaAccounts.isEmpty {

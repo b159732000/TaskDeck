@@ -1246,7 +1246,7 @@ struct PaneContainerView: View {
                         .id("\(info.id):\(model.daemonConnectionGeneration)")
                         .padding(.leading, 6)
                         .padding(.top, 4)
-                        .background(Theme.terminalBG)
+                        .background(spec?.location == "side" ? Theme.terminalBGSide : Theme.terminalBG)
                 } else {
                     notStarted
                 }
@@ -1381,7 +1381,8 @@ struct PaneContainerView: View {
         }
         .padding(.horizontal, 9)
         .frame(height: 26)
-        .background(Theme.paneHeaderBG)
+        .background(Theme.headerStrip)
+        .overlay(alignment: .bottom) { Rectangle().fill(Theme.border).frame(height: 1) }
     }
 
     private var notStarted: some View {
