@@ -1498,8 +1498,11 @@ struct QuotaGrid: View {
         let seconds = until.timeIntervalSince(now)
         guard seconds > 0 else { return nil }
         let minutes = Int((seconds / 60).rounded(.up))
-        if minutes >= 24 * 60 { return "\(minutes / (24 * 60))d\(minutes % (24 * 60) / 60)h" }
-        return minutes >= 60 ? "\(minutes / 60)h\(minutes % 60)m" : "\(minutes)m"
+        // Two digits on the small unit: "2h00m", not "2h0m" (reads as a typo).
+        if minutes >= 24 * 60 {
+            return String(format: "%dd%02dh", minutes / (24 * 60), minutes % (24 * 60) / 60)
+        }
+        return minutes >= 60 ? String(format: "%dh%02dm", minutes / 60, minutes % 60) : "\(minutes)m"
     }
 
     /// The long window: the earliest-resetting one that is not the 5h
