@@ -13,6 +13,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         signal(SIGPIPE, SIG_IGN)
     }
 
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        // `touch …/TaskDeck/snapshots/request` → PNGs of every window; see
+        // SnapshotService. Dev aid, negligible cost, no permission prompts.
+        MainActor.assumeIsolated { SnapshotService.shared.start() }
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
         MainActor.assumeIsolated {
             AppDelegate.model?.flushEverything()

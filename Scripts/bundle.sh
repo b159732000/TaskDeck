@@ -22,6 +22,10 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp Support/Info.plist "$APP/Contents/Info.plist"
 [[ -f Support/AppIcon.icns ]] && cp Support/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
+# Bundled UI fonts (OFL; licences ship alongside). Registered by AppKit at
+# launch via Info.plist ATSApplicationFontsPath — no install step for the user.
+mkdir -p "$APP/Contents/Resources/Fonts"
+cp Support/Fonts/*.ttf Support/Fonts/OFL-*.txt "$APP/Contents/Resources/Fonts/"
 cp "$BIN/TaskDeck" "$APP/Contents/MacOS/TaskDeck"
 cp "$BIN/taskdeckd" "$APP/Contents/MacOS/taskdeckd"
 cp "$BIN/taskdeckctl" "$APP/Contents/MacOS/taskdeckctl"
