@@ -1407,12 +1407,14 @@ struct QuotaGrid: View {
             ForEach(accounts) { account in
                 // One missed poll (a 429) keeps numbers under five minutes
                 // old; badge only what has stayed unreachable — a dead token.
+                // Badge only: the row keeps its colours (James's call — the
+                // numbers are still the last real ones, not lesser ones).
                 let stale = account.staleSince.map { now.timeIntervalSince($0) > 15 * 60 } ?? false
                 GridRow(alignment: .center) {
                     HStack(spacing: 3) {
                         Text(Self.shortAlias(account.alias))
                             .font(Theme.Fonts.mono(10.5 * scale, .medium))
-                            .foregroundStyle(account.error == nil && !stale ? Theme.text2 : Theme.text4)
+                            .foregroundStyle(account.error == nil ? Theme.text2 : Theme.text4)
                         if stale {
                             Image(systemName: "clock.badge.exclamationmark")
                                 .font(.system(size: 9 * scale, weight: .semibold))
@@ -1427,7 +1429,6 @@ struct QuotaGrid: View {
                             let countdown = column.title == "5h"
                                 ? bucket.resetsAt.flatMap { Self.remaining(until: $0, now: now) } : nil
                             cell(bucket, note: countdown, narrow: column.title == "點數")
-                                .opacity(stale ? 0.45 : 1)
                         } else {
                             Text("—").font(Theme.Fonts.mono(10 * scale)).foregroundStyle(Theme.text4)
                         }
@@ -1435,7 +1436,7 @@ struct QuotaGrid: View {
                     // A hairline keeps the reset column from reading as part
                     // of the 點數 column, which is mostly "—".
                     Rectangle().fill(Theme.border).frame(width: 1).frame(maxHeight: .infinity)
-                    resetCell(account, Self.longWindow(account.buckets), stale: stale, now: now)
+                    resetCell(account, Self.longWindow(account.buckets), now: now)
                 }
                 .help(rowHelp(account))
             }
@@ -1529,7 +1530,7 @@ struct QuotaGrid: View {
     /// time stay in the row tooltip.
     private func resetCell(_ account: AppModel.QuotaAccount,
                            _ window: (bucket: AppModel.QuotaBucket, unit: String)?,
-                           stale: Bool, now: Date) -> some View {
+                           now: Date) -> some View {
         let countdown = window?.bucket.resetsAt.flatMap { Self.remaining(until: $0, now: now) }
         let elapsed = window.flatMap { w in
             w.bucket.resetsAt.flatMap { Self.windowElapsed(unit: w.unit, resetsAt: $0, now: now) }
@@ -1565,7 +1566,6 @@ struct QuotaGrid: View {
             }
         }
         .frame(minWidth: 30, maxWidth: 72 * scale, alignment: .trailing)
-        .opacity(stale ? 0.45 : 1)
         .gridColumnAlignment(.trailing)
     }
 
