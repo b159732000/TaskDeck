@@ -166,13 +166,18 @@ final class SnapshotService {
             guard let rep = table.bitmapImageRepForCachingDisplay(in: table.bounds) else { continue }
             // The table paints an opaque background through drawRect even
             // though the live list is glass; capture it clear.
-            let background = table.backgroundColor
-            let scrollDraws = table.enclosingScrollView?.drawsBackground ?? false
+            let scroll = table.enclosingScrollView
+            let saved = (table.backgroundColor, table.usesAlternatingRowBackgroundColors,
+                         scroll?.drawsBackground ?? false, scroll?.contentView.drawsBackground ?? false)
             table.backgroundColor = .clear
-            table.enclosingScrollView?.drawsBackground = false
+            table.usesAlternatingRowBackgroundColors = false
+            scroll?.drawsBackground = false
+            scroll?.contentView.drawsBackground = false
             table.cacheDisplay(in: table.bounds, to: rep)
-            table.backgroundColor = background
-            table.enclosingScrollView?.drawsBackground = scrollDraws
+            table.backgroundColor = saved.0
+            table.usesAlternatingRowBackgroundColors = saved.1
+            scroll?.drawsBackground = saved.2
+            scroll?.contentView.drawsBackground = saved.3
             let inWindow = table.convert(table.bounds, to: nil) // window coords, y-up
             rep.draw(in: inWindow)
         }
