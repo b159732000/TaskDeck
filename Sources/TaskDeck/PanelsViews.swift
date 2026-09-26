@@ -1339,9 +1339,9 @@ struct HeaderIconButton: View {
 
 /// The claude-quota table as a grid: one row per account, one cell per
 /// window (5h / 週 / Fable / 點數) — the same information as the CLI table,
-/// plus a bar per cell, colour at ≥70% / 100%, and two reset times: the
-/// 5h window's and the weekly window's. Every window's reset is in the row
-/// tooltip.
+/// plus a bar per cell, colour at ≥70% / 100%, a countdown beside the 5h
+/// usage and the weekly window's reset time. Every window's reset is in
+/// the row tooltip.
 struct QuotaGrid: View {
     let accounts: [AppModel.QuotaAccount]
     let scale: Double
@@ -1365,31 +1365,49 @@ struct QuotaGrid: View {
     ]
 
     var body: some View {
-        // Fill the column when the grid's minimum fits; otherwise scroll
-        // sideways rather than clip the reset column.
-        ViewThatFits(in: .horizontal) {
-            grid
-            ScrollView(.horizontal, showsIndicators: false) { grid }
+        // The 5h countdown is derived from the reset time at render; tick
+        // once a minute so it does not sit still between quota polls.
+        TimelineView(.periodic(from: .now, by: 60)) { context in
+            // Fill the column when the grid's minimum fits; otherwise scroll
+            // sideways rather than clip the reset column — with the trailing
+            // edge faded, so a half glyph reads as "more this way", not as a
+            // layout bug.
+            ViewThatFits(in: .horizontal) {
+                grid(now: context.date)
+                ScrollView(.horizontal, showsIndicators: false) {
+                    grid(now: context.date).padding(.trailing, 14)
+                }
+                .mask(
+                    HStack(spacing: 0) {
+                        Rectangle()
+                        LinearGradient(colors: [.black, .clear], startPoint: .leading, endPoint: .trailing)
+                            .frame(width: 14)
+                    }
+                )
+            }
         }
     }
 
-    private var grid: some View {
+    private func grid(now: Date) -> some View {
         Grid(alignment: .leading, horizontalSpacing: 6, verticalSpacing: compact ? 3 : 6) {
             GridRow {
                 Text("帳號").gridColumnAlignment(.leading)
-                ForEach(Self.columns, id: \.title) { Text($0.title) }
+                ForEach(Self.columns, id: \.title) { column in
+                    Text(column.title)
+                        .help(column.title == "5h"
+                              ? "5h 窗口用量；旁邊的時間 = 這個窗口還有多久重置。窗口從你的第一則訊息起算 5 小時，到期後下一則訊息才開新窗口，所以重置時間會一段一段往後跳。"
+                              : "")
+                }
                 Color.clear.frame(width: 1)
-                Text("5h 重置").gridColumnAlignment(.trailing)
-                    .help("目前 5h 窗口何時重置。每個窗口從你的第一則訊息起算 5 小時，到期後下一則訊息才開新窗口，所以這個時間會一段一段往後跳；沒開窗口就是 —。")
-                Text("週重置").gridColumnAlignment(.trailing)
-                    .help("週額度（週 / Fable 共用同一個窗口）何時重置；codex / opencode 顯示它們唯一的那個窗口。")
+                Text("重置").gridColumnAlignment(.trailing)
+                    .help("週額度（週 / Fable 共用同一個窗口）何時重置；codex / opencode 顯示它們唯一的那個窗口。5h 窗口的倒數在 5h 那格。")
             }
             .font(Theme.Fonts.mono(9 * scale))
             .foregroundStyle(Theme.text4)
             ForEach(accounts) { account in
                 // One missed poll (a 429) keeps numbers under five minutes
                 // old; badge only what has stayed unreachable — a dead token.
-                let stale = account.staleSince.map { Date().timeIntervalSince($0) > 15 * 60 } ?? false
+                let stale = account.staleSince.map { now.timeIntervalSince($0) > 15 * 60 } ?? false
                 GridRow(alignment: .center) {
                     HStack(spacing: 3) {
                         Text(Self.shortAlias(account.alias))
@@ -1406,7 +1424,9 @@ struct QuotaGrid: View {
                     .help(account.alias)
                     ForEach(Self.columns, id: \.title) { column in
                         if let bucket = bucket(account, column.match) {
-                            cell(bucket).opacity(stale ? 0.45 : 1)
+                            let countdown = column.title == "5h"
+                                ? bucket.resetsAt.flatMap { Self.remaining(until: $0, now: now) } : nil
+                            cell(bucket, note: countdown).opacity(stale ? 0.45 : 1)
                         } else {
                             Text("—").font(Theme.Fonts.mono(10 * scale)).foregroundStyle(Theme.text4)
                         }
@@ -1414,7 +1434,6 @@ struct QuotaGrid: View {
                     // A hairline keeps the reset column from reading as part
                     // of the 點數 column, which is mostly "—".
                     Rectangle().fill(Theme.border).frame(width: 1).frame(maxHeight: .infinity)
-                    resetCell(account, Self.sessionBucket(account.buckets), stale: stale)
                     resetCell(account, Self.weeklyBucket(account.buckets), stale: stale)
                 }
                 .help(rowHelp(account))
@@ -1428,14 +1447,26 @@ struct QuotaGrid: View {
         account.buckets.first { match($0.key) }?.value
     }
 
-    private func cell(_ bucket: AppModel.QuotaBucket) -> some View {
+    /// `note` rides after the percentage: the 5h cell's "3h36m" until the
+    /// window resets, so no separate column is spent on it.
+    private func cell(_ bucket: AppModel.QuotaBucket, note: String? = nil) -> some View {
         VStack(alignment: .leading, spacing: 2) {
-            Text("\(bucket.percent)%")
-                .font(Theme.Fonts.mono(10.5 * scale, .medium))
-                .foregroundStyle(tint(bucket.percent))
-                .monospacedDigit()
-                .lineLimit(1)
-                .minimumScaleFactor(0.8)
+            HStack(alignment: .lastTextBaseline, spacing: 4) {
+                Text("\(bucket.percent)%")
+                    .font(Theme.Fonts.mono(10.5 * scale, .medium))
+                    .foregroundStyle(tint(bucket.percent))
+                    .monospacedDigit()
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+                if let note {
+                    Text(note)
+                        .font(Theme.Fonts.mono(8.5 * scale))
+                        .foregroundStyle(Theme.text3)
+                        .monospacedDigit()
+                        .lineLimit(1)
+                        .fixedSize()
+                }
+            }
             if !compact {
                 GeometryReader { geo in
                     ZStack(alignment: .leading) {
@@ -1456,12 +1487,13 @@ struct QuotaGrid: View {
         percent >= 100 ? Theme.crit : (percent >= 70 ? Theme.warn : Theme.accent)
     }
 
-    /// The 5h session window, when the account has one open. Idle = nil:
-    /// nothing is counting down.
-    static func sessionBucket(_ buckets: [String: AppModel.QuotaBucket]) -> AppModel.QuotaBucket? {
-        guard let session = buckets.first(where: { $0.key.lowercased().contains("5h") })?.value,
-              session.resetsAt != nil else { return nil }
-        return session
+    /// "3h36m" / "12m" until `until`; nil once it has passed (the next poll
+    /// brings the new window). No seconds: the grid ticks by the minute.
+    static func remaining(until: Date, now: Date) -> String? {
+        let seconds = until.timeIntervalSince(now)
+        guard seconds > 0 else { return nil }
+        let minutes = Int((seconds / 60).rounded(.up))
+        return minutes >= 60 ? "\(minutes / 60)h\(minutes % 60)m" : "\(minutes)m"
     }
 
     /// The longer window: the earliest-resetting one that is not the 5h
