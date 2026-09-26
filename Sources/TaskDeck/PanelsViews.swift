@@ -1330,13 +1330,10 @@ struct QuotaGrid: View {
                             Text("—").font(Theme.Fonts.mono(10 * scale)).foregroundStyle(Theme.text4)
                         }
                     }
-                    // A hairline and a ↻ keep the reset column from reading
-                    // as part of the 點數 column, which is mostly "—".
+                    // A hairline keeps the reset column from reading as part
+                    // of the 點數 column, which is mostly "—".
                     Rectangle().fill(Theme.border).frame(width: 1).frame(maxHeight: .infinity)
-                    HStack(spacing: 3) {
-                        Image(systemName: "arrow.clockwise").font(.system(size: 8, weight: .semibold))
-                        Text(resetText(account))
-                    }
+                    Text(resetText(account))
                     .font(Theme.Fonts.mono(9.5 * scale))
                     .foregroundStyle(tightest(account).map { tint($0.percent) } ?? Theme.text4)
                     .gridColumnAlignment(.trailing)
