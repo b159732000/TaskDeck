@@ -97,28 +97,25 @@ private struct PriorityAlertChromeModifier: ViewModifier {
 }
 
 private struct PriorityAlertRim: View {
+    // A thin coral edge with a wide soft glow: readable as "something is
+    // ready for you", not as an alarm.
     private let gradient = AngularGradient(
-        colors: [
-            Color(red: 1.00, green: 0.19, blue: 0.25),
-            Color(red: 1.00, green: 0.42, blue: 0.30),
-            Color(red: 0.95, green: 0.12, blue: 0.35),
-            Color(red: 1.00, green: 0.19, blue: 0.25),
-        ],
+        colors: [Theme.Lane.you, Theme.Lane.ext.opacity(0.9), Theme.Lane.you, Theme.Lane.you],
         center: .center
     )
 
     var body: some View {
-        RoundedRectangle(cornerRadius: 11, style: .continuous)
-            .strokeBorder(gradient, lineWidth: 4)
-            .shadow(color: Color.red.opacity(0.48), radius: 9)
+        RoundedRectangle(cornerRadius: 12, style: .continuous)
+            .strokeBorder(gradient, lineWidth: 2.5)
+            .shadow(color: Theme.Lane.you.opacity(0.45), radius: 16)
             .padding(1)
             .ignoresSafeArea()
     }
 }
 
 private struct PriorityAlertVignette: View {
-    private let hot = Color(red: 1.00, green: 0.08, blue: 0.18)
-    private let warm = Color(red: 1.00, green: 0.38, blue: 0.22)
+    private let hot = Theme.Lane.you
+    private let warm = Theme.Lane.ext
 
     var body: some View {
         GeometryReader { proxy in
@@ -152,8 +149,8 @@ private struct PriorityAlertVignette: View {
             .fill(
                 LinearGradient(
                     stops: [
-                        .init(color: hot.opacity(0.72), location: 0),
-                        .init(color: warm.opacity(0.30), location: 0.42),
+                        .init(color: hot.opacity(0.55), location: 0),
+                        .init(color: warm.opacity(0.22), location: 0.42),
                         .init(color: .clear, location: 1),
                     ],
                     startPoint: start,
@@ -182,8 +179,8 @@ private struct PriorityAlertBanner: View {
                 .foregroundStyle(PriorityAlertPalette.gradient)
 
             Text(summary)
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(.primary)
+                .font(Theme.Fonts.display(13, .semibold))
+                .foregroundStyle(Theme.text)
                 .lineLimit(1)
 
             Button("回到主線") {
@@ -226,10 +223,10 @@ private struct PriorityAlertBanner: View {
 }
 
 private enum PriorityAlertPalette {
-    static let red = Color(red: 1.00, green: 0.16, blue: 0.25)
-    static let coral = Color(red: 0.94, green: 0.27, blue: 0.22)
+    static let red = Theme.Lane.you
+    static let coral = Theme.Lane.you
     static let gradient = LinearGradient(
-        colors: [red, Color(red: 1.00, green: 0.46, blue: 0.30)],
+        colors: [Theme.Lane.you, Theme.Lane.ext],
         startPoint: .leading,
         endPoint: .trailing
     )

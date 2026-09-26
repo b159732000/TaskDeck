@@ -21,6 +21,9 @@ final class AppModel: ObservableObject {
     /// One shared fetcher for the whole app — the quota tool rate-limits,
     /// so per-task/per-window fetching would be wrong.
     @Published var quotaText = ""
+    /// Parsed `--json` output of the quota CLI; empty when the command is not
+    /// claude-quota (the raw table then stays the display).
+    @Published var quotaAccounts: [QuotaAccount] = []
     @Published var quotaUpdatedAt: Date?
     @Published var quotaBusy = false
     /// Last refresh failed; `quotaText` still shows the previous good table.
@@ -1651,9 +1654,54 @@ final class AppModel: ObservableObject {
     /// actually re-fetches. Auto refreshes (timer / launch) keep the
     /// configured `--max-age` so they share the cache and don't hit the API
     /// rate limit. Appending `--max-age 0` wins over any configured value.
+    struct QuotaBucket: Equatable {
+        let percent: Int
+        let resetsAt: Date?
+    }
+
+    struct QuotaAccount: Identifiable, Equatable {
+        let alias: String
+        let buckets: [String: QuotaBucket]
+        let error: String?
+        var id: String { alias }
+    }
+
+    private static let quotaISO: [ISO8601DateFormatter] = {
+        let fractional = ISO8601DateFormatter()
+        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let plain = ISO8601DateFormatter()
+        plain.formatOptions = [.withInternetDateTime]
+        return [fractional, plain]
+    }()
+
+    /// claude-quota `--json`: `{"fetched_at", "accounts": [{"alias", "buckets":
+    /// {name: {"percent", "resets_at"}}, "error"?}]}`. nil = not that shape.
+    static func parseQuotaJSON(_ text: String) -> [QuotaAccount]? {
+        guard let data = text.data(using: .utf8),
+              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let rows = root["accounts"] as? [[String: Any]] else { return nil }
+        return rows.compactMap { row in
+            guard let alias = row["alias"] as? String else { return nil }
+            var buckets: [String: QuotaBucket] = [:]
+            for (name, raw) in (row["buckets"] as? [String: Any]) ?? [:] {
+                guard let bucket = raw as? [String: Any] else { continue }
+                let percent = (bucket["percent"] as? NSNumber)?.intValue
+                    ?? Int((bucket["percent"] as? String) ?? "") ?? 0
+                let reset = (bucket["resets_at"] as? String).flatMap { stamp in
+                    quotaISO.lazy.compactMap { $0.date(from: stamp) }.first
+                }
+                buckets[name] = QuotaBucket(percent: percent, resetsAt: reset)
+            }
+            return QuotaAccount(alias: alias, buckets: buckets, error: row["error"] as? String)
+        }
+    }
+
     func refreshQuota(force: Bool = false) {
         guard var cmd = config.quotaCommand, !cmd.isEmpty, !quotaBusy else { return }
         if force { cmd += " --max-age 0" }
+        // Ask for the structured form; the footer renders its own grid from
+        // it and keeps the raw text only as a fallback for other commands.
+        if !cmd.contains("--json") { cmd += " --json" }
         quotaBusy = true
         Task.detached(priority: .utility) {
             // Unique per invocation: a fixed /tmp path collided across
@@ -1706,6 +1754,7 @@ final class AppModel: ObservableObject {
                 } else {
                     self.quotaText = text
                     self.quotaStale = false
+                    if let accounts = Self.parseQuotaJSON(text) { self.quotaAccounts = accounts }
                 }
                 self.quotaUpdatedAt = Date()
                 self.quotaBusy = false

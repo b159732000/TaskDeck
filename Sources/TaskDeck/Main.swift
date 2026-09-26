@@ -251,18 +251,49 @@ struct PopoutRoot: View {
     }
 }
 
+private struct CursorBlock: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var on = true
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: 5, style: .continuous)
+            .fill(Theme.accent)
+            .frame(width: 22, height: 34)
+            .shadow(color: Theme.accent.opacity(0.55), radius: 18)
+            .opacity(on ? 1 : 0.15)
+            .onAppear {
+                guard !reduceMotion else { return }
+                withAnimation(.easeInOut(duration: 0.6).repeatForever(autoreverses: true)) { on = false }
+            }
+    }
+}
+
 struct EmptyStateView: View {
     @EnvironmentObject var model: AppModel
 
     var body: some View {
-        VStack(spacing: 14) {
-            Image(systemName: "square.grid.2x2")
-                .font(.system(size: 42))
-                .foregroundStyle(.quaternary)
-            Text("選一個任務，或建立新任務")
-                .foregroundStyle(.secondary)
-            Button("新任務（⇧⌘N）") { model.newTask() }
-                .keyboardShortcut("n", modifiers: [.command, .shift])
+        // A blinking cursor block instead of a grey grid glyph: this is a
+        // terminal workbench, and the cursor is its identity.
+        VStack(spacing: 12) {
+            CursorBlock()
+                .padding(.bottom, 6)
+            Text("選一個任務")
+                .font(Theme.Fonts.display(22, .bold))
+                .foregroundStyle(Theme.text)
+            Text("或開一個新的")
+                .font(Theme.Fonts.ui(13))
+                .foregroundStyle(Theme.text3)
+            Button { model.newTask() } label: {
+                Text("新任務  ⇧⌘N")
+                    .font(Theme.Fonts.ui(12.5, .semibold))
+                    .foregroundStyle(Color(hex: 0x0A0C11))
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 7)
+                    .background(Theme.accent, in: Capsule())
+            }
+            .buttonStyle(.plain)
+            .keyboardShortcut("n", modifiers: [.command, .shift])
+            .padding(.top, 6)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Theme.windowBG)

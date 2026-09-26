@@ -1211,6 +1211,108 @@ struct HeaderIconButton: View {
     }
 }
 
+/// The claude-quota table as a grid: one row per account, one cell per
+/// window (5h / 週 / Fable / 點數) — the same information as the CLI table,
+/// plus a bar per cell, colour at ≥70% / 100%, and the reset time of the
+/// account's tightest window. Every window's reset is in the row tooltip.
+struct QuotaGrid: View {
+    let accounts: [AppModel.QuotaAccount]
+    let scale: Double
+
+    private static let columns: [(title: String, match: (String) -> Bool)] = [
+        ("5h", { $0.lowercased().contains("5h") }),
+        ("週", { $0.lowercased().hasPrefix("weekly all") || $0.lowercased() == "weekly" }),
+        ("Fable", { $0.lowercased().contains("fable") || $0.lowercased().contains("model") }),
+        ("點數", { $0.lowercased().contains("credit") }),
+    ]
+
+    var body: some View {
+        Grid(alignment: .leading, horizontalSpacing: 8, verticalSpacing: 6) {
+            GridRow {
+                Text("帳號").gridColumnAlignment(.leading)
+                ForEach(Self.columns, id: \.title) { Text($0.title) }
+                Text("重置").gridColumnAlignment(.trailing)
+            }
+            .font(Theme.Fonts.mono(9 * scale))
+            .foregroundStyle(Theme.text4)
+            ForEach(accounts) { account in
+                GridRow(alignment: .center) {
+                    Text(account.alias)
+                        .font(Theme.Fonts.mono(10.5 * scale, .medium))
+                        .foregroundStyle(account.error == nil ? Theme.text2 : Theme.text4)
+                        .lineLimit(1)
+                    ForEach(Self.columns, id: \.title) { column in
+                        if let bucket = bucket(account, column.match) {
+                            cell(bucket)
+                        } else {
+                            Text("—").font(Theme.Fonts.mono(10 * scale)).foregroundStyle(Theme.text4)
+                        }
+                    }
+                    Text(resetText(account))
+                        .font(Theme.Fonts.mono(9.5 * scale))
+                        .foregroundStyle(tightest(account).map { tint($0.percent) } ?? Theme.text4)
+                        .gridColumnAlignment(.trailing)
+                        .lineLimit(1)
+                }
+                .help(rowHelp(account))
+            }
+        }
+    }
+
+    private func bucket(_ account: AppModel.QuotaAccount,
+                        _ match: (String) -> Bool) -> AppModel.QuotaBucket? {
+        account.buckets.first { match($0.key) }?.value
+    }
+
+    private func cell(_ bucket: AppModel.QuotaBucket) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text("\(bucket.percent)%")
+                .font(Theme.Fonts.mono(10.5 * scale, .medium))
+                .foregroundStyle(tint(bucket.percent))
+                .monospacedDigit()
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    Capsule().fill(Color.white.opacity(0.08))
+                    Capsule().fill(tint(bucket.percent))
+                        .frame(width: max(0, geo.size.width * min(1, Double(bucket.percent) / 100)))
+                }
+            }
+            .frame(height: 3)
+        }
+        .frame(minWidth: 34)
+    }
+
+    private func tint(_ percent: Int) -> Color {
+        percent >= 100 ? Theme.crit : (percent >= 70 ? Theme.warn : Theme.accent)
+    }
+
+    private func tightest(_ account: AppModel.QuotaAccount) -> AppModel.QuotaBucket? {
+        account.buckets.values.max { $0.percent < $1.percent }
+    }
+
+    private static let clock: DateFormatter = {
+        let f = DateFormatter(); f.dateFormat = "HH:mm"; return f
+    }()
+    private static let weekday: DateFormatter = {
+        let f = DateFormatter(); f.locale = Locale(identifier: "zh_Hant_TW"); f.dateFormat = "EEEEE HH:mm"; return f
+    }()
+
+    private func resetText(_ account: AppModel.QuotaAccount) -> String {
+        guard let reset = tightest(account)?.resetsAt else { return account.error == nil ? "—" : "未登入" }
+        return reset.timeIntervalSinceNow < 20 * 3600
+            ? Self.clock.string(from: reset) : Self.weekday.string(from: reset)
+    }
+
+    private func rowHelp(_ account: AppModel.QuotaAccount) -> String {
+        if let error = account.error { return "\(account.alias)：\(error)" }
+        let lines = account.buckets.sorted { $0.key < $1.key }.map { name, bucket in
+            let reset = bucket.resetsAt.map { Self.weekday.string(from: $0) } ?? "—"
+            return "· \(name) \(bucket.percent)% · 重置 \(reset)"
+        }
+        return ([account.alias] + lines).joined(separator: "\n")
+    }
+}
+
 struct QuotaFooterView: View {
     @EnvironmentObject var model: AppModel
     @AppStorage("quotaExpanded") private var expanded = true
@@ -1226,8 +1328,8 @@ struct QuotaFooterView: View {
                     expanded.toggle()
                 }
                 Text("AI 額度")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(.secondary)
+                    .font(Theme.Fonts.display(12, .semibold))
+                    .foregroundStyle(Theme.text2)
                 if model.quotaStale {
                     Image(systemName: "exclamationmark.triangle.fill")
                         .font(.system(size: 9))
@@ -1264,15 +1366,21 @@ struct QuotaFooterView: View {
             .background(Theme.paneHeaderBG)
 
             if expanded {
-                ScrollView([.horizontal, .vertical], showsIndicators: false) {
-                    Text(AnsiRenderer.render(model.quotaText.isEmpty ? "（讀取中…）" : model.quotaText,
-                                             size: 11 * model.uiScale * quotaScale))
-                        .lineSpacing(2)
-                        .fixedSize()
+                if !model.quotaAccounts.isEmpty {
+                    QuotaGrid(accounts: model.quotaAccounts, scale: model.uiScale * quotaScale)
                         .padding(.horizontal, 12)
                         .padding(.vertical, 8)
+                } else {
+                    ScrollView([.horizontal, .vertical], showsIndicators: false) {
+                        Text(AnsiRenderer.render(model.quotaText.isEmpty ? "（讀取中…）" : model.quotaText,
+                                                 size: 11 * model.uiScale * quotaScale))
+                            .lineSpacing(2)
+                            .fixedSize()
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 8)
+                    }
+                    .frame(height: quotaHeight)
                 }
-                .frame(height: quotaHeight)
             }
         }
     }

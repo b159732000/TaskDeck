@@ -1288,6 +1288,16 @@ struct PaneContainerView: View {
                     .foregroundStyle(Theme.text4)
                     .help(sid)
             }
+            if let activity = model.paneActivity[specID], activity.kind == .service {
+                Text("▶ \(activity.label) · \(activityDuration(activity.runningFor))")
+                    .font(Theme.Fonts.mono(9.5 * model.uiScale, .semibold))
+                    .foregroundStyle(Theme.good)
+                    .lineLimit(1)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(Theme.good.opacity(0.14), in: RoundedRectangle(cornerRadius: 6))
+                    .help("這個終端在跑的長跑指令（dev server / DB / watcher）")
+            }
             // Account badge, clickable. Prefer the session's real account
             // (file location) over the spec's recorded team, which drifts when
             // a different claude was run in the pane. The menu lets you correct
