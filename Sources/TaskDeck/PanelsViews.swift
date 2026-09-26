@@ -1340,7 +1340,8 @@ struct HeaderIconButton: View {
 /// The claude-quota table as a grid: one row per account, one cell per
 /// window (5h / 週 / Fable / 點數) — the same information as the CLI table,
 /// plus a bar per cell, colour at ≥70% / 100%, and the reset time of the
-/// account's tightest window. Every window's reset is in the row tooltip.
+/// current 5h window (the locked window once the account is locked). Every
+/// window's reset is in the row tooltip.
 struct QuotaGrid: View {
     let accounts: [AppModel.QuotaAccount]
     let scale: Double
@@ -1379,20 +1380,29 @@ struct QuotaGrid: View {
                 ForEach(Self.columns, id: \.title) { Text($0.title) }
                 Color.clear.frame(width: 1)
                 Text("重置").gridColumnAlignment(.trailing)
+                    .help("目前 5h 窗口何時重置（每個窗口從第一則訊息起算 5 小時，所以會往後滾）；帳號被鎖住時改顯示解鎖時間。各窗口的重置都在列的提示裡。")
             }
             .font(Theme.Fonts.mono(9 * scale))
             .foregroundStyle(Theme.text4)
             ForEach(accounts) { account in
+                let stale = account.staleSince != nil
                 GridRow(alignment: .center) {
-                    Text(Self.shortAlias(account.alias))
-                        .font(Theme.Fonts.mono(10.5 * scale, .medium))
-                        .foregroundStyle(account.error == nil ? Theme.text2 : Theme.text4)
-                        .lineLimit(1)
-                        .fixedSize()
-                        .help(account.alias)
+                    HStack(spacing: 3) {
+                        Text(Self.shortAlias(account.alias))
+                            .font(Theme.Fonts.mono(10.5 * scale, .medium))
+                            .foregroundStyle(account.error == nil && !stale ? Theme.text2 : Theme.text4)
+                        if stale {
+                            Image(systemName: "clock.badge.exclamationmark")
+                                .font(.system(size: 9 * scale, weight: .semibold))
+                                .foregroundStyle(Theme.warn)
+                        }
+                    }
+                    .lineLimit(1)
+                    .fixedSize()
+                    .help(account.alias)
                     ForEach(Self.columns, id: \.title) { column in
                         if let bucket = bucket(account, column.match) {
-                            cell(bucket)
+                            cell(bucket).opacity(stale ? 0.45 : 1)
                         } else {
                             Text("—").font(Theme.Fonts.mono(10 * scale)).foregroundStyle(Theme.text4)
                         }
@@ -1402,7 +1412,8 @@ struct QuotaGrid: View {
                     Rectangle().fill(Theme.border).frame(width: 1).frame(maxHeight: .infinity)
                     Text(resetText(account))
                     .font(Theme.Fonts.mono(9.5 * scale))
-                    .foregroundStyle(tightest(account).map { tint($0.percent) } ?? Theme.text4)
+                    .foregroundStyle(resetBucket(account).map { tint($0.percent) } ?? Theme.text4)
+                    .opacity(stale ? 0.45 : 1)
                     .gridColumnAlignment(.trailing)
                     .lineLimit(1)
                     .fixedSize() // "週四 08:00" must not truncate
@@ -1446,8 +1457,28 @@ struct QuotaGrid: View {
         percent >= 100 ? Theme.crit : (percent >= 70 ? Theme.warn : Theme.accent)
     }
 
-    private func tightest(_ account: AppModel.QuotaAccount) -> AppModel.QuotaBucket? {
-        account.buckets.values.max { $0.percent < $1.percent }
+    /// Which window the reset column talks about. Fixed by rule, not by
+    /// whichever window happens to be fullest: that rule flipped between the
+    /// 5h reset (tonight) and the weekly reset (next Friday) every time the
+    /// percentages crossed, which read as the time changing at random.
+    ///   1. a window at 100% with a reset date — the account is locked, show
+    ///      when the LAST lock lifts (credits have no reset date; skipped);
+    ///   2. else the 5h session window when the account has one — the window
+    ///      that rolls soonest; idle (no window open) shows "—";
+    ///   3. else (codex / opencode: one window only) the earliest reset.
+    static func resetBucket(_ buckets: [String: AppModel.QuotaBucket]) -> AppModel.QuotaBucket? {
+        let dated = buckets.values.filter { $0.resetsAt != nil }
+        if let locked = dated.filter({ $0.percent >= 100 }).max(by: { $0.resetsAt! < $1.resetsAt! }) {
+            return locked
+        }
+        if let session = buckets.first(where: { $0.key.lowercased().contains("5h") })?.value {
+            return session.resetsAt == nil ? nil : session
+        }
+        return dated.min { $0.resetsAt! < $1.resetsAt! }
+    }
+
+    private func resetBucket(_ account: AppModel.QuotaAccount) -> AppModel.QuotaBucket? {
+        Self.resetBucket(account.buckets)
     }
 
     private static let clock: DateFormatter = {
@@ -1464,18 +1495,21 @@ struct QuotaGrid: View {
         alias.hasPrefix("claude-") ? String(alias.dropFirst("claude-".count)) : alias
     }
 
-    /// The tightest window that actually resets (credits have no reset date),
-    /// always with a day: 今 19:20 / 明 02:59 / 週四 08:00 / 下週六 16:00.
+    /// `resetBucket`'s reset, always with a day: 今 19:20 / 明 02:59 /
+    /// 週四 08:00 / 下週六 16:00.
     private func resetText(_ account: AppModel.QuotaAccount) -> String {
         if account.error != nil { return "未登入" }
-        guard let reset = account.buckets.values
-            .filter({ $0.resetsAt != nil }).max(by: { $0.percent < $1.percent })?.resetsAt else { return "—" }
+        guard let reset = resetBucket(account)?.resetsAt else { return "—" }
         return Self.dayLabel(reset)
     }
 
     /// 今 / 明 / 週X for the coming week; a reset a full week out shares
     /// today's weekday name, so it says 下週X instead of making you count.
     static func dayLabel(_ date: Date) -> String {
+        // The usage API hands back "17:10:00.3" one call and "17:09:59.8" the
+        // next; shown as HH:mm that wobbles between 01:09 and 01:10. Nearest
+        // minute.
+        let date = Date(timeIntervalSinceReferenceDate: (date.timeIntervalSinceReferenceDate / 60).rounded() * 60)
         let calendar = Calendar.current
         let days = calendar.dateComponents([.day], from: calendar.startOfDay(for: Date()),
                                            to: calendar.startOfDay(for: date)).day ?? 0
@@ -1492,10 +1526,15 @@ struct QuotaGrid: View {
 
     private func rowHelp(_ account: AppModel.QuotaAccount) -> String {
         if let error = account.error { return "\(account.alias)：\(error)" }
+        var head = [account.alias]
+        if let since = account.staleSince {
+            head.append("⚠ 自 \(Self.dayLabel(since)) 起抓不到新資料，下面是舊數字"
+                        + (account.note.map { "：\($0)" } ?? ""))
+        }
         let lines = account.buckets.sorted { $0.key < $1.key }.map { name, bucket in
             "· \(name) \(bucket.percent)% · 重置 \(bucket.resetsAt.map(Self.dayLabel) ?? "—")"
         }
-        return ([account.alias] + lines).joined(separator: "\n")
+        return (head + lines).joined(separator: "\n")
     }
 }
 

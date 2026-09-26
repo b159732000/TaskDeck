@@ -1663,6 +1663,11 @@ final class AppModel: ObservableObject {
         let alias: String
         let buckets: [String: QuotaBucket]
         let error: String?
+        /// The tool could not reach this account on the last pass and served
+        /// its last good numbers instead (`stale_at` / `note`): the row still
+        /// shows them, marked, so a dead token does not pass as live data.
+        var staleSince: Date? = nil
+        var note: String? = nil
         var id: String { alias }
     }
 
@@ -1692,7 +1697,11 @@ final class AppModel: ObservableObject {
                 }
                 buckets[name] = QuotaBucket(percent: percent, resetsAt: reset)
             }
-            return QuotaAccount(alias: alias, buckets: buckets, error: row["error"] as? String)
+            let stale = (row["stale_at"] as? String).flatMap { stamp in
+                quotaISO.lazy.compactMap { $0.date(from: stamp) }.first
+            }
+            return QuotaAccount(alias: alias, buckets: buckets, error: row["error"] as? String,
+                                staleSince: stale, note: row["note"] as? String)
         }
     }
 
