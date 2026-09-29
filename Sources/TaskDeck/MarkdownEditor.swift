@@ -65,9 +65,18 @@ struct MarkdownNotesEditor: NSViewRepresentable {
             apply(tv)
             let len = (text as NSString).length
             tv.setSelectedRange(NSRange(location: min(sel.location, len), length: 0))
+            // The typing history refers to ranges in the text that was just
+            // replaced; undoing into a reloaded document would splice at the
+            // wrong offsets. Start over.
+            context.coordinator.undoManager.removeAllActions()
         } else if (tv.font?.pointSize ?? 0) != fontSize {
             apply(tv) // uiScale changed
         }
+    }
+
+    static func dismantleNSView(_ scroll: NSScrollView, coordinator: Coordinator) {
+        coordinator.undoManager.removeAllActions()
+        (scroll.documentView as? NSTextView)?.delegate = nil
     }
 
     /// (Re)apply font, colour and line spacing to the whole document + typing.
@@ -88,7 +97,19 @@ struct MarkdownNotesEditor: NSViewRepresentable {
 
     final class Coordinator: NSObject, NSTextViewDelegate {
         var parent: MarkdownNotesEditor
+        /// The editor's own undo stack. Without this the text view registers
+        /// its typing undo with the WINDOW's undo manager, where the entries
+        /// outlive the editor: a task switch rebuilds TaskDetailView and
+        /// tears the old editor down, but AppKit only unregisters from an
+        /// undo manager it can still reach, and by then the view is out of
+        /// the responder chain. The next ⌘Z anywhere in the window (a
+        /// terminal pane, typically) popped an entry whose target — the old
+        /// editor's text storage — had been freed: SIGSEGV in
+        /// `_NSUndoStack popAndInvoke` (2026-09-29). Owning the manager here
+        /// ties the entries' lifetime to the editor's.
+        let undoManager = UndoManager()
         init(_ p: MarkdownNotesEditor) { parent = p }
+        func undoManager(for view: NSTextView) -> UndoManager? { undoManager }
         func textDidChange(_ notification: Notification) {
             guard let tv = notification.object as? NSTextView else { return }
             // Mid-composition the storage contains uncommitted 注音 — keep it
