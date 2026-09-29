@@ -24,6 +24,9 @@ struct SidebarView: View {
     @State private var hoveredSlug: String?
     @State private var searchText = ""
     @FocusState private var searchFocused: Bool
+    /// Measured height of the dock pill (with its outer padding); the list
+    /// keeps that much bottom margin so the last row can scroll clear of it.
+    @State private var dockHeight: CGFloat = 50
     @AppStorage("needsYouSectionExpanded") private var needsYouExpanded = true
     @AppStorage("aiRunningSectionExpanded") private var aiRunningExpanded = true
     @AppStorage("runningSectionExpanded") private var runningExpanded = true
@@ -140,12 +143,25 @@ struct SidebarView: View {
         .safeAreaInset(edge: .top, spacing: 0) {
             searchHeader(resultCount: visibleTasks.count)
         }
-        .safeAreaInset(edge: .bottom) {
-            // A floating pill, not a strip: it is opaque enough to read over
-            // rows scrolling beneath it, and the list keeps its glass.
+        // A floating pill, not a strip: it is opaque enough to read over
+        // rows scrolling beneath it, and the list keeps its glass. It is an
+        // overlay over a bottom safe-area padding, NOT safeAreaInset(.bottom):
+        // on the AppKit-backed List the inset host lays its content out
+        // against geometry the scroll view reports late, and twice now the
+        // + glyph's layer ended up parked at the centre of the list while the
+        // button itself stayed in the dock (the empty circle still made a
+        // task; the stray glyph did nothing). An overlay is placed from the
+        // List's own frame, which never collapses. The padding alone gives
+        // the scroll view its bottom content inset, so the last row still
+        // scrolls clear of the pill (contentMargins does not reach this
+        // List — measured: the inset stays 0). Order matters: the padding
+        // goes INSIDE the overlay, or the pill itself gets lifted by it.
+        .safeAreaPadding(.bottom, dockHeight)
+        .overlay(alignment: .bottom) {
             DockView()
                 .padding(.horizontal, 10)
                 .padding(.vertical, 8)
+                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { dockHeight = $0 }
         }
         // Tint + border run under the titlebar so the strip above the
         // sidebar matches the sidebar (see ContentView's root tint note).
@@ -683,8 +699,9 @@ struct DockView: View {
         let totals = model.activityTotals
         // The sidebar can be dragged down to 150 pt: shed the memory figure,
         // then the idle count. Decided from the persisted width, not with
-        // ViewThatFits — inside a safeAreaInset that collapsed the inset to
-        // zero height and left the + button floating over the list.
+        // ViewThatFits — back when the dock lived in a safeAreaInset, that
+        // collapsed the inset to zero height and left the + floating over
+        // the list.
         row(totals, memory: sidebarWidth >= 235, idle: sidebarWidth >= 190)
         .lineLimit(1)
         .padding(.leading, 13)
@@ -714,6 +731,12 @@ struct DockView: View {
                     .foregroundStyle(Color(hex: 0x0A0C11))
                     .frame(width: 24, height: 24)
                     .background(Theme.accent, in: Circle())
+                    // SwiftUI draws the glyph (a shape layer) and the circle
+                    // (a plain layer) as two independently positioned
+                    // siblings, which is how the + could drift away from its
+                    // circle. Rasterising the label fuses them into one
+                    // layer: they now move together or not at all.
+                    .drawingGroup()
             }
             .buttonStyle(.plain)
             .onHover { inside in
