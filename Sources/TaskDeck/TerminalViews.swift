@@ -1190,30 +1190,122 @@ private struct DividerHandle: View {
 
 /// Status dot with an optional slow expanding ring — the only ambient motion
 /// in the app, reserved for "an AI CLI is open in this terminal".
+///
+/// The ring is a Core Animation layer animation (`PulseRing`), not a SwiftUI
+/// `repeatForever`. Animating `.frame` + stroke colour in SwiftUI re-ran
+/// layout for the ring and re-diffed the whole window's display list on every
+/// frame (~120/s) — ~30% of a core all day with two AI panes open. A
+/// CAAnimation is ticked by the render server; the main thread does nothing
+/// per frame, and an occluded window costs nothing at all.
 private struct PulseDot: View {
     let color: SwiftUI.Color
     let active: Bool
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var ringOn = false
 
     var body: some View {
         ZStack {
-            if active && !reduceMotion {
-                Circle()
-                    .stroke(color.opacity(ringOn ? 0 : 0.6), lineWidth: 1.5)
-                    .frame(width: ringOn ? 17 : 7, height: ringOn ? 17 : 7)
-            }
+            PulseRing(color: color, active: active && !reduceMotion)
             Circle().fill(color).frame(width: 7, height: 7)
         }
-        .frame(width: 17, height: 17)
-        .onAppear(perform: restart)
-        .onChange(of: active) { _, _ in restart() }
+        .frame(width: PulseRingView.size, height: PulseRingView.size)
+    }
+}
+
+/// The expanding ring behind `PulseDot`: a 1.5 pt stroked circle scaled
+/// 7 → 17 pt while fading 0.6 → 0 over 1.8 s, repeating. Invisible (model
+/// opacity 0, no animation attached) while `active` is false.
+private struct PulseRing: NSViewRepresentable {
+    let color: SwiftUI.Color
+    let active: Bool
+
+    func makeNSView(context: Context) -> PulseRingView { PulseRingView() }
+
+    func updateNSView(_ view: PulseRingView, context: Context) {
+        view.apply(color: NSColor(color), active: active)
     }
 
-    private func restart() {
-        ringOn = false
-        guard active, !reduceMotion else { return }
-        withAnimation(.easeOut(duration: 1.8).repeatForever(autoreverses: false)) { ringOn = true }
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView: PulseRingView,
+                      context: Context) -> CGSize? {
+        CGSize(width: PulseRingView.size, height: PulseRingView.size)
+    }
+}
+
+private final class PulseRingView: NSView {
+    static let size: CGFloat = 17
+    static let dotSize: CGFloat = 7
+    private static let animationKey = "pulse"
+
+    private let ring = CAShapeLayer()
+    private var active = false
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+        ring.fillColor = nil
+        ring.lineWidth = 1.5
+        ring.opacity = 0
+        ring.bounds = CGRect(x: 0, y: 0, width: Self.size, height: Self.size)
+        ring.path = CGPath(ellipseIn: ring.bounds.insetBy(dx: 0.75, dy: 0.75), transform: nil)
+        // No implicit 0.25 s fades when the model colour/opacity/position change.
+        ring.actions = ["opacity": NSNull(), "strokeColor": NSNull(), "position": NSNull(),
+                        "transform": NSNull(), "contentsScale": NSNull()]
+        layer?.addSublayer(ring)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+
+    override var intrinsicContentSize: NSSize { NSSize(width: Self.size, height: Self.size) }
+
+    /// Decoration only: clicks fall through to the pane header's tap gesture.
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        ring.position = CGPoint(x: bounds.midX, y: bounds.midY)
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if ring.superlayer == nil { layer?.addSublayer(ring) }
+        ring.position = CGPoint(x: bounds.midX, y: bounds.midY)
+        syncContentsScale()
+    }
+
+    override func viewDidChangeBackingProperties() {
+        super.viewDidChangeBackingProperties()
+        syncContentsScale()
+    }
+
+    private func syncContentsScale() {
+        ring.contentsScale = window?.backingScaleFactor ?? 2
+    }
+
+    func apply(color: NSColor, active: Bool) {
+        ring.strokeColor = color.cgColor
+        guard active != self.active else { return }
+        self.active = active
+        if active {
+            ring.add(Self.makePulse(), forKey: Self.animationKey)
+        } else {
+            ring.removeAnimation(forKey: Self.animationKey)
+        }
+    }
+
+    private static func makePulse() -> CAAnimation {
+        let scale = CABasicAnimation(keyPath: "transform.scale")
+        scale.fromValue = dotSize / size
+        scale.toValue = 1.0
+        let fade = CABasicAnimation(keyPath: "opacity")
+        fade.fromValue = 0.6
+        fade.toValue = 0.0
+        let group = CAAnimationGroup()
+        group.animations = [scale, fade]
+        for animation in [scale, fade] { animation.duration = 1.8 }
+        group.duration = 1.8
+        group.timingFunction = CAMediaTimingFunction(name: .easeOut)
+        group.repeatCount = .infinity
+        return group
     }
 }
 
