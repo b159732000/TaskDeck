@@ -1380,6 +1380,13 @@ struct QuotaGrid: View {
         return 16 + header + Double(rows) * row
     }
 
+    /// Widest the grid gets, in points at scale 1. The three window columns
+    /// are flexible, so on a wide notes column (a 5K desk) the bars stretched
+    /// into long ribbons that read as more than they are. 460 pt is the
+    /// ~470 pt column the table was tuned on plus a little; past that the
+    /// extra column width stays blank on the right. (James 261008.)
+    static let maxWidth: Double = 460
+
     private static let columns: [(title: String, match: (String) -> Bool)] = [
         ("5h", { $0.lowercased().contains("5h") }),
         ("週", { $0.lowercased().hasPrefix("weekly all") || $0.lowercased() == "weekly" }),
@@ -1464,6 +1471,11 @@ struct QuotaGrid: View {
                 .help(rowHelp(account))
             }
         }
+        // Capped, then left-aligned in whatever the column offers: a wider
+        // notes column leaves blank space on the right instead of longer
+        // bars. Narrower than the grid's minimum still falls through to the
+        // sideways scroll above.
+        .frame(maxWidth: Self.maxWidth * scale, alignment: .leading)
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
