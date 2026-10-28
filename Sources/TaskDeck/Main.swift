@@ -40,16 +40,66 @@ private struct SidebarSearchCommands: Commands {
     }
 }
 
+/// View-size and appearance menu items. The ✓ marks read the keys AppModel
+/// persists (its didSet writes them), not the model itself, so the main menu
+/// is rebuilt only when the appearance changes — not on every model update.
+private struct AppearanceCommands: Commands {
+    let model: AppModel
+    @AppStorage("accentHex") private var accentHex = 0x5B9DFF
+    @AppStorage("bgPresetIndex") private var bgPresetIndex = 0
+
+    var body: some Commands {
+        CommandGroup(after: .toolbar) {
+            Button("放大") { model.zoomIn() }
+                .keyboardShortcut("=", modifiers: .command)
+            Button("縮小") { model.zoomOut() }
+                .keyboardShortcut("-", modifiers: .command)
+            Button("實際大小") { model.zoomReset() }
+                .keyboardShortcut("0", modifiers: .command)
+            Menu("外觀") {
+                Menu("強調色") {
+                    ForEach(Theme.accentPresets, id: \.hex) { preset in
+                        Button((UInt32(accentHex) == preset.hex ? "✓ " : "") + preset.name) {
+                            model.accentHex = Int(preset.hex)
+                        }
+                    }
+                }
+                Menu("底色") {
+                    ForEach(Array(Theme.bgPresets.enumerated()), id: \.offset) { i, preset in
+                        Button((bgPresetIndex == i ? "✓ " : "") + preset.name) {
+                            model.bgPresetIndex = i
+                        }
+                    }
+                }
+                Divider()
+                SettingsLink { Text("外觀設定（透明度／明暗）…") }
+            }
+        }
+    }
+}
+
+/// The one AppModel, deliberately outside SwiftUI's observation. As an
+/// App-level @StateObject every @Published change re-evaluated the whole
+/// Scene — each window's root view and the main menu — several times a second
+/// while AI panes run. Views observe the model themselves (@EnvironmentObject).
+@MainActor
+private enum SharedModel {
+    static let model = AppModel()
+}
+
 @main
 struct TaskDeckApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var delegate
-    @StateObject private var model = AppModel()
+    private var model: AppModel { SharedModel.model }
 
     var body: some Scene {
         WindowGroup {
             ContentView()
                 .environmentObject(model)
-                .onAppear { AppDelegate.model = model }
+                .onAppear {
+                    AppDelegate.model = model
+                    PerfTrace.startIfEnabled(model: model) // `defaults write … perfTrace -bool true`
+                }
         }
         // macOS 26 regression（FB20341654）：某些內容配置下系統會無視
         // titlebarAppearsTransparent 硬畫標題列。正解＝在場景層宣告
@@ -61,32 +111,7 @@ struct TaskDeckApp: App {
                 Button("新任務") { model.newTask() }
                     .keyboardShortcut("n", modifiers: [.command, .shift])
             }
-            CommandGroup(after: .toolbar) {
-                Button("放大") { model.zoomIn() }
-                    .keyboardShortcut("=", modifiers: .command)
-                Button("縮小") { model.zoomOut() }
-                    .keyboardShortcut("-", modifiers: .command)
-                Button("實際大小") { model.zoomReset() }
-                    .keyboardShortcut("0", modifiers: .command)
-                Menu("外觀") {
-                    Menu("強調色") {
-                        ForEach(Theme.accentPresets, id: \.hex) { preset in
-                            Button((UInt32(model.accentHex) == preset.hex ? "✓ " : "") + preset.name) {
-                                model.accentHex = Int(preset.hex)
-                            }
-                        }
-                    }
-                    Menu("底色") {
-                        ForEach(Array(Theme.bgPresets.enumerated()), id: \.offset) { i, preset in
-                            Button((model.bgPresetIndex == i ? "✓ " : "") + preset.name) {
-                                model.bgPresetIndex = i
-                            }
-                        }
-                    }
-                    Divider()
-                    SettingsLink { Text("外觀設定（透明度／明暗）…") }
-                }
-            }
+            AppearanceCommands(model: model)
             SidebarSearchCommands()
         }
 
@@ -251,20 +276,87 @@ struct PopoutRoot: View {
     }
 }
 
-private struct CursorBlock: View {
+/// The empty state's blinking cursor block, blinked by Core Animation like
+/// `PulseRing`. A SwiftUI `repeatForever` keeps the window's display list
+/// re-rendering every frame for as long as it runs, and this one was started
+/// from `onAppear` at launch — the empty state shows for a moment before the
+/// first task is selected — inside the same update as the first layout.
+private struct CursorBlock: NSViewRepresentable {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var on = true
 
-    var body: some View {
-        RoundedRectangle(cornerRadius: 5, style: .continuous)
-            .fill(Theme.accent)
-            .frame(width: 22, height: 34)
-            .shadow(color: Theme.accent.opacity(0.55), radius: 18)
-            .opacity(on ? 1 : 0.15)
-            .onAppear {
-                guard !reduceMotion else { return }
-                withAnimation(.easeInOut(duration: 0.6).repeatForever(autoreverses: true)) { on = false }
-            }
+    func makeNSView(context: Context) -> CursorBlockView { CursorBlockView() }
+
+    func updateNSView(_ view: CursorBlockView, context: Context) {
+        view.apply(color: NSColor(Theme.accent), blinking: !reduceMotion)
+    }
+
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView: CursorBlockView,
+                      context: Context) -> CGSize? {
+        CursorBlockView.size
+    }
+}
+
+/// 22 × 34 pt accent block with a soft glow, fading 1 → 0.15 and back every
+/// 0.6 s while `blinking`; solid otherwise (Reduce Motion).
+private final class CursorBlockView: NSView {
+    static let size = CGSize(width: 22, height: 34)
+    private static let animationKey = "blink"
+
+    private let block = CALayer()
+    private var blinking = false
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+        block.bounds = CGRect(origin: .zero, size: Self.size)
+        block.cornerRadius = 5
+        block.cornerCurve = .continuous
+        block.shadowOpacity = 0.55
+        block.shadowRadius = 18
+        block.shadowOffset = .zero
+        block.shadowPath = CGPath(roundedRect: block.bounds, cornerWidth: 5, cornerHeight: 5,
+                                  transform: nil)
+        // No implicit 0.25 s fades when the colour or position is set.
+        block.actions = ["backgroundColor": NSNull(), "shadowColor": NSNull(),
+                         "position": NSNull()]
+        layer?.addSublayer(block)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+
+    override var intrinsicContentSize: NSSize { Self.size }
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        block.position = CGPoint(x: bounds.midX, y: bounds.midY)
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if block.superlayer == nil { layer?.addSublayer(block) }
+        block.position = CGPoint(x: bounds.midX, y: bounds.midY)
+    }
+
+    func apply(color: NSColor, blinking: Bool) {
+        block.backgroundColor = color.cgColor
+        block.shadowColor = color.cgColor
+        guard blinking != self.blinking else { return }
+        self.blinking = blinking
+        if blinking {
+            let blink = CABasicAnimation(keyPath: "opacity")
+            blink.fromValue = 1.0
+            blink.toValue = 0.15
+            blink.duration = 0.6
+            blink.autoreverses = true
+            blink.repeatCount = .infinity
+            blink.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            block.add(blink, forKey: Self.animationKey)
+        } else {
+            block.removeAnimation(forKey: Self.animationKey)
+        }
     }
 }
 

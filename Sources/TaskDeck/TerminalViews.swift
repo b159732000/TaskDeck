@@ -1331,10 +1331,7 @@ struct PaneContainerView: View {
                                      palette: model.ansiPalette ?? Theme.terminalAnsi,
                                      allowMouseModeRecovery:
                                          spec?.team?.caseInsensitiveCompare("opencode") == .orderedSame,
-                                     onFocus: {
-                                         session.focusedSpecID = specID
-                                         session.focusZone = .terminal
-                                     })
+                                     onFocus: { session.focus(.terminal, spec: specID) })
                         .id("\(info.id):\(model.daemonConnectionGeneration)")
                         .padding(.leading, 6)
                         .padding(.top, 4)
@@ -1356,10 +1353,7 @@ struct PaneContainerView: View {
         .shadow(color: .black.opacity(0.30), radius: 10, y: 4)
         .padding(2)
         .contentShape(Rectangle())
-        .onTapGesture {
-            session.focusedSpecID = specID
-            session.focusZone = .terminal
-        }
+        .onTapGesture { session.focus(.terminal, spec: specID) }
     }
 
     private var header: some View {

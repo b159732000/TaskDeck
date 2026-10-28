@@ -82,7 +82,12 @@ struct SidebarView: View {
                 sidebarSection(isExpanded: $needsYouExpanded) {
                     ForEach(needsYou) { row($0, group: .needsYou) }
                 } header: {
-                    laneHeader(.needsYou, needsYou.count, owedText(needsYou))
+                    // Ticks on its own: the sidebar no longer re-renders every
+                    // 2 s for the activity sample, which kept this fresh by
+                    // accident.
+                    TimelineView(.everyMinute) { context in
+                        laneHeader(.needsYou, needsYou.count, owedText(needsYou, now: context.date))
+                    }
                 }
             }
             if !aiRunning.isEmpty {
@@ -302,9 +307,9 @@ struct SidebarView: View {
 
     /// "最久 2 天" — how long the oldest unanswered task has been waiting.
     /// Minutes at the finest: a lane header is not a stopwatch.
-    private func owedText(_ tasks: [TaskNote]) -> String {
+    private func owedText(_ tasks: [TaskNote], now: Date) -> String {
         guard let oldest = tasks.compactMap({ model.aiAttention($0.id)?.since }).min() else { return "" }
-        let seconds = Date().timeIntervalSince(oldest)
+        let seconds = now.timeIntervalSince(oldest)
         if seconds < 3600 { return "最久 \(max(1, Int(seconds / 60))) 分" }
         return "最久 " + activityDuration(seconds)
     }
@@ -588,8 +593,10 @@ struct SidebarView: View {
             .padding(.horizontal, 4)
             // Selection snaps (no cross-fade): the detail-pane rebuild can hog
             // the main thread right after a tap, and an animated tint would
-            // visibly crawl behind it. Hover keeps a light fade.
-            .animation(.easeInOut(duration: 0.15), value: hoveredSlug)
+            // visibly crawl behind it. Hover keeps a light fade — keyed on
+            // THIS row's hover state, so moving the pointer animates the two
+            // rows it left and entered, not every visible row.
+            .animation(.easeInOut(duration: 0.15), value: hoveredSlug == t.id)
         )
         .contentShape(Rectangle())
         .onTapGesture { model.selectTask(t.id) }
@@ -1271,7 +1278,7 @@ struct NotesColumn: View {
             .background(Theme.headerStrip)
             .overlay(alignment: .bottom) { Rectangle().fill(Theme.border).frame(height: 1) }
             .contentShape(Rectangle())
-            .simultaneousGesture(TapGesture().onEnded { session.focusZone = .notes })
+            .simultaneousGesture(TapGesture().onEnded { session.focus(.notes) })
 
             // NSTextView-backed: gives us ⌘B / ⌘I / ⌘⇧X markdown wrapping and a
             // reliable "became focus zone" signal (becomeFirstResponder).
@@ -1279,7 +1286,7 @@ struct NotesColumn: View {
                 text: Binding(get: { session.noteText },
                               set: { session.noteText = $0 }),
                 fontSize: 13 * model.uiScale,
-                onFocus: { session.focusZone = .notes }
+                onFocus: { session.focus(.notes) }
             )
 
             // Small side terminals: stacked under the notes, out of the main

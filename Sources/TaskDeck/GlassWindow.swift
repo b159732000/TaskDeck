@@ -92,11 +92,16 @@ struct TransparentWindow: NSViewRepresentable {
                 }
             }
             // styleMask first: mutating it can rebuild the titlebar views.
-            w.styleMask.insert(.fullSizeContentView)
-            w.titlebarAppearsTransparent = true
-            w.titleVisibility = .hidden
-            w.isOpaque = false
-            w.backgroundColor = .clear
+            // This runs on every key/main change — i.e. on the click that
+            // brings the window forward — so write only what differs instead
+            // of re-asserting every property each time.
+            if !w.styleMask.contains(.fullSizeContentView) {
+                w.styleMask.insert(.fullSizeContentView)
+            }
+            if !w.titlebarAppearsTransparent { w.titlebarAppearsTransparent = true }
+            if w.titleVisibility != .hidden { w.titleVisibility = .hidden }
+            if w.isOpaque { w.isOpaque = false }
+            if w.backgroundColor != .clear { w.backgroundColor = .clear }
             hideTitlebarMaterial(w)
             hideScrollEdgeBackdrops()
             dumpFrameIfRequested(w)

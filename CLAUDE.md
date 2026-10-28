@@ -61,6 +61,18 @@ reopens the window (2–3 s). If the user may be typing in JamesDesk, gate it
 on idleness (front app not JamesDesk, or ≥ 90 s without input) rather than
 interrupting them.
 
+## Diagnosing lag
+
+`defaults write app.taskdeck.TaskDeck perfTrace -bool true`, relaunch, then
+read `App Support/TaskDeck/perftrace.log` (5 s blocks: main-thread lag, which
+SwiftUI drawing layers re-rendered and how often, who notified AppModel).
+`defaults delete … perfTrace` and relaunch to switch it off. On macOS 27 every
+SwiftUI drawing-layer re-render can wait for the window server to retire an
+earlier frame, so anything that re-renders per frame pins the main thread:
+never animate with a SwiftUI `repeatForever` (use a Core Animation layer —
+`PulseRing`, `CursorBlock`), and publish model changes only when what the UI
+shows actually changes.
+
 ## Design tokens (Night Lane)
 
 `Theme.swift` is the single source: lane colours (`Theme.Lane`, one

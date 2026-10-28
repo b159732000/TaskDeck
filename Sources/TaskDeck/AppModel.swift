@@ -61,11 +61,13 @@ final class AppModel: ObservableObject {
     /// specID → what that pane's terminal is running right now (process-level,
     /// sampled every couple of seconds). Separate from AI status on purpose:
     /// this says "an AI CLI is open", the hook files say "the AI is thinking".
-    @Published private(set) var paneActivity: [String: PaneActivity] = [:]
+    /// Not @Published: `sampleActivity` notifies only when what the UI shows
+    /// changes (see `ActivityDisplay`).
+    private(set) var paneActivity: [String: PaneActivity] = [:]
     /// slug → its long-running commands, longest first. Built with the sample
     /// (not in a view body): resolving pane → task can touch machine state, and
     /// the sidebar re-renders on every hover.
-    @Published private(set) var servicesByTask: [String: [PaneActivity]] = [:]
+    private(set) var servicesByTask: [String: [PaneActivity]] = [:]
     private let activitySampler = PaneActivitySampler()
     private var activityTimer: Timer?
     private var activitySampleInFlight = false
@@ -700,12 +702,57 @@ final class AppModel: ObservableObject {
         Set(config.teams.map { $0.kind == "claude" ? "claude" : $0.id })
     }
 
+    /// What the UI can show of an activity sample: per pane its kind, label,
+    /// pid and — for services, the only kind that shows one — the
+    /// `activityDuration` text; per task its services; the dock's memory
+    /// total. A raw sample differs on every tick — `runningFor` and
+    /// `residentBytes` always move — and publishing on that re-rendered every
+    /// view observing the model each 2 s for a change no label could show.
+    private struct ActivityDisplay: Equatable {
+        struct Pane: Equatable {
+            let kind: PaneActivityKind
+            let label: String
+            let leaderPID: Int32
+            let duration: String
+
+            init(_ activity: PaneActivity) {
+                kind = activity.kind
+                label = activity.label
+                leaderPID = activity.leaderPID
+                duration = activity.kind == .service ? activityDuration(activity.runningFor) : ""
+            }
+        }
+
+        let panes: [String: Pane]
+        let services: [String: [Pane]]
+        let memory: String
+
+        init(panes: [String: PaneActivity], services: [String: [PaneActivity]]) {
+            self.panes = panes.mapValues(Pane.init)
+            self.services = services.mapValues { $0.map(Pane.init) }
+            memory = activityMemory(panes.values.reduce(0) { $0 + $1.residentBytes })
+        }
+    }
+
+    /// Store a sample, notifying observers only when the visible part changed.
+    /// The raw values are always kept current for non-display readers.
+    private func storeActivity(_ panes: [String: PaneActivity],
+                               services: [String: [PaneActivity]]) {
+        let shown = ActivityDisplay(panes: paneActivity, services: servicesByTask)
+        if ActivityDisplay(panes: panes, services: services) != shown {
+            objectWillChange.send()
+        }
+        paneActivity = panes
+        servicesByTask = services
+    }
+
     private func sampleActivity() {
         guard !activitySampleInFlight else { return } // never queue up samples
         let live = paneRuntime.values.filter { $0.running && $0.pid > 0 }
         guard !live.isEmpty else {
-            if !paneActivity.isEmpty { paneActivity = [:] }
-            if !servicesByTask.isEmpty { servicesByTask = [:] }
+            if !paneActivity.isEmpty || !servicesByTask.isEmpty {
+                storeActivity([:], services: [:])
+            }
             return
         }
         // Two panes cannot share a pid; the uniquing keeps a stale duplicate
@@ -724,7 +771,6 @@ final class AppModel: ObservableObject {
             for (pid, activity) in sampled {
                 if let spec = specByPID[pid] { next[spec] = activity }
             }
-            if next != paneActivity { paneActivity = next }
 
             var services: [String: [PaneActivity]] = [:]
             for info in live {
@@ -735,7 +781,7 @@ final class AppModel: ObservableObject {
             for slug in services.keys {
                 services[slug]?.sort { $0.runningFor > $1.runningFor }
             }
-            if services != servicesByTask { servicesByTask = services }
+            storeActivity(next, services: services)
         }
     }
 
@@ -1300,7 +1346,13 @@ final class AppModel: ObservableObject {
                 SessionDiscovery.recentSessions(cwd: cwd, roots: roots, limit: limit)
             }.value
             guard let self else { return }
-            let changed = recentCache[cacheKey]?.rows != rows
+            // The rebind menu shows team + id in recency order. `at` moves
+            // every few seconds for any session that is writing, so comparing
+            // whole rows re-rendered the app on nearly every 10 s refresh.
+            func shown(_ rows: [SessionDiscovery.RecentSession]) -> [String] {
+                rows.map { "\($0.team) \($0.sid)" }
+            }
+            let changed = recentCache[cacheKey].map { shown($0.rows) } != shown(rows)
             if changed { objectWillChange.send() }
             recentCache[cacheKey] = (rows, Date())
             pendingRecentLookups.remove(cacheKey)
@@ -1796,6 +1848,15 @@ final class TaskSession: ObservableObject {
     /// column（側邊欄永遠不高亮、也不改變此狀態）。
     enum FocusZone { case terminal, notes }
     @Published var focusZone: FocusZone = .terminal
+
+    /// Every click on a pane or the notes lands here. @Published publishes
+    /// even an unchanged value, which re-rendered the whole task detail in
+    /// the middle of the click (and of a drag-selection), so assign only
+    /// what actually changes.
+    func focus(_ zone: FocusZone, spec: String? = nil) {
+        if let spec, focusedSpecID != spec { focusedSpecID = spec }
+        if focusZone != zone { focusZone = zone }
+    }
 
     private var noteTimer: Timer?
     private var machineTimer: Timer?
