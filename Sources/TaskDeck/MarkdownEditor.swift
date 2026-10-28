@@ -60,15 +60,18 @@ struct MarkdownNotesEditor: NSViewRepresentable {
         // update pass after the composition ends.
         if tv.hasMarkedText() { return }
         if tv.string != text { // external edit (e.g. Obsidian) — reload
-            let sel = tv.selectedRange()
-            tv.string = text
-            apply(tv)
-            let len = (text as NSString).length
-            tv.setSelectedRange(NSRange(location: min(sel.location, len), length: 0))
-            // The typing history refers to ranges in the text that was just
-            // replaced; undoing into a reloaded document would splice at the
-            // wrong offsets. Start over.
-            context.coordinator.undoManager.removeAllActions()
+            // Same for a click or drag-selection in progress: replacing the
+            // document mid-drag would drop the selection being made. Catch up
+            // on mouse-up instead.
+            if tv.isPressing {
+                let coordinator = context.coordinator
+                tv.onPressEnded = { [weak tv] in
+                    guard let tv else { return }
+                    coordinator.parent.syncText(into: tv, coordinator: coordinator)
+                }
+                return
+            }
+            syncText(into: tv, coordinator: context.coordinator)
         } else if (tv.font?.pointSize ?? 0) != fontSize {
             apply(tv) // uiScale changed
         }
@@ -79,17 +82,80 @@ struct MarkdownNotesEditor: NSViewRepresentable {
         (scroll.documentView as? NSTextView)?.delegate = nil
     }
 
-    /// (Re)apply font, colour and line spacing to the whole document + typing.
-    private func apply(_ tv: NSTextView) {
-        let font = NSFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
+    /// Bring the editor to `text` (an Obsidian edit, or the app's own write),
+    /// replacing only the span that differs. App-side writes are frontmatter
+    /// keys at the top of the note; swapping the whole string for them reset
+    /// the selection and scroll position and re-laid out the entire note.
+    fileprivate func syncText(into tv: MarkdownTextView, coordinator: Coordinator) {
+        guard !tv.hasMarkedText(), tv.string != text else { return }
+        defer {
+            // The typing history refers to ranges in the text that was just
+            // replaced; undoing into a reloaded document would splice at the
+            // wrong offsets. Start over.
+            coordinator.undoManager.removeAllActions()
+        }
+        guard let ts = tv.textStorage else {
+            tv.string = text
+            apply(tv)
+            return
+        }
+        let old = ts.string as NSString
+        let new = text as NSString
+        let shared = min(old.length, new.length)
+        var prefix = 0
+        while prefix < shared, old.character(at: prefix) == new.character(at: prefix) {
+            prefix += 1
+        }
+        var suffix = 0
+        while suffix < shared - prefix,
+              old.character(at: old.length - 1 - suffix) == new.character(at: new.length - 1 - suffix) {
+            suffix += 1
+        }
+        // Never cut a surrogate pair at either edge of the replaced span.
+        if prefix > 0, UTF16.isLeadSurrogate(old.character(at: prefix - 1)) { prefix -= 1 }
+        if suffix > 0, UTF16.isTrailSurrogate(old.character(at: old.length - suffix)) { suffix -= 1 }
+
+        let oldRange = NSRange(location: prefix, length: old.length - prefix - suffix)
+        let newRange = NSRange(location: prefix, length: new.length - prefix - suffix)
+        let selection = tv.selectedRange()
+        ts.beginEditing()
+        ts.replaceCharacters(in: oldRange, with: NSAttributedString(
+            string: new.substring(with: newRange), attributes: textAttributes))
+        ts.endEditing()
+        guard ts.string == text else { // belt and braces: never leave a divergent editor
+            tv.string = text
+            apply(tv)
+            tv.setSelectedRange(NSRange(location: min(selection.location, new.length), length: 0))
+            return
+        }
+        // Keep the user's place: a selection before the change stays, one
+        // after it moves with it, one overlapping it collapses to its end.
+        var kept = selection
+        if selection.location >= oldRange.upperBound {
+            kept.location += newRange.length - oldRange.length
+        } else if selection.upperBound > oldRange.location {
+            kept = NSRange(location: newRange.upperBound, length: 0)
+        }
+        kept.location = min(kept.location, new.length)
+        kept.length = min(kept.length, new.length - kept.location)
+        tv.setSelectedRange(kept)
+    }
+
+    private var textAttributes: [NSAttributedString.Key: Any] {
         let p = NSMutableParagraphStyle()
         p.lineSpacing = 2.5
-        let attrs: [NSAttributedString.Key: Any] = [
-            .font: font, .foregroundColor: NSColor.labelColor, .paragraphStyle: p,
+        return [
+            .font: NSFont.monospacedSystemFont(ofSize: fontSize, weight: .regular),
+            .foregroundColor: NSColor.labelColor, .paragraphStyle: p,
         ]
+    }
+
+    /// (Re)apply font, colour and line spacing to the whole document + typing.
+    private func apply(_ tv: NSTextView) {
+        let attrs = textAttributes
         tv.typingAttributes = attrs
-        tv.defaultParagraphStyle = p
-        tv.font = font
+        tv.defaultParagraphStyle = attrs[.paragraphStyle] as? NSParagraphStyle
+        tv.font = attrs[.font] as? NSFont
         if let ts = tv.textStorage {
             ts.addAttributes(attrs, range: NSRange(location: 0, length: ts.length))
         }
@@ -124,11 +190,38 @@ struct MarkdownNotesEditor: NSViewRepresentable {
 
 final class MarkdownTextView: NSTextView {
     var onFocus: (() -> Void)?
+    /// Runs once when the current click / drag-selection in this editor ends.
+    var onPressEnded: (() -> Void)?
+    private var trackingMouse = false
+
+    /// A click or drag-selection is in progress here. NSTextView tracks the
+    /// drag inside `mouseDown`; the hardware button state backs that up.
+    var isPressing: Bool {
+        trackingMouse || (NSEvent.pressedMouseButtons & 1 != 0 && window?.firstResponder === self)
+    }
 
     override func becomeFirstResponder() -> Bool {
         let ok = super.becomeFirstResponder()
         if ok { onFocus?() }
         return ok
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        trackingMouse = true
+        super.mouseDown(with: event)
+        trackingMouse = false
+        finishPress()
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        super.mouseUp(with: event)
+        finishPress()
+    }
+
+    private func finishPress() {
+        guard let pending = onPressEnded else { return }
+        onPressEnded = nil
+        pending()
     }
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
