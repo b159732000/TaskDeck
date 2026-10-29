@@ -29,5 +29,11 @@ if pgrep -x TaskDeck > /dev/null; then
   pkill -x TaskDeck 2>/dev/null || true
 fi
 sleep 0.2
-open "$DEST"
+# TASKDECK_OPEN_BACKGROUND=1 relaunches without taking focus — for unattended
+# installs while the user is typing in another app.
+if [[ "${TASKDECK_OPEN_BACKGROUND:-}" == 1 ]]; then
+  open -g "$DEST"
+else
+  open "$DEST"
+fi
 echo "Relaunched $DEST"

@@ -709,7 +709,8 @@ struct DockView: View {
         // ViewThatFits — back when the dock lived in a safeAreaInset, that
         // collapsed the inset to zero height and left the + floating over
         // the list.
-        row(totals, memory: sidebarWidth >= 235, idle: sidebarWidth >= 190)
+        // While disconnected, 重連 takes the memory figure's room.
+        row(totals, memory: sidebarWidth >= 235 && model.daemonOK, idle: sidebarWidth >= 190)
         .lineLimit(1)
         .padding(.leading, 13)
         .padding(.trailing, 5)
@@ -774,11 +775,12 @@ struct DockView: View {
                 Button("重連") { model.reconnectDaemon() }
                     .font(Theme.Fonts.ui(10.5, .semibold))
                     .buttonStyle(.borderless)
+                    .fixedSize() // squeezed, it wrapped into 重 over 連
             }
         }
         .help(model.daemonOK
             ? (model.daemonNote ?? "taskdeckd 連線中（GUI 重開不影響終端）")
-            : "daemon 未連線")
+            : "daemon 未連線，每隔幾秒自動重試；按「重連」立刻重試")
     }
 
     private func helpText(_ totals: AppModel.ActivityTotals) -> String {

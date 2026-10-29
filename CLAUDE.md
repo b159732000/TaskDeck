@@ -80,6 +80,14 @@ relaunches itself on one (`ExceptionRecovery`; terminals live in taskdeckd)
 and appends the exception — with the reason the unified log redacts — to
 `App Support/TaskDeck/exceptions.log`. Start there.
 
+Every terminal blank and a red dot in the sidebar dock means the GUI lost its
+daemon connection — usually taskdeckd dropping a GUI that stopped reading
+for 3 s (`daemon.log`: `made no write progress … dropping subscriber`; on
+2026-10-29 the whole Mac was deep in swap). The GUI reconnects by itself
+(`scheduleDaemonReconnect`, backoff in `DaemonReconnectRules`), connect-only:
+a dot that stays red means the daemon itself is gone, and only 重連 or a
+relaunch starts a new one.
+
 ## Design tokens (Night Lane)
 
 `Theme.swift` is the single source: lane colours (`Theme.Lane`, one

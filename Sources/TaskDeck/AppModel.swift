@@ -157,11 +157,17 @@ final class AppModel: ObservableObject {
                 self.daemonEstablishSerial &+= 1
                 self.daemonOK = false
                 self.daemonReady = false
+                self.reconnectAttempt = DaemonReconnectRules.attemptAfterDrop(
+                    previous: self.reconnectAttempt,
+                    uptime: self.daemonReadySince.map { Date().timeIntervalSince($0) })
+                self.daemonReadySince = nil
+                self.scheduleDaemonReconnect()
             }
         }
 
         Task { @MainActor in
             await self.establishDaemon()
+            if !self.daemonReady { self.scheduleDaemonReconnect() }
             if self.selection == nil {
                 self.selection = self.tasks.first(where: { $0.status == "active" })?.id
             }
@@ -332,11 +338,11 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func establishDaemon() async {
+    private func establishDaemon(allowSpawn: Bool = true) async {
         daemonEstablishSerial &+= 1
         let establishSerial = daemonEstablishSerial
         daemonReady = false
-        let connected = await client.connectOrSpawn()
+        let connected = await client.connectOrSpawn(allowSpawn: allowSpawn)
         guard daemonEstablishSerial == establishSerial else { return }
         daemonOK = connected
         guard connected else {
@@ -382,13 +388,45 @@ final class AppModel: ObservableObject {
         daemonOK = true
         daemonConnectionGeneration &+= 1
         daemonReady = true
+        daemonReadySince = Date()
         let cbs = readyCallbacks
         readyCallbacks.removeAll()
         for cb in cbs { cb() }
     }
 
     func reconnectDaemon() {
-        Task { @MainActor in await self.establishDaemon() }
+        reconnectTask?.cancel()
+        reconnectTask = nil
+        reconnectAttempt = 0
+        Task { @MainActor in
+            await self.establishDaemon()
+            if !self.daemonReady { self.scheduleDaemonReconnect() }
+        }
+    }
+
+    /// taskdeckd disconnects a client that stops reading for 3 s and expects
+    /// it to come back for a fresh replay. A GUI stalled that long (the Mac
+    /// deep in swap, 2026-10-29 20:42) used to sit with every terminal blank
+    /// until someone found the 重連 button; now it reconnects by itself.
+    /// Connect-only: a daemon that is gone stays gone until 重連 (which may
+    /// spawn one), so an approved daemon restart never races a respawn.
+    private var reconnectTask: Task<Void, Never>?
+    private var reconnectAttempt = 0
+    private var daemonReadySince: Date?
+
+    private func scheduleDaemonReconnect() {
+        guard reconnectTask == nil else { return }
+        let delay = DaemonReconnectRules.delay(attempt: reconnectAttempt)
+        reconnectAttempt += 1
+        reconnectTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            guard let self, !Task.isCancelled else { return }
+            self.reconnectTask = nil
+            guard !self.daemonReady else { return }
+            NSLog("TaskDeck: reconnecting to taskdeckd (attempt \(self.reconnectAttempt))")
+            await self.establishDaemon(allowSpawn: false)
+            if !self.daemonReady { self.scheduleDaemonReconnect() }
+        }
     }
 
     func refreshPaneList() {

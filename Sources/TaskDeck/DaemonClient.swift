@@ -185,10 +185,13 @@ final class DaemonClient {
 
     var isConnected: Bool { fd >= 0 }
 
-    func connectOrSpawn() async -> Bool {
+    /// `allowSpawn: false` only reaches a daemon that is already running —
+    /// automatic reconnects must never start one (see AppModel).
+    func connectOrSpawn(allowSpawn: Bool = true) async -> Bool {
         if await withCheckedContinuation({ (cont: CheckedContinuation<Bool, Never>) in
             queue.async { cont.resume(returning: self.connectOnce()) }
         }) { return true }
+        guard allowSpawn else { return false }
 
         spawnDaemon()
         for _ in 0 ..< 25 {

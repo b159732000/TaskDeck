@@ -1120,6 +1120,21 @@ check("exception-recovery: exactly at the uptime minimum relaunches",
           launchedAt: erNow.addingTimeInterval(-ExceptionRecoveryRules.minimumUptime),
           lastRelaunch: nil, now: erNow))
 
+// MARK: daemon reconnect — quick after a drop, backing off while it flaps
+
+check("reconnect: first try comes within a second",
+      DaemonReconnectRules.delay(attempt: 0) < 1)
+check("reconnect: waits never shrink",
+      zip(DaemonReconnectRules.delays, DaemonReconnectRules.delays.dropFirst()).allSatisfy { $0 <= $1 })
+check("reconnect: capped — attempt 99 waits like the last step",
+      DaemonReconnectRules.delay(attempt: 99) == DaemonReconnectRules.delays.last)
+check("reconnect: a connection healthy for an hour starts over",
+      DaemonReconnectRules.attemptAfterDrop(previous: 4, uptime: 3600) == 0)
+check("reconnect: dropped again 5 s after reconnecting keeps backing off",
+      DaemonReconnectRules.attemptAfterDrop(previous: 4, uptime: 5) == 4)
+check("reconnect: lost before it was ever ready keeps backing off",
+      DaemonReconnectRules.attemptAfterDrop(previous: 2, uptime: nil) == 2)
+
 // MARK: snapshot — URLs containing parens survive the markdown round-trip
 
 let parenOut = ResourceOps.setChromeSnapshot("# t\n", entries: [
