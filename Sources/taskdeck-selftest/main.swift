@@ -1098,6 +1098,28 @@ check("priority-alert: currently viewed completion stays quiet",
           isMainline: true, previous: .aiRunning, current: .needsYou,
           isCurrentlyViewed: true))
 
+// MARK: exception recovery — relaunch once, never in a loop
+
+let erNow = Date(timeIntervalSince1970: 1_800_000_000)
+check("exception-recovery: a GUI up for minutes relaunches",
+      ExceptionRecoveryRules.shouldRelaunch(
+          launchedAt: erNow.addingTimeInterval(-3600), lastRelaunch: nil, now: erNow))
+check("exception-recovery: thrown during startup — no relaunch (it would throw again)",
+      !ExceptionRecoveryRules.shouldRelaunch(
+          launchedAt: erNow.addingTimeInterval(-20), lastRelaunch: nil, now: erNow))
+check("exception-recovery: again within 10 min of the last relaunch — no loop",
+      !ExceptionRecoveryRules.shouldRelaunch(
+          launchedAt: erNow.addingTimeInterval(-300),
+          lastRelaunch: erNow.addingTimeInterval(-305), now: erNow))
+check("exception-recovery: an old relaunch does not block a new one",
+      ExceptionRecoveryRules.shouldRelaunch(
+          launchedAt: erNow.addingTimeInterval(-3600),
+          lastRelaunch: erNow.addingTimeInterval(-86_400), now: erNow))
+check("exception-recovery: exactly at the uptime minimum relaunches",
+      ExceptionRecoveryRules.shouldRelaunch(
+          launchedAt: erNow.addingTimeInterval(-ExceptionRecoveryRules.minimumUptime),
+          lastRelaunch: nil, now: erNow))
+
 // MARK: snapshot — URLs containing parens survive the markdown round-trip
 
 let parenOut = ResourceOps.setChromeSnapshot("# t\n", entries: [

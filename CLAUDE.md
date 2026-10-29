@@ -73,6 +73,13 @@ never animate with a SwiftUI `repeatForever` (use a Core Animation layer —
 `PulseRing`, `CursorBlock`), and publish model changes only when what the UI
 shows actually changes.
 
+A window that stopped redrawing while `sample` shows the main thread idle is
+an Objective-C exception AppKit swallowed mid SwiftUI update (so far:
+NSRangeException out of the sidebar List's NSOutlineView diff). The GUI now
+relaunches itself on one (`ExceptionRecovery`; terminals live in taskdeckd)
+and appends the exception — with the reason the unified log redacts — to
+`App Support/TaskDeck/exceptions.log`. Start there.
+
 ## Design tokens (Night Lane)
 
 `Theme.swift` is the single source: lane colours (`Theme.Lane`, one

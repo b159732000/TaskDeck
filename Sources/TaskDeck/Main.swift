@@ -11,6 +11,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // daemon already ignores it; the GUI must too — a dead socket should
         // surface as a write error, not a process death.
         signal(SIGPIPE, SIG_IGN)
+        // An exception AppKit swallows can leave SwiftUI never redrawing
+        // again; relaunch instead of sitting frozen (see ExceptionRecovery).
+        MainActor.assumeIsolated { ExceptionRecovery.install() }
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
