@@ -879,6 +879,46 @@ check("activity: the argument vector reader returns this process's argv",
 check("activity: resident memory of a live process is non-zero",
       ProcessTable.residentBytes(getpid()) > 0)
 
+// MARK: accounts — a running claude's account is the CLAUDE_CONFIG_DIR it started with
+
+let acctTeams = [
+    TeamDef(id: "claude", label: "Claude", kind: "claude", configDir: "~/.claude"),
+    TeamDef(id: "claude3", label: "Claude 3", kind: "claude", configDir: "~/.claude-team3"),
+    TeamDef(id: "codex", label: "Codex", kind: "other"),
+]
+let acctHome = NSHomeDirectory()
+check("account: an alias's expanded CLAUDE_CONFIG_DIR names its team",
+      AccountRules.team(configDir: acctHome + "/.claude-team3", teams: acctTeams) == "claude3")
+check("account: ~ spelling and a trailing slash still match",
+      AccountRules.team(configDir: "~/.claude-team3/", teams: acctTeams) == "claude3")
+check("account: no CLAUDE_CONFIG_DIR is the default account",
+      AccountRules.team(configDir: nil, teams: acctTeams) == "claude"
+          && AccountRules.team(configDir: "", teams: acctTeams) == "claude")
+check("account: a directory no team declares stays unnamed",
+      AccountRules.team(configDir: acctHome + "/.claude-clean", teams: acctTeams) == nil)
+
+/// A KERN_PROCARGS2 buffer as the kernel lays it out: argc, the exec path
+/// with alignment padding, argv, then the environment and apple[] strings.
+func procArgsBuffer(argv: [String], environment: [String]) -> [UInt8] {
+    var argc = Int32(argv.count)
+    var out = withUnsafeBytes(of: &argc) { Array($0) }
+    out += Array("/usr/local/bin/claude".utf8) + [0, 0, 0]
+    for entry in argv + environment { out += Array(entry.utf8) + [0] }
+    return out + [0, 0]
+}
+let parsedArgs = ProcessTable.parseArguments(procArgsBuffer(
+    argv: ["claude", "--dangerously-skip-permissions"],
+    environment: ["HOME=/Users/x", "CLAUDE_CONFIG_DIR=/Users/x/.claude-team3",
+                  "executable_path=/usr/local/bin/claude"]))
+check("process args: argv stops at argc",
+      parsedArgs.argv == ["claude", "--dangerously-skip-permissions"])
+check("process args: the environment follows argv",
+      parsedArgs.environmentValue("CLAUDE_CONFIG_DIR") == "/Users/x/.claude-team3")
+check("process args: lookup is by whole name, unset is nil",
+      parsedArgs.environmentValue("CLAUDE") == nil && parsedArgs.environmentValue("TERM") == nil)
+check("process args: the live reader sees this process's environment",
+      ProcessTable.arguments(getpid()).environmentValue("PATH") != nil)
+
 // MARK: acknowledgement carry-forward — a session that merely ENDS keeps its 已讀
 
 let cfNow = Date()

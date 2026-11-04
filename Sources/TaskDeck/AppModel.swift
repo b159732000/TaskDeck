@@ -68,6 +68,10 @@ final class AppModel: ObservableObject {
     /// (not in a view body): resolving pane → task can touch machine state, and
     /// the sidebar re-renders on every hover.
     private(set) var servicesByTask: [String: [PaneActivity]] = [:]
+    /// specID / slug → the account(s) its AI CLIs are running right now (see
+    /// `runningTeam`). Built with the sample for the same reason as above.
+    private var runningTeamBySpec: [String: String] = [:]
+    private var runningTeamsByTask: [String: Set<String>] = [:]
     private let activitySampler = PaneActivitySampler()
     private var activityTimer: Timer?
     private var activitySampleInFlight = false
@@ -764,32 +768,45 @@ final class AppModel: ObservableObject {
         let panes: [String: Pane]
         let services: [String: [Pane]]
         let memory: String
+        // The account menus' 「正在跑」.
+        let runningTeams: [String: String]
+        let runningTeamsByTask: [String: Set<String>]
 
-        init(panes: [String: PaneActivity], services: [String: [PaneActivity]]) {
+        init(panes: [String: PaneActivity], services: [String: [PaneActivity]],
+             runningTeams: [String: String], runningTeamsByTask: [String: Set<String>]) {
             self.panes = panes.mapValues(Pane.init)
             self.services = services.mapValues { $0.map(Pane.init) }
             memory = activityMemory(panes.values.reduce(0) { $0 + $1.residentBytes })
+            self.runningTeams = runningTeams
+            self.runningTeamsByTask = runningTeamsByTask
         }
     }
 
     /// Store a sample, notifying observers only when the visible part changed.
     /// The raw values are always kept current for non-display readers.
     private func storeActivity(_ panes: [String: PaneActivity],
-                               services: [String: [PaneActivity]]) {
-        let shown = ActivityDisplay(panes: paneActivity, services: servicesByTask)
-        if ActivityDisplay(panes: panes, services: services) != shown {
+                               services: [String: [PaneActivity]],
+                               runningTeams: [String: String],
+                               runningTeamsByTask: [String: Set<String>]) {
+        let shown = ActivityDisplay(panes: paneActivity, services: servicesByTask,
+                                    runningTeams: runningTeamBySpec,
+                                    runningTeamsByTask: self.runningTeamsByTask)
+        if ActivityDisplay(panes: panes, services: services, runningTeams: runningTeams,
+                           runningTeamsByTask: runningTeamsByTask) != shown {
             objectWillChange.send()
         }
         paneActivity = panes
         servicesByTask = services
+        runningTeamBySpec = runningTeams
+        self.runningTeamsByTask = runningTeamsByTask
     }
 
     private func sampleActivity() {
         guard !activitySampleInFlight else { return } // never queue up samples
         let live = paneRuntime.values.filter { $0.running && $0.pid > 0 }
         guard !live.isEmpty else {
-            if !paneActivity.isEmpty || !servicesByTask.isEmpty {
-                storeActivity([:], services: [:])
+            if !paneActivity.isEmpty || !servicesByTask.isEmpty || !runningTeamBySpec.isEmpty {
+                storeActivity([:], services: [:], runningTeams: [:], runningTeamsByTask: [:])
             }
             return
         }
@@ -811,15 +828,22 @@ final class AppModel: ObservableObject {
             }
 
             var services: [String: [PaneActivity]] = [:]
+            var teams: [String: String] = [:]
+            var teamsByTask: [String: Set<String>] = [:]
             for info in live {
-                guard let activity = next[info.specID], activity.kind == .service,
-                      let slug = slug(forPane: info) else { continue }
-                services[slug, default: []].append(activity)
+                guard let activity = next[info.specID] else { continue }
+                if activity.kind == .service, let slug = slug(forPane: info) {
+                    services[slug, default: []].append(activity)
+                }
+                if let team = runningTeam(activity) {
+                    teams[info.specID] = team
+                    if let slug = slug(forPane: info) { teamsByTask[slug, default: []].insert(team) }
+                }
             }
             for slug in services.keys {
                 services[slug]?.sort { $0.runningFor > $1.runningFor }
             }
-            storeActivity(next, services: services)
+            storeActivity(next, services: services, runningTeams: teams, runningTeamsByTask: teamsByTask)
         }
     }
 
@@ -857,6 +881,36 @@ final class AppModel: ObservableObject {
     /// Long-running commands (dev server, DB, watcher) in this task's panes,
     /// longest-running first — the ones worth noticing you left behind.
     func services(_ slug: String) -> [PaneActivity] { servicesByTask[slug] ?? [] }
+
+    /// The account the AI CLI in this pane is running right now: a claude's
+    /// CLAUDE_CONFIG_DIR, or the team named like the CLI (codex, opencode).
+    /// A process fact, offered only as 「正在跑」 in the account menus: the
+    /// account a task or pane SHOWS is the one set by hand.
+    func runningTeam(specID: String) -> String? { runningTeamBySpec[specID] }
+
+    /// Every account running in the task's terminals right now.
+    func runningTeams(_ slug: String) -> Set<String> { runningTeamsByTask[slug] ?? [] }
+
+    /// For the snapshot sidecar: per active task, the account set by hand
+    /// ("" = unset) and the ones its terminals are running.
+    func accountSnapshot() -> [String: [String: Any]] {
+        var out: [String: [String: Any]] = [:]
+        for t in tasks where t.status == "active" {
+            let running = runningTeams(t.id).sorted()
+            guard taskTeam(t.id) != nil || !running.isEmpty else { continue }
+            out[t.id] = ["set": taskTeam(t.id) ?? "", "running": running]
+        }
+        return out
+    }
+
+    private func runningTeam(_ activity: PaneActivity) -> String? {
+        guard activity.kind == .ai else { return nil }
+        if let dir = activity.claudeConfigDir {
+            return AccountRules.team(configDir: dir, teams: config.teams)
+        }
+        let command = activity.label.split(separator: " ").first.map(String.init) ?? activity.label
+        return config.teams.first { $0.kind != "claude" && $0.id == command }?.id
+    }
 
     /// Every service pane with the task it belongs to, for the summary tooltip.
     func serviceOverview() -> [(task: String, activity: PaneActivity)] {
@@ -1118,8 +1172,7 @@ final class AppModel: ObservableObject {
     private struct Derived {
         let group: SidebarGroup
         let attention: (permission: Bool, since: Date)?
-        let activeTeam: String?
-        let mainTeam: String?          // 主力 (manual) ?? 現用 — the sidebar's "主 AI"
+        let team: String?              // the account set by hand (taskTeam)
         let backgroundCount: Int       // informational only; never drives grouping
         let lastActivity: Date?        // for silence(); cached so the sidebar sort
                                        // (re-run on every hover) does zero disk I/O
@@ -1142,14 +1195,12 @@ final class AppModel: ObservableObject {
             let group = GroupingRules.classify(status: t.status, group: t.group,
                                                quiet: lastActivity.map { now.timeIntervalSince($0) } ?? 0,
                                                signals: taskSignals, now: now)
-            let active = computeActiveTeam(resolved)
             let backgroundCount = taskSessions.reduce(into: 0) { count, session in
                 count += backgroundTasksBySession[session.sid] ?? 0
             }
             cache[t.id] = Derived(group: group,
                                   attention: GroupingRules.attention(taskSignals),
-                                  activeTeam: active,
-                                  mainTeam: primaryTeam(t.id) ?? active,
+                                  team: primaryTeam(t.id),
                                   backgroundCount: backgroundCount,
                                   lastActivity: lastActivity)
         }
@@ -1227,8 +1278,7 @@ final class AppModel: ObservableObject {
         for (slug, a) in lhs {
             guard let b = rhs[slug],
                   a.group == b.group,
-                  a.activeTeam == b.activeTeam,
-                  a.mainTeam == b.mainTeam,
+                  a.team == b.team,
                   a.backgroundCount == b.backgroundCount,
                   a.lastActivity == b.lastActivity,
                   a.attention?.permission == b.attention?.permission,
@@ -1237,16 +1287,41 @@ final class AppModel: ObservableObject {
         return true
     }
 
-    /// Manually designated 主力 (quota home) from machine state; in-memory for
-    /// the open task, else read off disk (only here, off the render path).
+    /// The task's account from machine state; in-memory for the open task,
+    /// else read off disk (only here, off the render path).
     private func primaryTeam(_ slug: String) -> String? {
         (sessions[slug]?.machine
             ?? diskTaskSources[slug]?.machine
             ?? store.cachedMachineState(slug)).primaryTeam
     }
 
-    /// The task's "主 AI" for the sidebar: manual 主力 if set, else 現用.
-    func mainTeam(_ slug: String) -> String? { derivedCache[slug]?.mainTeam }
+    /// Which Claude account the task uses, as set by hand — the sidebar and
+    /// header chips. Seeded once from the first AI pane's team, never
+    /// inferred: the old chip fell back to a guess from session files and
+    /// hook signals, and both went wrong whenever a claude was started by
+    /// hand in a shell pane or a task switched accounts (2026-11-04: 7 tasks
+    /// showed an account none of their terminals ran), so James asked for it
+    /// to be manual. What the terminals really run is only a hint in the
+    /// menus (`runningTeams`).
+    func taskTeam(_ slug: String) -> String? { derivedCache[slug]?.team }
+
+    func setTaskTeam(_ slug: String, _ team: String?) {
+        if let session = sessions[slug] {
+            session.machine.primaryTeam = team
+            session.flushMachine()
+        } else {
+            // A sidebar pick for a closed task: no TaskSession (creating one
+            // would auto-start its panes), so write the machine state and the
+            // cached source the derived values read.
+            var machine = store.machineState(slug)
+            machine.primaryTeam = team
+            store.saveMachineState(slug, machine)
+            if let source = diskTaskSources[slug] {
+                diskTaskSources[slug] = TaskAISource(text: source.text, machine: machine)
+            }
+        }
+        refreshDerived()
+    }
 
     /// Informational count of Claude-native background tasks. It is orthogonal
     /// to ownership/attention, so "等你 · 背景 1" is a valid simultaneous state.
@@ -1263,13 +1338,14 @@ final class AppModel: ObservableObject {
     /// every hover re-sort.)
     func lastActivity(_ slug: String) -> Date? { derivedCache[slug]?.lastActivity }
 
-    /// Ground-truth account for a session: which team's CLAUDE_CONFIG_DIR
+    /// The account to resume a session under: which team's CLAUDE_CONFIG_DIR
     /// actually holds its conversation record. Beats the manifest's recorded
     /// team, which is only a guess at creation and wrong whenever the session
     /// was started/switched to another account by hand (平滑著色: manifest
     /// said claude, the record lived in claude-team3). The record is stored
     /// per project cwd as either `<sid>.jsonl` (older) or a `<sid>` directory
-    /// (this claude version) — match both. nil = unknown.
+    /// (this claude version) — match both. nil = unknown. Not a display
+    /// source: which account a task uses is set by hand (`taskTeam`).
     // Positive results live for the process (a conversation doesn't move
     // accounts); misses retry after a backoff. Crucially, lookup is cache-only
     // on the main actor: directory traversal happens in a detached task.
@@ -1278,10 +1354,6 @@ final class AppModel: ObservableObject {
     private var queuedTeamFileLookups = Set<String>()
     private var teamFileLookupTask: Task<Void, Never>?
     private static let missingTeamRetry: TimeInterval = 5
-
-    func teamFromSessionFile(_ sid: String) -> String? {
-        cachedTeamsFromSessionFiles([sid])[sid.lowercased()]
-    }
 
     /// Batch cache lookup used by the resume menu. Missing ids are resolved
     /// together in the background; this function never performs file I/O.
@@ -1336,15 +1408,10 @@ final class AppModel: ObservableObject {
             }
             teamFileLookupTask = nil
             beginTeamFileLookupIfNeeded()
-            // Active-team chips and resume rows may both depend on this cache.
-            // Publish only when the derived active/main team really changed.
-            // Resume-menu content is evaluated again when the menu opens, so
-            // a same-team cache warm-up does not justify rebuilding the app.
-            if gainedResult, !refreshDerived() {
-                // No active/main-team field changed, but resume rows and pane
-                // headers read this cache directly.
-                objectWillChange.send()
-            }
+            // Only the resume rows read this cache. Their content is evaluated
+            // again when the menu opens, so a same-team cache warm-up does not
+            // justify rebuilding the app; a newly found account does.
+            if gainedResult { objectWillChange.send() }
         }
     }
 
@@ -1395,25 +1462,6 @@ final class AppModel: ObservableObject {
             recentCache[cacheKey] = (rows, Date())
             pendingRecentLookups.remove(cacheKey)
         }
-    }
-
-    /// The account currently working on the task — "現用" in the header chip.
-    /// The freshest-signal session's REAL account (resolved from its file
-    /// location), falling back to the manifest team only when the file can't
-    /// be found. Display-only: never rewrites primaryTeam (主力 is the manual
-    /// quota home).
-    func activeTeam(_ slug: String) -> String? { derivedCache[slug]?.activeTeam }
-
-    private func computeActiveTeam(_ resolved: [ResolvedAISession]) -> String? {
-        var best: (ts: Date, sid: String, team: String?)?
-        for item in resolved {
-            let candidate = (item.entry.ts, item.session.sid, item.session.team)
-            if best == nil || candidate.0 > best!.ts {
-                best = candidate
-            }
-        }
-        guard let best else { return nil }
-        return teamFromSessionFile(best.sid) ?? best.team
     }
 
     /// Any session actively running right now (hook-fresh within 30 min —
@@ -2018,7 +2066,7 @@ final class TaskSession: ObservableObject {
     /// manually-added session ids, resource links, notes. Skipped when an
     /// in-app edit is pending so we never clobber unsaved typing; the reload
     /// itself doesn't schedule a save-back. Re-deriving noteText refreshes
-    /// grouping / 現用 / the 續上 list, since taskAISessions reads it.
+    /// grouping / the 續上 list, since taskAISessions reads it.
     func reloadFromDiskIfChanged() {
         guard !deleted else { return }
         guard noteTimer == nil else { return } // pending in-app edit wins
@@ -2073,8 +2121,9 @@ final class TaskSession: ObservableObject {
             spec.sessionID = sid
             noteText = TaskStore.appendSessionLine(noteText, line: "- \(team.id) \(sid)")
         }
-        if machine.primaryTeam == nil { machine.primaryTeam = team.id }
-        // （之後想換配額之家：點標頭的主力 chip 手動改，系統不自動改寫。）
+        // The pick for the task's first AI pane seeds its account; after that
+        // only a hand pick (sidebar / header chip) changes it.
+        if machine.primaryTeam == nil { app.setTaskTeam(slug, team.id) }
         add(spec, side: side)
     }
 
@@ -2108,9 +2157,10 @@ final class TaskSession: ObservableObject {
     /// Point an AI pane's spec at the account/session it's ACTUALLY running,
     /// when it drifted from what the app pre-generated (user ran a different
     /// claude by hand, resumed another session, etc.). Fixes attribution so
-    /// the task's group / 現用 / badge reflect reality — without restarting
-    /// the live pane. Also records the id in the note manifest so it survives
-    /// reboots. `sid` nil = just correct the account label.
+    /// the task's group / the pane's account badge reflect reality — without
+    /// restarting the live pane. Also records the id in the note manifest so
+    /// it survives reboots. `sid` nil = just correct the pane's account (the
+    /// badge and what a restart launches).
     func rebindPane(specID: String, team: String, sid: String?) {
         guard let i = machine.panes.firstIndex(where: { $0.id == specID }) else { return }
         machine.panes[i].team = team
@@ -2227,12 +2277,6 @@ final class TaskSession: ObservableObject {
             machine.layout = LayoutOps.remove(layout, target: spec.id)
         }
         if focusedSpecID == spec.id { focusedSpecID = nil }
-    }
-
-    /// 手動接管主力（配額之家）；自動偵測只顯示「現用」、永不改寫這裡。
-    /// nil 清除主力（回到「設定主力」）。
-    func setPrimaryTeam(_ team: String?) {
-        machine.primaryTeam = team
     }
 
     /// The task's permanent id (frontmatter `id`, rename-proof). Stamped at

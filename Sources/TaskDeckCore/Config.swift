@@ -48,7 +48,8 @@ public struct TeamDef: Codable, Identifiable, Equatable {
     /// The CLAUDE_CONFIG_DIR this team's alias points at (e.g.
     /// "~/.claude-team3"). Lets the GUI infer AI state from the session
     /// file's mtime when hook signals are absent (sessions started before
-    /// the hooks were installed).
+    /// the hooks were installed), find a conversation's account to resume
+    /// it, and name the account a running claude uses (`AccountRules`).
     public var configDir: String?
 
     public init(id: String, label: String, kind: String, args: String? = nil,
@@ -58,6 +59,26 @@ public struct TeamDef: Codable, Identifiable, Equatable {
         self.kind = kind
         self.args = args
         self.configDir = configDir
+    }
+}
+
+/// Which configured team a running `claude` belongs to. Every claude-family
+/// alias execs the same binary and differs only by the CLAUDE_CONFIG_DIR it
+/// sets, so that variable in the process's environment is the account.
+public enum AccountRules {
+    /// Where claude keeps its account when CLAUDE_CONFIG_DIR is unset.
+    public static let defaultConfigDir = "~/.claude"
+
+    /// `configDir` nil or empty = the variable is unset (default account).
+    /// nil result = no team declares that directory.
+    public static func team(configDir: String?, teams: [TeamDef]) -> String? {
+        let dir = configDir.flatMap { $0.isEmpty ? nil : $0 } ?? defaultConfigDir
+        let wanted = normalized(dir)
+        return teams.first { $0.kind == "claude" && $0.configDir.map(normalized) == wanted }?.id
+    }
+
+    private static func normalized(_ path: String) -> String {
+        (Paths.expand(path) as NSString).standardizingPath
     }
 }
 

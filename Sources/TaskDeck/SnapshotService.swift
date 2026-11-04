@@ -98,12 +98,15 @@ final class SnapshotService {
             Theme.Fonts.resolved[family] =
                 Theme.Fonts.nsFont(family: family, size: 13, weight: .regular, opticalSize: false) != nil
         }
-        let sidecar: [String: Any] = [
+        var sidecar: [String: Any] = [
             "at": stamp,
             "windows": windows,
             "fonts": Theme.Fonts.resolved,
             "preset": Theme.bgPresets[min(max(0, Theme.bgPresetIndex), Theme.bgPresets.count - 1)].name,
         ]
+        // Menus are not windows a capture can draw: record what the account
+        // menus would show instead.
+        if let model = AppDelegate.model { sidecar["accounts"] = model.accountSnapshot() }
         guard let data = try? JSONSerialization.data(withJSONObject: sidecar, options: [.prettyPrinted, .sortedKeys]) else {
             return nil
         }

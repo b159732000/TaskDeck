@@ -27,6 +27,23 @@ public struct ProcessRecord: Equatable, Sendable {
     }
 }
 
+public struct ProcessArguments: Equatable, Sendable {
+    public let argv: [String]
+    /// `KEY=value` strings.
+    public let environment: [String]
+
+    public init(argv: [String], environment: [String]) {
+        self.argv = argv
+        self.environment = environment
+    }
+
+    /// nil when the variable is not set.
+    public func environmentValue(_ name: String) -> String? {
+        let prefix = name + "="
+        return environment.first { $0.hasPrefix(prefix) }.map { String($0.dropFirst(prefix.count)) }
+    }
+}
+
 /// Reading the live process table. One `sysctl` returns every process at once
 /// (~1 ms for ~1000 processes), which is what makes "what is each pane running"
 /// cheap enough to sample continuously: the alternative — asking per pane, or
@@ -81,19 +98,34 @@ public enum ProcessTable {
     /// Full argument vector, or [] when the process is gone / not ours.
     /// Argv never changes for a live pid, so callers should cache it.
     public static func commandLine(_ pid: Int32) -> [String] {
-        guard pid > 0 else { return [] }
+        arguments(pid).argv
+    }
+
+    /// Argument vector and environment, from one kernel read; empty when the
+    /// process is gone / not ours. Like argv, the environment is what the
+    /// process was started with, so it is as cacheable.
+    public static func arguments(_ pid: Int32) -> ProcessArguments {
+        guard pid > 0 else { return ProcessArguments(argv: [], environment: []) }
         var mib: [Int32] = [CTL_KERN, KERN_PROCARGS2, pid]
         var size = 0
         guard sysctl(&mib, 3, nil, &size, nil, 0) == 0,
-              size > MemoryLayout<Int32>.size else { return [] }
+              size > MemoryLayout<Int32>.size else { return ProcessArguments(argv: [], environment: []) }
         var buffer = [UInt8](repeating: 0, count: size)
         guard buffer.withUnsafeMutableBytes({ raw in
             sysctl(&mib, 3, raw.baseAddress, &size, nil, 0)
-        }) == 0, size > MemoryLayout<Int32>.size else { return [] }
+        }) == 0 else { return ProcessArguments(argv: [], environment: []) }
+        return parseArguments(Array(buffer.prefix(size)))
+    }
 
-        // Layout: argc, exec path, then argc NUL-terminated arguments.
+    /// Split a KERN_PROCARGS2 buffer: argc, the exec path, argc NUL-terminated
+    /// arguments, then the environment strings. The kernel's own `apple[]`
+    /// strings (`executable_path=…`) follow the environment with nothing to
+    /// tell them apart; harmless for lookups by variable name.
+    public static func parseArguments(_ buffer: [UInt8]) -> ProcessArguments {
+        let size = buffer.count
+        guard size > MemoryLayout<Int32>.size else { return ProcessArguments(argv: [], environment: []) }
         let argc = buffer.withUnsafeBytes { $0.loadUnaligned(as: Int32.self) }
-        guard argc > 0 else { return [] }
+        guard argc > 0 else { return ProcessArguments(argv: [], environment: []) }
         var cursor = MemoryLayout<Int32>.size
         func next() -> String? {
             guard cursor < size else { return nil }
@@ -106,7 +138,9 @@ public enum ProcessTable {
         _ = next() // exec path, repeated as argv[0] below
         var argv: [String] = []
         while argv.count < Int(argc), let argument = next() { argv.append(argument) }
-        return argv
+        var environment: [String] = []
+        while let entry = next() { environment.append(entry) }
+        return ProcessArguments(argv: argv, environment: environment)
     }
 
     /// Resident memory, or 0 when the process is gone.

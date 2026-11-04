@@ -1384,21 +1384,21 @@ struct PaneContainerView: View {
                     .background(Theme.good.opacity(0.14), in: RoundedRectangle(cornerRadius: 6))
                     .help("這個終端在跑的長跑指令（dev server / DB / watcher）")
             }
-            // Account badge, clickable. Prefer the session's real account
-            // (file location) over the spec's recorded team, which drifts when
-            // a different claude was run in the pane. The menu lets you correct
-            // the account, or rebind the pane to the session it's ACTUALLY
-            // running (fixes the task's group / 現用 / attribution).
+            // Account badge, clickable: the pane's account as set (what a
+            // restart launches), never a guess — a guess from the session's
+            // file location went stale whenever another claude was run in the
+            // pane. The menu marks what the pane is actually running, lets you
+            // correct the account, or rebind the pane to the session it's
+            // ACTUALLY running (fixes the task's grouping / attribution).
             if let spec, spec.kind == "ai" {
-                let shown = spec.sessionID.flatMap { model.teamFromSessionFile($0) } ?? spec.team ?? "?"
+                let running = model.runningTeam(specID: spec.id)
                 Menu {
                     Section("這個終端的帳號") {
                         ForEach(model.config.teams.filter { $0.kind == "claude" }) { t in
                             Button {
                                 session.rebindPane(specID: spec.id, team: t.id, sid: nil)
                             } label: {
-                                if t.id == spec.team { Label(t.label, systemImage: "checkmark") }
-                                else { Text(t.label) }
+                                accountMenuLabel(t, chosen: t.id == spec.team, running: t.id == running)
                             }
                         }
                     }
@@ -1416,7 +1416,7 @@ struct PaneContainerView: View {
                         }
                     }
                 } label: {
-                    Text(shown)
+                    Text(spec.team ?? "?")
                         .font(Theme.Fonts.mono(9.5, .semibold))
                         .foregroundStyle(Theme.accent)
                         .padding(.horizontal, 6)

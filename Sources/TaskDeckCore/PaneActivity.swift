@@ -26,14 +26,21 @@ public struct PaneActivity: Equatable, Sendable {
     public let runningFor: TimeInterval
     /// Resident memory of the pane's whole process tree, shell included.
     public let residentBytes: UInt64
+    /// For a `claude` in the foreground: the CLAUDE_CONFIG_DIR it was started
+    /// with (`AccountRules.defaultConfigDir` when unset) — which account it
+    /// is. Filled in by the sampler, which owns the environment read; nil for
+    /// anything else or when the environment could not be read.
+    public var claudeConfigDir: String?
 
     public init(kind: PaneActivityKind, label: String, leaderPID: Int32,
-                runningFor: TimeInterval, residentBytes: UInt64) {
+                runningFor: TimeInterval, residentBytes: UInt64,
+                claudeConfigDir: String? = nil) {
         self.kind = kind
         self.label = label
         self.leaderPID = leaderPID
         self.runningFor = runningFor
         self.residentBytes = residentBytes
+        self.claudeConfigDir = claudeConfigDir
     }
 }
 

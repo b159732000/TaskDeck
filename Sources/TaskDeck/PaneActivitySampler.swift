@@ -13,7 +13,15 @@ actor PaneActivitySampler {
         let startedAt: Int64
     }
 
-    private var argvCache: [ProcessKey: [String]] = [:]
+    /// What one arguments read yields that a sample needs. The environment
+    /// comes from the same kernel read as argv, and only the one variable is
+    /// kept: whole environments of every foreground process add up.
+    private struct Arguments {
+        let argv: [String]
+        let claudeConfigDir: String?
+    }
+
+    private var argumentsCache: [ProcessKey: Arguments] = [:]
 
     func sample(shells: [Int32], aiCommands: Set<String>,
                 now: Date = Date()) -> [Int32: PaneActivity] {
@@ -29,25 +37,36 @@ actor PaneActivitySampler {
             )
         }
 
-        var stillAlive: [ProcessKey: [String]] = [:]
-        let activities = PaneActivityRules.classify(
+        var stillAlive: [ProcessKey: Arguments] = [:]
+        func arguments(_ pid: Int32) -> Arguments? {
+            guard let key = keys[pid] else { return nil }
+            if let cached = argumentsCache[key] ?? stillAlive[key] {
+                stillAlive[key] = cached
+                return cached
+            }
+            let read = ProcessTable.arguments(pid)
+            let entry = Arguments(argv: read.argv,
+                                  claudeConfigDir: read.environmentValue("CLAUDE_CONFIG_DIR"))
+            stillAlive[key] = entry
+            return entry
+        }
+
+        var activities = PaneActivityRules.classify(
             shells: shells,
             processes: table,
             aiCommands: aiCommands,
             now: now,
-            argv: { pid in
-                guard let key = keys[pid] else { return [] }
-                if let cached = argvCache[key] {
-                    stillAlive[key] = cached
-                    return cached
-                }
-                let argv = ProcessTable.commandLine(pid)
-                stillAlive[key] = argv
-                return argv
-            },
+            argv: { arguments($0)?.argv ?? [] },
             residentBytes: { ProcessTable.residentBytes($0) }
         )
-        argvCache = stillAlive // processes that exited drop out of the cache
+        for (shell, activity) in activities
+        where activity.kind == .ai && activity.label.split(separator: " ").first == "claude" {
+            // An unreadable process (gone / not ours) says nothing about its
+            // account; a readable one without the variable is the default.
+            guard let read = arguments(activity.leaderPID), !read.argv.isEmpty else { continue }
+            activities[shell]?.claudeConfigDir = read.claudeConfigDir ?? AccountRules.defaultConfigDir
+        }
+        argumentsCache = stillAlive // processes that exited drop out of the cache
         return activities
     }
 }

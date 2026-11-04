@@ -315,7 +315,7 @@ struct SidebarView: View {
     }
 
     private func accountsText(_ tasks: [TaskNote]) -> String {
-        let teams = Set(tasks.compactMap { model.activeTeam($0.id) })
+        let teams = Set(tasks.compactMap { model.taskTeam($0.id) })
         return teams.isEmpty ? "" : "\(teams.count) 帳號"
     }
 
@@ -487,10 +487,10 @@ struct SidebarView: View {
                         .background(Theme.Lane.you.opacity(0.16), in: Capsule())
                         .help(priorityAlert ? "主線 AI 已完成，正在等你查看" : "主線任務")
                     }
-                    // 主 AI（主力 if set, else 現用）— cached, no per-render disk.
-                    if let team = model.mainTeam(t.id) {
+                    // The account set by hand — cached, no per-render disk.
+                    if let team = model.taskTeam(t.id) {
                         Text(QuotaGrid.shortAlias(team))
-                            .help(team)
+                            .help("\(team)（右鍵 → 帳號 可改）")
                             .font(Theme.Fonts.mono(9 * model.uiScale, .medium))
                             .foregroundStyle(Theme.accent)
                             .lineLimit(1)
@@ -623,6 +623,9 @@ struct SidebarView: View {
                 Label(t.isMainline ? "取消主線" : "設為主線",
                       systemImage: t.isMainline ? "star.slash" : "star")
             }
+            Menu("帳號：\(model.taskTeam(t.id) ?? "未設定")") {
+                TaskAccountMenuItems(model: model, slug: t.id)
+            }
             Button("在新視窗開啟") { openWindow(id: "task", value: t.id) }
             Button("在 Obsidian 開啟") { model.openInObsidian(t.id) }
             Button("在 Finder 顯示筆記") { model.revealNote(t.id) }
@@ -668,6 +671,50 @@ private struct SidebarChrome: ViewModifier {
             .overlay(alignment: edge == .top ? .bottom : .top) {
                 Rectangle().fill(Theme.border).frame(height: 1)
             }
+    }
+}
+
+/// The choices for which account a task uses (sidebar context menu, header
+/// chip): ✓ marks the one set by hand, 「正在跑」 what the AI CLIs in its
+/// terminals actually run right now — so fixing a stale pick is one click.
+struct TaskAccountMenuItems: View {
+    let model: AppModel
+    let slug: String
+    // Read at init, not in `body`: with only `model` and `slug` as inputs
+    // SwiftUI may keep a stale body, and the checkmark would lag the pick.
+    let chosen: String?
+    let running: Set<String>
+
+    init(model: AppModel, slug: String) {
+        self.model = model
+        self.slug = slug
+        chosen = model.taskTeam(slug)
+        running = model.runningTeams(slug)
+    }
+
+    var body: some View {
+        ForEach(model.config.teams) { team in
+            Button {
+                model.setTaskTeam(slug, team.id)
+            } label: {
+                accountMenuLabel(team, chosen: team.id == chosen, running: running.contains(team.id))
+            }
+        }
+        if chosen != nil {
+            Divider()
+            Button("清除") { model.setTaskTeam(slug, nil) }
+        }
+    }
+}
+
+/// One row of an account menu (task or pane).
+@ViewBuilder
+func accountMenuLabel(_ team: TeamDef, chosen: Bool, running: Bool) -> some View {
+    let title = running ? "\(team.label) · 正在跑" : team.label
+    if chosen {
+        Label(title, systemImage: "checkmark")
+    } else {
+        Text(title)
     }
 }
 
@@ -880,15 +927,6 @@ struct TaskDetailView: View {
         session.preferredSplitAxis = stage.width >= 1200 || stage.height < 560 ? "h" : "v"
     }
 
-    private func primaryChipText(primary: String?, active: String?) -> String {
-        switch (primary, active) {
-        case let (p?, a?) where p != a: return "主力 \(p) · 現用 \(a)"
-        case let (p?, _): return "主力 \(p)"
-        case let (nil, a?): return "主力未定 · 現用 \(a)"
-        default: return "設定主力"
-        }
-    }
-
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 10) {
@@ -897,37 +935,15 @@ struct TaskDetailView: View {
                     .foregroundStyle(Theme.text)
                     .lineLimit(1)
                     .minimumScaleFactor(0.7)
-                // 主力＝配額之家（手動指定）；現用＝最近有動靜的帳號（自動
-                // 偵測、只顯示不改寫）。不一致時亮橘提醒，點 chip 一鍵接管。
-                // Always shown so a shell-only task (no AI pane) can still be
-                // given a 主力 by hand. Dim "設定主力" when nothing is set yet.
-                let primary = session.machine.primaryTeam
-                let active = model.activeTeam(session.slug)
-                let unset = primary == nil && active == nil
-                let mismatch = active != nil && primary != nil && active != primary
-                let tint = mismatch ? Theme.warn : (unset ? Theme.text3 : Theme.accent)
+                // Which Claude account the task uses — set by hand, never
+                // guessed (see AppModel.taskTeam). Always shown so a
+                // shell-only task can be given one too; dim when unset.
+                let team = model.taskTeam(slug)
+                let tint = team == nil ? Theme.text3 : Theme.accent
                 Menu {
-                    if let active, mismatch {
-                        Button("改立 \(active) 為主力") { session.setPrimaryTeam(active) }
-                        Divider()
-                    }
-                    ForEach(model.config.teams) { t in
-                        Button {
-                            session.setPrimaryTeam(t.id)
-                        } label: {
-                            if t.id == primary {
-                                Label(t.label, systemImage: "checkmark")
-                            } else {
-                                Text(t.label)
-                            }
-                        }
-                    }
-                    if primary != nil {
-                        Divider()
-                        Button("清除主力") { session.setPrimaryTeam(nil) }
-                    }
+                    TaskAccountMenuItems(model: model, slug: slug)
                 } label: {
-                    Text(primaryChipText(primary: primary, active: active))
+                    Text(team ?? "設定帳號")
                         .font(Theme.Fonts.mono(10, .medium))
                         .foregroundStyle(tint)
                         .padding(.horizontal, 7)
@@ -937,7 +953,7 @@ struct TaskDetailView: View {
                 .menuStyle(.borderlessButton)
                 .menuIndicator(.hidden)
                 .fixedSize()
-                .help("主力＝任務的配額之家（手動指定）；現用＝最近有動靜的帳號（自動偵測）。點擊可改主力。")
+                .help("這個任務用的 Claude 帳號：自己設定，系統不會自動改。選單裡標「正在跑」的，是終端裡實際開著的帳號。")
                 // Where the task sits right now, and any service still running
                 // in one of its panes — the two things a glance at the header
                 // should answer without looking at the sidebar.

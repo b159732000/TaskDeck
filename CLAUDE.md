@@ -46,8 +46,10 @@ touch "$HOME/Library/Application Support/TaskDeck/snapshots/request"
 ```
 
 `latest.json` lists window frames, which bundled font families resolved,
-the active background preset, and per-List row counts (so an empty sidebar
-in the PNG can be told from a capture miss). Metal terminal cells are drawn
+the active background preset, per-List row counts (so an empty sidebar
+in the PNG can be told from a capture miss), and per task the account set
+by hand vs the ones its terminals run (`accounts` — what the account menus,
+which no capture draws, would show). Metal terminal cells are drawn
 through the layer tree; List rows through `cacheDisplay`; the result is
 flattened over the window ink (0x0B0D12) because glass surfaces render as
 cleared pixels. So the PNG is faithful for layout, type and tint, but NOT
@@ -119,6 +121,11 @@ instead of `.system(size:)` and literal colours in new UI.
     task auto-archives after 30d of silence (`autoArchiveSweep`).
   Concurrent-edit safety: if an external (Obsidian) edit raced an in-app
   save, the external version is preserved under `<tasksDir>/conflicts/`.
+- Which Claude account a task uses (sidebar / header chip, machine state
+  `primaryTeam`) is set by hand — James asked for that after the inferred
+  one kept being wrong. Seeded from the first AI pane, never inferred again.
+  The account menus' 「正在跑」 is the one process fact used: each AI CLI's
+  CLAUDE_CONFIG_DIR (`AccountRules`), read with its argv.
 - AI pane resume: uuid is written to the note first, then the session
   starts with `--session-id`; restart uses `-r <uuid> || --session-id
   <uuid>` (single line, resumes or creates). `TeamDef.args` are captured
