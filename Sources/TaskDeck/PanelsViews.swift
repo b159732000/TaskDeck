@@ -29,6 +29,7 @@ struct SidebarView: View {
     @State private var dockHeight: CGFloat = 50
     @AppStorage("needsYouSectionExpanded") private var needsYouExpanded = true
     @AppStorage("aiRunningSectionExpanded") private var aiRunningExpanded = true
+    @AppStorage("longRunSectionExpanded") private var longRunExpanded = true
     @AppStorage("runningSectionExpanded") private var runningExpanded = true
     @AppStorage("readSectionExpanded") private var readExpanded = true
     @AppStorage("waitingSectionExpanded") private var waitingExpanded = true
@@ -36,10 +37,11 @@ struct SidebarView: View {
     @AppStorage("sunkSectionExpanded") private var sunkExpanded = false
 
     var body: some View {
-        // 由上而下：等你（自動佇列）→ AI 執行中（訊號驅動）→ 待開工（預設
-        // 家：新任務／手動作業／訊號過期，可拖曳排序）→ 已讀（看過待回）→ 等待外部
-        //（手動）→ 半封存（>3 天沒動靜，預設折疊；滿 30 天自動歸入已完成）
-        // → 已完成（封存）。規則見 AppModel.sidebarGroup / autoArchiveSweep。
+        // 由上而下：等你（自動佇列）→ AI 執行中（訊號驅動）→ 長期運行（手動
+        // 放進去的長跑 agent，訊號不搬動它，可拖曳排序）→ 待開工（預設家：新任務
+        //／手動作業／訊號過期，可拖曳排序）→ 已讀（看過待回）→ 等待外部（手動）
+        // → 半封存（>3 天沒動靜，預設折疊；滿 30 天自動歸入已完成）→ 已完成
+        //（封存）。規則見 AppModel.sidebarGroup / autoArchiveSweep。
         let visibleTasks = searchActive
             ? model.tasks.filter { TaskSearchRules.matchesTitle($0.title, query: searchText) }
             : model.tasks
@@ -56,6 +58,7 @@ struct SidebarView: View {
             return a.id < b.id
         }
         let aiRunning = groups[.aiRunning] ?? []
+        let longRun = groups[.longRunning] ?? []
         let idle = groups[.idle] ?? []
         let read = (groups[.read] ?? []).sorted { a, b in
             // Sort by the cached instant, NOT silence(): silence() embeds a
@@ -97,6 +100,21 @@ struct SidebarView: View {
                     laneHeader(.aiRunning, aiRunning.count, accountsText(aiRunning))
                 }
             }
+            if !longRun.isEmpty {
+                sidebarSection(isExpanded: $longRunExpanded) {
+                    if searchActive {
+                        ForEach(longRun) { row($0, group: .longRunning) }
+                    } else {
+                        ForEach(longRun) { row($0, group: .longRunning) }
+                            .onMove { from, to in
+                                model.moveLaneTasks(longRun.map(\.id), from: from, to: to)
+                            }
+                    }
+                } header: {
+                    let summary = longRunSummary(longRun)
+                    laneHeader(.longRunning, longRun.count, summary.text, subTint: summary.tint)
+                }
+            }
             if !idle.isEmpty || !searchActive {
                 sidebarSection(isExpanded: $runningExpanded) {
                     if searchActive {
@@ -104,7 +122,7 @@ struct SidebarView: View {
                     } else {
                         ForEach(idle) { row($0, group: .idle) }
                             .onMove { from, to in
-                                model.moveRunningTasks(idle.map(\.id), from: from, to: to)
+                                model.moveLaneTasks(idle.map(\.id), from: from, to: to)
                             }
                     }
                 } header: {
@@ -272,7 +290,8 @@ struct SidebarView: View {
     /// Lane header: the count is the loudest element (display face, lane
     /// colour), the name reads as its label, and a short mono subtitle says
     /// what the lane means or how long the oldest item has waited.
-    private func laneHeader(_ group: AppModel.SidebarGroup, _ count: Int, _ sub: String) -> some View {
+    private func laneHeader(_ group: AppModel.SidebarGroup, _ count: Int, _ sub: String,
+                            subTint: Color = Theme.text3) -> some View {
         let quiet = group == .idle || group == .semiArchived || group == .done
         return HStack(alignment: .firstTextBaseline, spacing: 7) {
             Text("\(count)")
@@ -284,7 +303,7 @@ struct SidebarView: View {
             if !sub.isEmpty {
                 Text(sub)
                     .font(Theme.Fonts.mono(10))
-                    .foregroundStyle(Theme.text3)
+                    .foregroundStyle(subTint)
                     .lineLimit(1)
             }
         }
@@ -297,6 +316,7 @@ struct SidebarView: View {
         switch group {
         case .needsYou: return "等你"
         case .aiRunning: return "AI 執行中"
+        case .longRunning: return "長期運行"
         case .idle: return "待開工"
         case .read: return "已讀"
         case .waitingExt: return "等待外部"
@@ -317,6 +337,28 @@ struct SidebarView: View {
     private func accountsText(_ tasks: [TaskNote]) -> String {
         let teams = Set(tasks.compactMap { model.taskTeam($0.id) })
         return teams.isEmpty ? "" : "\(teams.count) 帳號"
+    }
+
+    /// 長期運行 header: the most pressing live state in the lane, so a
+    /// blocked or finished agent still shows with the section collapsed.
+    private func longRunSummary(_ tasks: [TaskNote]) -> (text: String, tint: Color) {
+        let states = tasks.map { model.liveState($0.id) }
+        func count(_ state: LiveState) -> Int { states.filter { $0 == state }.count }
+        if count(.permission) > 0 { return ("\(count(.permission)) 要授權", Theme.crit) }
+        if count(.newOutput) > 0 { return ("\(count(.newOutput)) 有新輸出", Theme.Lane.you) }
+        if count(.running) > 0 { return ("\(count(.running)) 在跑", Theme.text3) }
+        return ("sub-agent", Theme.text3)
+    }
+
+    /// The live state a 長期運行 row carries — the lane never moves a task,
+    /// so this is where a blocked or finished agent shows. nil = quiet.
+    private func liveBadge(_ state: LiveState) -> (text: String, tint: Color, help: String)? {
+        switch state {
+        case .permission: return ("要授權", Theme.crit, "有終端停在權限確認，等你處理")
+        case .newOutput: return ("新輸出", Theme.Lane.you, "AI 停下來了，有你還沒看的輸出（點開任務就算看過）")
+        case .running: return ("在跑", Theme.Lane.ai, "主對話正在跑")
+        case .quiet: return nil
+        }
     }
 
     private func searchHeader(resultCount: Int) -> some View {
@@ -443,10 +485,11 @@ struct SidebarView: View {
     }
 
     /// The 3 pt colour rail on the leading edge: the lane's hue, only in the
-    /// lanes that mean something is happening (等你 / AI / 已讀 / 等待外部).
+    /// lanes that mean something is happening (等你 / AI / 長期運行 / 已讀 /
+    /// 等待外部).
     private func laneRail(_ group: AppModel.SidebarGroup) -> Color? {
         switch group {
-        case .needsYou, .aiRunning, .read, .waitingExt: return Theme.laneColor(group)
+        case .needsYou, .aiRunning, .longRunning, .read, .waitingExt: return Theme.laneColor(group)
         default: return nil
         }
     }
@@ -476,6 +519,16 @@ struct SidebarView: View {
                             .foregroundStyle(Theme.text3)
                             .lineLimit(1)
                             .help(created)
+                    }
+                    if group == .longRunning, let badge = liveBadge(model.liveState(t.id)) {
+                        Text(badge.text)
+                            .font(Theme.Fonts.ui(9 * model.uiScale, .semibold))
+                            .foregroundStyle(badge.tint)
+                            .lineLimit(1)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1)
+                            .background(badge.tint.opacity(0.14), in: Capsule())
+                            .help(badge.help)
                     }
                     if t.isMainline {
                         Image(systemName: "star.fill")
@@ -642,6 +695,10 @@ struct SidebarView: View {
                                 Text(target.label)
                             }
                         }
+                    }
+                    if t.group == GroupingRules.longRunGroup {
+                        Divider()
+                        Button("移出長期運行（交回自動分組）") { model.setGroupFlag(t.id, nil) }
                     }
                 }
                 Button("收尾（關閉全部終端＋標記完成）", role: .destructive) { model.archiveTask(t.id) }
@@ -1130,6 +1187,18 @@ struct LifecycleChips: View {
             if group != .waitingExt {
                 chip("hourglass", "移到等待外部（同事 / review / CI）") {
                     model.setGroupFlag(task.id, "waiting")
+                }
+            }
+            // 長期運行 is the one lane nothing pulls a task out of, so its
+            // rows get the way back: clear the flag, automatic grouping
+            // places the task again.
+            if group == .longRunning {
+                chip("arrow.uturn.backward", "移出長期運行（交回自動分組）") {
+                    model.setGroupFlag(task.id, nil)
+                }
+            } else {
+                chip("infinity", "移到長期運行（sub-agent 長時間跑，放著不會被搬走）") {
+                    model.setGroupFlag(task.id, GroupingRules.longRunGroup)
                 }
             }
         }

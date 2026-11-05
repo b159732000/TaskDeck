@@ -749,6 +749,26 @@ check("grp: unparked + acked stop → 已讀",
       grp([sig("waiting", agoSec: 30, acked: true)]) == .read)
 check("grp: manual 等你 survives with no signal", grp(group: "needsyou", []) == .needsYou)
 check("grp: nothing → 待開工", grp([]) == .idle)
+check("grp: 長期運行 stays put while its AI runs",
+      grp(group: "longrun", [sig("running", agoSec: 60, acked: false)]) == .longRunning)
+check("grp: 長期運行 stays put on fresh unacked output / permission",
+      grp(group: "longrun", [sig("waiting", agoSec: 30, acked: false),
+                             sig("permission", agoSec: 20, acked: false)]) == .longRunning)
+check("grp: 長期運行 never sinks to 半封存 (so never auto-archives)",
+      grp(group: "longrun", quiet: sink + 10, [sig("ended", agoSec: sink + 10, acked: true)]) == .longRunning)
+check("grp: done still wins over 長期運行",
+      grp(status: "done", group: "longrun", [sig("running", agoSec: 10, acked: false)]) == .done)
+check("live: blocked on permission beats running",
+      GroupingRules.liveState([sig("running", agoSec: 10, acked: false),
+                               sig("permission", agoSec: 20, acked: false)], now: gNow) == .permission)
+check("live: running beats unseen output",
+      GroupingRules.liveState([sig("running", agoSec: 10, acked: false),
+                               sig("waiting", agoSec: 20, acked: false)], now: gNow) == .running)
+check("live: unacked stop → newOutput, acked → quiet",
+      GroupingRules.liveState([sig("ended", agoSec: 20, acked: false)], now: gNow) == .newOutput
+          && GroupingRules.liveState([sig("waiting", agoSec: 20, acked: true)], now: gNow) == .quiet)
+check("live: stale running is quiet",
+      GroupingRules.liveState([sig("running", agoSec: 2000, acked: true)], now: gNow) == .quiet)
 check("attn: unacked permission beats waiting, since = oldest",
       {
           let a = GroupingRules.attention([

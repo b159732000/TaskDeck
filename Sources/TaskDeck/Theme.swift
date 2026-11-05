@@ -121,6 +121,7 @@ enum Theme {
     enum Lane {
         static let you = Color(hex: 0xFF7A5C)     // 等你 — coral
         static let ai = Color(hex: 0x4FD1C5)      // AI 執行中 — teal
+        static let long = Color(hex: 0xE88AE6)    // 長期運行 — orchid
         static let idle = Color(hex: 0x8A94A6)    // 待開工 — slate
         static let read = Color(hex: 0xB8A7FF)    // 已讀 — lavender
         static let ext = Color(hex: 0xF5C451)     // 等待外部 — amber
@@ -132,6 +133,7 @@ enum Theme {
         switch group {
         case .needsYou: return Lane.you
         case .aiRunning: return Lane.ai
+        case .longRunning: return Lane.long
         case .idle: return Lane.idle
         case .read: return Lane.read
         case .waitingExt: return Lane.ext

@@ -538,10 +538,15 @@ final class AppModel: ObservableObject {
 
     /// Selecting a task dismisses only the high-priority visual reminder. It
     /// intentionally does NOT acknowledge the AI signal or move the task out
-    /// of 等你; lifecycle state remains an explicit user decision.
+    /// of 等你; lifecycle state remains an explicit user decision. The one
+    /// exception is 長期運行: no ack can move a task there, it only clears
+    /// the row's 新輸出 badge — so looking at the task is what clears it.
     func selectTask(_ slug: String) {
         selection = slug
         dismissPriorityAlert(slug)
+        if derivedCache[slug]?.group == .longRunning {
+            ackAIStatus(slug, keepingPermission: true)
+        }
     }
 
     /// Banner action from either the main window or a task popout: switch the
@@ -1055,15 +1060,24 @@ final class AppModel: ObservableObject {
     }
 
     /// Badge clicked: mark the task's CURRENT AI states as seen.
-    func ackAIStatus(_ slug: String) {
+    /// `keepingPermission`: a session blocked on a permission prompt stays
+    /// unacked — seeing the prompt does not answer it (the 長期運行 lane
+    /// keeps showing 要授權 until the session moves on).
+    func ackAIStatus(_ slug: String, keepingPermission: Bool = false) {
+        let next = acking(slug, keepingPermission: keepingPermission)
+        if next != ackedAI { ackedAI = next }
+        refreshDerived() // ack changes grouping (等你 → 已讀)
+    }
+
+    private func acking(_ slug: String, keepingPermission: Bool) -> [String: Date] {
         var next = ackedAI
         for s in taskAISessions(slug) {
-            if let entry = statusEntry(sid: s.sid) {
+            if let entry = statusEntry(sid: s.sid),
+               !(keepingPermission && entry.state == "permission") {
                 next[s.sid] = entry.ts
             }
         }
-        if next != ackedAI { ackedAI = next }
-        refreshDerived() // ack changes grouping (等你 → 已讀)
+        return next
     }
 
     // MARK: - Sidebar grouping
@@ -1172,6 +1186,7 @@ final class AppModel: ObservableObject {
     private struct Derived {
         let group: SidebarGroup
         let attention: (permission: Bool, since: Date)?
+        let live: LiveState            // the 長期運行 row badge (liveState)
         let team: String?              // the account set by hand (taskTeam)
         let backgroundCount: Int       // informational only; never drives grouping
         let lastActivity: Date?        // for silence(); cached so the sidebar sort
@@ -1181,6 +1196,14 @@ final class AppModel: ObservableObject {
 
     @discardableResult
     private func refreshDerived(allowPriorityAlertTriggers: Bool = true) -> Bool {
+        // A 長期運行 task on screen is being looked at: output landing there
+        // must not light 新輸出 under the user's eyes (selectTask acks the
+        // same way on arrival).
+        if let slug = selection, derivedCache[slug]?.group == .longRunning,
+           let task = tasks.first(where: { $0.id == slug }), isCurrentlyViewing(task) {
+            let next = acking(slug, keepingPermission: true)
+            if next != ackedAI { ackedAI = next }
+        }
         let now = Date()
         let statusIDs = Set(aiStatus.keys)
         var cache: [String: Derived] = [:]
@@ -1200,6 +1223,7 @@ final class AppModel: ObservableObject {
             }
             cache[t.id] = Derived(group: group,
                                   attention: GroupingRules.attention(taskSignals),
+                                  live: GroupingRules.liveState(taskSignals, now: now),
                                   team: primaryTeam(t.id),
                                   backgroundCount: backgroundCount,
                                   lastActivity: lastActivity)
@@ -1278,6 +1302,7 @@ final class AppModel: ObservableObject {
         for (slug, a) in lhs {
             guard let b = rhs[slug],
                   a.group == b.group,
+                  a.live == b.live,
                   a.team == b.team,
                   a.backgroundCount == b.backgroundCount,
                   a.lastActivity == b.lastActivity,
@@ -1331,6 +1356,10 @@ final class AppModel: ObservableObject {
             count += backgroundTasksBySession[session.sid] ?? 0
         }
     }
+
+    /// What the task's AI is doing right now — the badge on a 長期運行 row,
+    /// where the lane itself never moves.
+    func liveState(_ slug: String) -> LiveState { derivedCache[slug]?.live ?? .quiet }
 
     /// Cached last-activity instant — a STABLE sort key for the sidebar.
     /// (Sorting by silence() embedded a fresh now() in every comparison, so
@@ -1510,12 +1539,14 @@ final class AppModel: ObservableObject {
         ("等你（我要 review）", "needsyou", .needsYou),
         ("已讀（看過先不回）", "read", .read),
         ("等待外部（同事 / review / CI）", "waiting", .waitingExt),
+        ("長期運行（sub-agent 長時間跑）", GroupingRules.longRunGroup, .longRunning),
     ]
 
     /// Set / clear the manual lifecycle flag ("waiting" 等待外部、"read"
-    /// 已讀、nil 移回待開工). `group_since` is stamped to now so the placement
-    /// competes with AI signals by recency (see sidebarGroup): it wins until
-    /// the AI next does something, which then pulls the task back.
+    /// 已讀、"longrun" 長期運行、nil 交回自動分組). `group_since` is stamped
+    /// to now so the placement competes with AI signals by recency (see
+    /// sidebarGroup): it wins until the AI next does something, which then
+    /// pulls the task back — except 長期運行, which only the user leaves.
     func setGroupFlag(_ slug: String, _ flag: String?) {
         func transform(_ text: String) -> String {
             if let flag {
@@ -1535,8 +1566,14 @@ final class AppModel: ObservableObject {
         }
         // Marking 已讀/等待外部 acknowledges the current AI output, so it won't
         // immediately bounce back to 等你; only a genuinely newer turn will.
+        // Parking in 長期運行 acks too, so its 新輸出 badge means a newer turn
+        // (a pending permission prompt stays: the badge keeps saying 要授權).
         // (等你/待開工 don't ack — they should keep showing pending signals.)
-        if flag == "read" || flag == "waiting" { ackAIStatus(slug) }
+        if flag == "read" || flag == "waiting" {
+            ackAIStatus(slug)
+        } else if flag == GroupingRules.longRunGroup {
+            ackAIStatus(slug, keepingPermission: true)
+        }
         rescan()
     }
 
@@ -1573,11 +1610,11 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// Reorder within the 進行中 group（drag）：the moved slice is written
-    /// back to the front of the global preference order; everything else
-    /// keeps its relative position.
-    func moveRunningTasks(_ running: [String], from: IndexSet, to: Int) {
-        var slugs = running
+    /// Reorder within a hand-ordered lane（待開工、長期運行；drag）：the moved
+    /// slice is written back to the front of the global preference order;
+    /// everything else keeps its relative position.
+    func moveLaneTasks(_ lane: [String], from: IndexSet, to: Int) {
+        var slugs = lane
         slugs.move(fromOffsets: from, toOffset: to)
         taskOrder = slugs + taskOrder.filter { !slugs.contains($0) }
         saveOrder()

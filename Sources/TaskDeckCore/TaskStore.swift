@@ -10,7 +10,9 @@ public struct TaskNote: Identifiable, Equatable {
     public var path: URL
     /// Manual lifecycle group from frontmatter: nil = normal flow,
     /// "waiting" = parked on external feedback (colleague / CI / review),
-    /// "read" = seen, no reply needed yet.
+    /// "read" = seen, no reply needed yet, "needsyou" = review it,
+    /// "longrun" = 長期運行, agents running for hours (sticky, see
+    /// `GroupingRules.longRunGroup`).
     public var group: String?
     /// When the task entered its manual group (frontmatter `group_since`,
     /// "yyyy-MM-dd HH:mm"; legacy key `waiting_since` still read) — drives

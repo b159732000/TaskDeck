@@ -126,6 +126,14 @@ instead of `.system(size:)` and literal colours in new UI.
   one kept being wrong. Seeded from the first AI pane, never inferred again.
   The account menus' 「正在跑」 is the one process fact used: each AI CLI's
   CLAUDE_CONFIG_DIR (`AccountRules`), read with its argv.
+- The sidebar lane 長期運行 (frontmatter `group: longrun`) holds tasks whose
+  agents run for hours (sub-agents, loops); James moves tasks in and out by
+  hand. It is sticky: no AI signal moves a task in or out, and it never
+  sinks to 半封存 or auto-archives. The live state rides on the row as a
+  badge instead (`GroupingRules.liveState`: 要授權 / 在跑 / 新輸出), and
+  viewing such a task (selecting it, or having it on screen) acks its
+  output — the one lane where viewing acks, because there an ack cannot
+  move anything. A pending permission prompt is never acked by viewing.
 - AI pane resume: uuid is written to the note first, then the session
   starts with `--session-id`; restart uses `-r <uuid> || --session-id
   <uuid>` (single line, resumes or creates). `TeamDef.args` are captured
