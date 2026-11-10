@@ -604,20 +604,172 @@ public final class TaskStore {
             .filter { $0.hasPrefix("- ") }
     }
 
-    /// Session-id loss guard: before the in-memory note overwrites disk,
-    /// re-append any manifest line that exists on disk but is missing from
-    /// memory (stale-cache overwrite, vault sync race, another instance…).
-    /// Restored lines carry a "←自動保留" marker so the human can see what
-    /// was rescued. Idempotent.
-    public static func mergeManifestLines(disk: String, into memory: String) -> String {
+    /// Marker the retired two-way merge guard appended to rescued lines.
+    /// Never written any more; still stripped when comparing or rewriting so
+    /// notes from before 261110 compare equal to their clean form.
+    static let legacyRescueMarker = "←自動保留"
+
+    /// One entry of the session-manifest block. Two shapes are accepted:
+    ///
+    ///     - claude3 6f0e…                         (legacy, before 261110)
+    ///     - 2611101530 claude3 6f0e… 拆 PR 的討論   (dated, optional remark)
+    ///
+    /// `stamp` is the `yyMMddHHmm` the line was recorded (nil on legacy
+    /// lines, which are never back-filled). `remark` is free text after the id.
+    public struct SessionRecord: Equatable, Sendable {
+        public var stamp: String?
+        public var team: String
+        public var sid: String
+        public var remark: String
+
+        public init(stamp: String?, team: String, sid: String, remark: String = "") {
+            self.stamp = stamp
+            self.team = team
+            self.sid = sid
+            self.remark = remark
+        }
+
+        /// The canonical `- …` line for this record.
+        public var line: String {
+            var parts = ["-"]
+            if let stamp { parts.append(stamp) }
+            parts.append(team)
+            parts.append(sid)
+            if !remark.isEmpty { parts.append(remark) }
+            return parts.joined(separator: " ")
+        }
+    }
+
+    // `- [stamp] team sid [remark]`. The id must be a whole token: a Claude
+    // uuid (dashes optional) or an OpenCode `ses_…` id, so half-typed or
+    // run-together lines ("- claude-ext2", "…4062- claude-ext2") don't parse.
+    private static let sessionRecordRE = try! NSRegularExpression(
+        pattern: "^-[ \\t]+(?:(\\d{8,14})[ \\t]+)?(\\S+)[ \\t]+"
+            + "([0-9a-fA-F]{8}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{12}|ses_[0-9A-Za-z]+)"
+            + "(?:[ \\t]+(.*))?$"
+    )
+
+    /// Parse one manifest line; nil when it isn't a session record.
+    public static func parseSessionRecord(_ raw: String) -> SessionRecord? {
+        let line = raw.replacingOccurrences(of: legacyRescueMarker, with: "")
+            .trimmingCharacters(in: .whitespaces)
+        let ns = NSRange(line.startIndex ..< line.endIndex, in: line)
+        guard let m = sessionRecordRE.firstMatch(in: line, range: ns) else { return nil }
+        func group(_ i: Int) -> String? {
+            Range(m.range(at: i), in: line).map { String(line[$0]) }
+        }
+        guard let team = group(2), let sid = group(3) else { return nil }
+        return SessionRecord(
+            stamp: group(1), team: team, sid: sid,
+            remark: (group(4) ?? "").trimmingCharacters(in: .whitespaces)
+        )
+    }
+
+    /// The parsed session records of the manifest block, in note order.
+    public static func sessionRecords(_ text: String) -> [SessionRecord] {
+        manifestLines(text).compactMap(parseSessionRecord)
+    }
+
+    /// A new dated manifest line (remark flattened to one line).
+    public static func sessionLine(team: String, sid: String, remark: String = "",
+                                   at date: Date = Date()) -> String {
+        SessionRecord(stamp: statusStamp(date), team: team, sid: sid,
+                      remark: oneLine(remark)).line
+    }
+
+    private static func oneLine(_ s: String) -> String {
+        s.replacingOccurrences(of: "\r", with: " ")
+            .replacingOccurrences(of: "\n", with: " ")
+            .trimmingCharacters(in: .whitespaces)
+    }
+
+    public enum SessionRecordResult: Equatable, Sendable {
+        /// A new dated line was appended.
+        case added
+        /// The session was already listed; its remark was set to the new one.
+        case remarkUpdated
+        /// The session was already listed and there was no remark to write.
+        case alreadyRecorded
+    }
+
+    /// Record a session in the manifest block — the "記到 AI Session 紀錄"
+    /// action. A session already listed is never duplicated: with a remark,
+    /// that line's remark is replaced (its stamp and team stay as written);
+    /// without one, the note is returned unchanged.
+    public static func recordSession(_ text: String, team: String, sid: String,
+                                     remark: String = "",
+                                     at date: Date = Date()) -> (text: String, result: SessionRecordResult) {
+        let remark = oneLine(remark)
+        let key = sid.lowercased()
+        if let existing = manifestLineRange(text, where: { $0.sid.lowercased() == key }) {
+            guard !remark.isEmpty else { return (text, .alreadyRecorded) }
+            var record = existing.record
+            record.remark = remark
+            var t = text
+            t.replaceSubrange(existing.range, with: record.line)
+            return (t, .remarkUpdated)
+        }
+        let line = sessionLine(team: team, sid: sid, remark: remark, at: date)
+        return (appendSessionLine(text, line: line), .added)
+    }
+
+    /// Range (whole line, no newline) + parsed record of the first manifest
+    /// line matching `predicate`.
+    private static func manifestLineRange(
+        _ text: String, where predicate: (SessionRecord) -> Bool
+    ) -> (range: Range<String.Index>, record: SessionRecord)? {
+        let anchor: String.Index
+        if let h1 = text.range(of: "(?m)^# .*$", options: .regularExpression) {
+            anchor = h1.upperBound
+        } else if text.hasPrefix("---\n"), let close = text.range(of: "\n---\n") {
+            anchor = close.upperBound
+        } else {
+            anchor = text.startIndex
+        }
+        guard let divider = text.range(of: "(?m)^---[ \\t]*$", options: .regularExpression,
+                                       range: anchor ..< text.endIndex) else { return nil }
+        var lineStart = anchor
+        while lineStart < divider.lowerBound {
+            let lineEnd = text.range(of: "\n", range: lineStart ..< divider.lowerBound)?.lowerBound
+                ?? divider.lowerBound
+            let raw = String(text[lineStart ..< lineEnd])
+            let trimmed = raw.trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("- "), let record = parseSessionRecord(trimmed), predicate(record) {
+                return (lineStart ..< lineEnd, record)
+            }
+            guard lineEnd < divider.lowerBound else { break }
+            lineStart = text.index(after: lineEnd)
+        }
+        return nil
+    }
+
+    /// Session-id loss guard, three-way: before the in-memory note overwrites
+    /// disk, re-append a manifest line only when it is on disk, missing from
+    /// memory, AND absent from `base` (the text this window last synced with
+    /// disk) — i.e. something else (vault sync from another Mac, Obsidian, a
+    /// second instance) ADDED it since we last looked.
+    ///
+    /// A line that is in `base` but gone from memory was changed or deleted
+    /// by the user in the app, and stays that way. (The old two-way guard
+    /// could not tell the difference: every half-typed version of a line that
+    /// an autosave had caught came back marked "←自動保留".) Idempotent.
+    public static func mergeManifestLines(disk: String, into memory: String,
+                                          base: String) -> String {
         func normalize(_ s: String) -> String {
-            s.replacingOccurrences(of: " ←自動保留", with: "")
+            s.replacingOccurrences(of: legacyRescueMarker, with: "")
                 .trimmingCharacters(in: .whitespaces)
         }
-        let have = Set(manifestLines(memory).map(normalize))
+        let baseLines = Set(manifestLines(base).map(normalize))
         var out = memory
-        for line in manifestLines(disk) where !have.contains(normalize(line)) {
-            out = appendSessionLine(out, line: normalize(line) + " ←自動保留")
+        for line in manifestLines(disk).map(normalize) where !baseLines.contains(line) {
+            let have = manifestLines(out)
+            guard !have.map(normalize).contains(line) else { continue }
+            // Already represented under another spelling (e.g. remark edited).
+            if let sid = parseSessionRecord(line)?.sid.lowercased(),
+               have.contains(where: { parseSessionRecord($0)?.sid.lowercased() == sid }) {
+                continue
+            }
+            out = appendSessionLine(out, line: line)
         }
         return out
     }

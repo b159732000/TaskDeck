@@ -36,7 +36,11 @@ hooks = settings.setdefault("hooks", {})
 changed = False
 # PreToolUse keeps long turns visibly "running" (UserPromptSubmit alone goes
 # stale after the 30-min freshness window); the hook script self-throttles.
-for event in ["UserPromptSubmit", "PreToolUse", "Stop", "Notification", "SessionEnd"]:
+# SessionStart only updates the pane → session map (pane menu's 記到 AI
+# Session 紀錄), so a fresh claude / `/clear` / `/resume` is known before the
+# first prompt; it never touches the badge state.
+for event in ["UserPromptSubmit", "PreToolUse", "Stop", "Notification", "SessionEnd",
+              "SessionStart"]:
     groups = hooks.setdefault(event, [])
     already = any(
         "taskdeck-ai-status" in (h.get("command") or "")

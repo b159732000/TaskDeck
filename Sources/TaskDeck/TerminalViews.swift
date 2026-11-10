@@ -1320,6 +1320,10 @@ struct PaneContainerView: View {
     private var focused: Bool {
         session.focusedSpecID == specID && session.focusZone == .terminal
     }
+    /// 記到 AI Session 紀錄: the sheet (remark and/or picking a session) and
+    /// the short confirmation shown in the header afterwards.
+    @State private var recordRequest: RecordSessionRequest?
+    @State private var recordFlash: String?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -1354,6 +1358,37 @@ struct PaneContainerView: View {
         .padding(2)
         .contentShape(Rectangle())
         .onTapGesture { session.focus(.terminal, spec: specID) }
+        .sheet(item: $recordRequest) { request in
+            RecordSessionSheet(session: session, model: model, request: request) { result in
+                recordRequest = nil
+                if let result { showRecordFlash(result) }
+            }
+        }
+    }
+
+    /// The pane menu's 記到 AI Session 紀錄. A terminal that reported its
+    /// session records in one click (no remark) or after the remark field;
+    /// one that never did gets a pick-list instead of a guess.
+    private func recordSession(_ spec: PaneSpec, withRemark: Bool) {
+        let known = session.reportedSession(forPane: spec.id)
+        if let known, !withRemark {
+            showRecordFlash(session.recordSession(team: known.team, sid: known.sid, remark: ""))
+            return
+        }
+        recordRequest = RecordSessionRequest(specID: spec.id, known: known, withRemark: withRemark)
+    }
+
+    private func showRecordFlash(_ result: TaskStore.SessionRecordResult) {
+        let text: String
+        switch result {
+        case .added: text = "已記到 AI Session 紀錄"
+        case .remarkUpdated: text = "已更新備註"
+        case .alreadyRecorded: text = "已經在紀錄裡了"
+        }
+        withAnimation { recordFlash = text }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
+            if recordFlash == text { withAnimation { recordFlash = nil } }
+        }
     }
 
     private var header: some View {
@@ -1434,6 +1469,15 @@ struct PaneContainerView: View {
                     .foregroundStyle(.orange)
                     .help("開任務時自動啟動")
             }
+            if let recordFlash {
+                Text(recordFlash)
+                    .font(.system(size: 9.5, weight: .medium))
+                    .foregroundStyle(Theme.accent)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 1.5)
+                    .background(Theme.accent.opacity(0.14), in: Capsule())
+                    .transition(.opacity)
+            }
             Spacer()
             Menu {
                 if let spec {
@@ -1448,6 +1492,9 @@ struct PaneContainerView: View {
                         Button("在 iTerm2 開啟（附掛）") { model.openPaneInITerm2(info) }
                         Divider()
                     }
+                    Button("記到 AI Session 紀錄") { recordSession(spec, withRemark: false) }
+                    Button("記到 AI Session 紀錄（加備註…）") { recordSession(spec, withRemark: true) }
+                    Divider()
                     Button("重新啟動") { session.restartPane(spec) }
                     Toggle("開任務時自動啟動", isOn: Binding(
                         get: { spec.autoStart },
@@ -1511,5 +1558,151 @@ struct PaneContainerView: View {
         .padding(.horizontal, 10)
         .padding(.vertical, 6)
         .background(.ultraThinMaterial)
+    }
+}
+
+/// One 記到 AI Session 紀錄 action that needs the sheet: a remark to type,
+/// a session to pick (the terminal never reported one), or both.
+struct RecordSessionRequest: Identifiable {
+    let id = UUID()
+    let specID: String
+    /// The session the pane's hook reported; nil = let the user pick.
+    let known: (team: String, sid: String)?
+    let withRemark: Bool
+}
+
+/// Sheet for 記到 AI Session 紀錄: shows which session will be recorded (or a
+/// pick-list when the terminal can't tell), plus the optional remark field.
+/// Return records, Esc cancels.
+struct RecordSessionSheet: View {
+    @ObservedObject var session: TaskSession
+    @ObservedObject var model: AppModel
+    let request: RecordSessionRequest
+    /// nil = cancelled.
+    let onDone: (TaskStore.SessionRecordResult?) -> Void
+
+    @State private var remark = ""
+    /// The user typed in the remark field — stop prefilling it.
+    @State private var remarkEdited = false
+    @State private var picked: String?
+    @State private var finished = false
+    @FocusState private var remarkFocused: Bool
+
+    private var candidates: [(team: String, sid: String, at: Date?)] {
+        request.known == nil ? session.sessionCandidates(forPane: request.specID) : []
+    }
+
+    private var target: (team: String, sid: String)? {
+        if let known = request.known { return known }
+        let list = candidates
+        if let picked, let c = list.first(where: { $0.sid == picked }) { return (c.team, c.sid) }
+        return list.first.map { ($0.team, $0.sid) }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(request.withRemark ? "記到 AI Session 紀錄（加備註）" : "記到 AI Session 紀錄")
+                .font(.headline)
+            if let known = request.known {
+                Text("\(known.team) · \(known.sid)")
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+            } else {
+                picker
+            }
+            if request.withRemark {
+                TextField("備註（例如：拆 PR 的討論）", text: Binding(
+                    get: { remark },
+                    set: { remark = $0; remarkEdited = true }
+                ))
+                .textFieldStyle(.roundedBorder)
+                .focused($remarkFocused)
+                .onSubmit { save() }
+            }
+            HStack {
+                Spacer()
+                Button("取消") { finish(nil) }
+                    .keyboardShortcut(.cancelAction)
+                Button("記錄") { save() }
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(target == nil)
+            }
+        }
+        .padding(20)
+        .frame(width: 500)
+        .onAppear {
+            prefillRemark()
+            if request.withRemark { remarkFocused = true }
+        }
+        .onChange(of: target?.sid) { _ in prefillRemark() }
+    }
+
+    @ViewBuilder private var picker: some View {
+        let list = candidates
+        if list.isEmpty {
+            Text("認不出這個終端在跑哪個 session（可能是這次改版前開的終端），這個資料夾最近也沒有 session 可選。")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        } else {
+            Text("認不出這個終端在跑哪個 session（可能是這次改版前開的終端，重新啟動後就認得了）。選一個：")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 2) {
+                    ForEach(list, id: \.sid) { c in
+                        let selected = c.sid == target?.sid
+                        Button {
+                            picked = c.sid
+                        } label: {
+                            HStack(spacing: 8) {
+                                Image(systemName: selected ? "largecircle.fill.circle" : "circle")
+                                    .foregroundStyle(selected ? Theme.accent : .secondary)
+                                Text("\(c.team) · \(c.sid.prefix(8))")
+                                    .font(.system(size: 11.5, design: .monospaced))
+                                Spacer()
+                                Text(c.at.map { Self.whenFormatter.string(from: $0) } ?? "這個終端啟動時的 session")
+                                    .font(.system(size: 10.5))
+                                    .foregroundStyle(.secondary)
+                            }
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .contentShape(Rectangle())
+                            .background(selected ? Theme.accent.opacity(0.12) : .clear,
+                                        in: RoundedRectangle(cornerRadius: 5))
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+            .frame(maxHeight: 220)
+        }
+    }
+
+    private static let whenFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "M/d HH:mm"
+        return f
+    }()
+
+    /// Editing an already-recorded session starts from its current remark.
+    private func prefillRemark() {
+        guard request.withRemark, !remarkEdited, let sid = target?.sid.lowercased() else { return }
+        remark = TaskStore.sessionRecords(session.noteText)
+            .first { $0.sid.lowercased() == sid }?.remark ?? ""
+    }
+
+    private func save() {
+        guard let target else { return }
+        finish(session.recordSession(team: target.team, sid: target.sid,
+                                     remark: request.withRemark ? remark : ""))
+    }
+
+    private func finish(_ result: TaskStore.SessionRecordResult?) {
+        guard !finished else { return } // Return can reach both onSubmit and the default button
+        finished = true
+        onDone(result)
     }
 }

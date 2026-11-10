@@ -1,7 +1,9 @@
 #!/bin/sh
 # Claude Code hook → TaskDeck AI status badge.
 # Registered (by install-ai-status-hooks.sh) for UserPromptSubmit / Stop /
-# Notification / SessionEnd; reads the hook payload on stdin and writes
+# Notification / SessionEnd / PreToolUse, plus SessionStart (pane → session
+# map only; prints nothing, so it adds no context to the conversation);
+# reads the hook payload on stdin and writes
 #   ~/Library/Application Support/TaskDeck/status/<session-id>.json
 # which the GUI watches to light 🟢 (running) / 🟡 (waiting) / 🔴 (needs
 # permission) on the task row. Exit 0 always — a status badge must never
@@ -26,6 +28,33 @@ except Exception:
 sid = payload.get("session_id")
 if not sid or "/" in sid:
     sys.exit(0)
+
+# Which session is THIS terminal running? taskdeckd tags every pane with
+# TASKDECK_PANE (its spec id); Claude hands its environment to hooks. Kept
+# in pane-sessions/<pane>.json — last session wins — for the pane menu's
+# 記到 AI Session 紀錄. Rewritten only when the pane's session changes
+# (SessionStart covers a fresh claude, /clear and /resume before any prompt),
+# so busy PreToolUse traffic costs one small read. Never fatal.
+pane = os.environ.get("TASKDECK_PANE") or ""
+if pane and "/" not in pane and not pane.startswith("."):
+    try:
+        pane_dir = os.path.join(os.path.dirname(out_dir), "pane-sessions")
+        os.makedirs(pane_dir, exist_ok=True)
+        pane_out = os.path.join(pane_dir, pane + ".json")
+        try:
+            with open(pane_out) as f:
+                pane_prev = json.load(f).get("session_id")
+        except Exception:
+            pane_prev = None
+        if pane_prev != sid:
+            config_dir = os.environ.get("CLAUDE_CONFIG_DIR") or ""
+            pane_tmp = os.path.join(pane_dir, "." + pane + ".json.tmp")
+            with open(pane_tmp, "w") as f:
+                json.dump({"session_id": sid, "config_dir": config_dir,
+                           "ts": time.time(), "event": event}, f)
+            os.replace(pane_tmp, pane_out)
+    except Exception:
+        pass
 
 state = {
     "UserPromptSubmit": "running",

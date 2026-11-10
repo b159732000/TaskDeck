@@ -108,8 +108,16 @@ instead of `.system(size:)` and literal colours in new UI.
   - **frontmatter** lifecycle keys: `id` (permanent uuid), `status`,
     `created`, `group`, `group_since`, `latest`, `auto_archived`
     (`TaskStore.setFrontmatterValue` — scoped to the frontmatter block);
-  - the top **session-manifest block**: a `- <team> <session-id>` list right
-    after the H1, closed by a `---` rule (`TaskStore.appendSessionLine`);
+  - the top **session-manifest block** ("AI Session 紀錄"): a list right
+    after the H1, closed by a `---` rule. Lines are written as
+    `- <yyMMddHHmm> <team> <session-id> [remark]`
+    (`TaskStore.recordSession`); legacy `- <team> <session-id>` lines stay
+    as written (never back-filled). Written when the app launches an AI pane,
+    and when the user picks 記到 AI Session 紀錄 in a pane's ⋯ menu — a
+    session is listed once; recording it again with a remark edits that
+    line. The flush guard (`mergeManifestLines`) is three-way: it only
+    re-adds lines something ELSE added on disk, never the user's own edits
+    or deletions;
   - the **`## 狀態` log**: newest-first status-history bullets
     (`TaskStore.prependStatusLog` / `replaceStatusLogEntry`) — James chose
     keeping status history IN the note (Obsidian-visible) over a sidecar
@@ -138,6 +146,11 @@ instead of `.system(size:)` and literal colours in new UI.
   starts with `--session-id`; restart uses `-r <uuid> || --session-id
   <uuid>` (single line, resumes or creates). `TeamDef.args` are captured
   into the pane spec at creation so restores start identically.
+- Every pane is spawned with `TASKDECK_PANE=<spec id>`; the status hook
+  (`Scripts/taskdeck-ai-status.sh`, also registered for SessionStart)
+  writes `pane-sessions/<spec id>.json` = the session that pane last ran
+  (`PaneSessionFiles`). Panes spawned before that tag existed report
+  nothing, and the record sheet asks the user to pick instead of guessing.
 - `taskdeckctl attach` (Ctrl-] detaches) mirrors a daemon pane onto a real
   tty; the "open in iTerm2" menu item builds on it. Both views share one
   PTY; on resize, last writer wins.

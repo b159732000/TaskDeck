@@ -28,10 +28,15 @@ JamesDesk.app (SwiftUI)  ──unix socket──▶  taskdeckd (owns every PTY)
   `/bin/zsh`), so your rc files and aliases load — that's what makes
   alias-based multi-account setups work (see below).
 - AI panes (`kind: "claude"` teams) pre-generate a session uuid, record it
-  at the top of the note (a `- <team> <uuid>` list closed by a `---` rule;
-  everything below is free-form), then start with `--session-id`. Restore
-  runs `-r <uuid> || --session-id <uuid>` — the same line resumes or starts
-  fresh; you never hand-copy session ids.
+  at the top of the note (a `- <yyMMddHHmm> <team> <uuid> [remark]` list
+  closed by a `---` rule; everything below is free-form), then start with
+  `--session-id`. Restore runs `-r <uuid> || --session-id <uuid>` — the
+  same line resumes or starts fresh; you never hand-copy session ids.
+- Any other session — `claude` typed by hand in a shell pane, a `/clear`,
+  a `/resume` — goes into the same list from the pane's ⋯ menu:
+  **記到 AI Session 紀錄** (one click) or **…（加備註…）** (asks for a
+  remark first). Each pane knows which session it is running via a
+  `TASKDECK_PANE` tag the status hook reports.
 - After a reboot nothing mass-respawns: the task list is instant (plain
   files), terminals restore lazily per task, opt-in `autoStart` per pane.
 - Any pane can be mirrored into a real terminal (`taskdeckctl attach`,

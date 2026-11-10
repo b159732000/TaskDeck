@@ -982,14 +982,10 @@ final class AppModel: ObservableObject {
                 guard seen.insert(sid).inserted else { continue }
                 out.append(TaskAISession(sid: sid, team: pane.team, cwd: pane.cwd))
             }
-            for line in TaskStore.manifestLines(text) where line.hasPrefix("- ") {
-                let parts = line.dropFirst(2).split(separator: " ").map(String.init)
-                guard parts.count >= 2 else { continue }
-                let sid = parts[1]
-                guard (32 ... 36).contains(sid.count),
-                      sid.allSatisfy({ $0.isHexDigit || $0 == "-" }),
-                      seen.insert(sid.lowercased()).inserted else { continue }
-                out.append(TaskAISession(sid: sid.lowercased(), team: parts[0], cwd: nil))
+            // Legacy `- team sid` and dated `- stamp team sid remark` lines.
+            for record in TaskStore.sessionRecords(text) where !record.sid.hasPrefix("ses_") {
+                guard seen.insert(record.sid.lowercased()).inserted else { continue }
+                out.append(TaskAISession(sid: record.sid.lowercased(), team: record.team, cwd: nil))
             }
             base = TaskAISessionBase(
                 text: text, machine: machine, sessions: out, seen: seen,
@@ -2040,10 +2036,12 @@ final class TaskSession: ObservableObject {
         noteTimer = nil
         guard !deleted, !noteLoadFailed else { return } // tombstone / failed load
         let disk = app.store.read(slug)
-        // Never let a stale in-memory copy destroy session ids that are
-        // already on disk (vault sync / second instance / crash races) —
-        // James lost a claude-eng id to exactly this class of race.
-        let merged = TaskStore.mergeManifestLines(disk: disk, into: noteText)
+        // Never let a stale in-memory copy destroy session ids that something
+        // else added on disk (vault sync / second instance / crash races) —
+        // James lost a claude-eng id to exactly this class of race. Three-way
+        // against baseText, so the user's own edits/deletions in the app are
+        // respected instead of resurrected.
+        let merged = TaskStore.mergeManifestLines(disk: disk, into: noteText, base: baseText)
         if merged != noteText { noteText = merged }
         // Concurrent-edit guard: disk moved since our last sync AND we hold
         // local edits. The manifest merge above rescues session ids, but the
@@ -2156,7 +2154,7 @@ final class TaskSession: ObservableObject {
         if team.kind == "claude" {
             let sid = UUID().uuidString.lowercased()
             spec.sessionID = sid
-            noteText = TaskStore.appendSessionLine(noteText, line: "- \(team.id) \(sid)")
+            noteText = TaskStore.recordSession(noteText, team: team.id, sid: sid).text
         }
         // The pick for the task's first AI pane seeds its account; after that
         // only a hand pick (sidebar / header chip) changes it.
@@ -2205,9 +2203,54 @@ final class TaskSession: ObservableObject {
         if let sid, !sid.isEmpty {
             machine.panes[i].sessionID = sid
             if !TaskStore.manifestLines(noteText).contains(where: { $0.contains(sid) }) {
-                noteText = TaskStore.appendSessionLine(noteText, line: "- \(team) \(sid)")
+                noteText = TaskStore.recordSession(noteText, team: team, sid: sid).text
             }
         }
+    }
+
+    // MARK: - 記到 AI Session 紀錄 (pane menu)
+
+    /// The session the pane's hook last reported (see `PaneSessionFiles`),
+    /// with its account. nil = this terminal never reported one — spawned
+    /// before panes were tagged, or no Claude has run in it yet — and the
+    /// caller must let the user pick rather than guess.
+    func reportedSession(forPane specID: String) -> (team: String, sid: String)? {
+        guard let rec = PaneSessionFiles.read(directory: Paths.paneSessionsDir, paneID: specID) else {
+            return nil
+        }
+        let team = AccountRules.team(configDir: rec.configDir, teams: app.config.teams)
+            ?? app.cachedTeamsFromSessionFiles([rec.sid])[rec.sid.lowercased()]
+            ?? spec(specID)?.team
+        guard let team else { return nil }
+        return (team, rec.sid)
+    }
+
+    /// Pick-list for a pane whose session isn't known: the id the app
+    /// launched it with (if any) first, then recent sessions in its folder.
+    func sessionCandidates(forPane specID: String) -> [(team: String, sid: String, at: Date?)] {
+        var out: [(team: String, sid: String, at: Date?)] = []
+        var seen = Set<String>()
+        if let s = spec(specID), let sid = s.sessionID?.lowercased(), let team = s.team,
+           s.kind == "ai" {
+            out.append((app.cachedTeamsFromSessionFiles([sid])[sid] ?? team, sid, nil))
+            seen.insert(sid)
+        }
+        let cwd = Paths.expand(spec(specID)?.cwd ?? app.config.defaultCwd)
+        for r in app.recentSessions(cwd: cwd) where seen.insert(r.sid.lowercased()).inserted {
+            out.append((r.team, r.sid.lowercased(), r.at))
+        }
+        return out
+    }
+
+    /// Write a session into the note's AI Session list and save right away.
+    @discardableResult
+    func recordSession(team: String, sid: String, remark: String) -> TaskStore.SessionRecordResult {
+        let (text, result) = TaskStore.recordSession(noteText, team: team, sid: sid, remark: remark)
+        if text != noteText {
+            noteText = text
+            flushNote()
+        }
+        return result
     }
 
     /// Which way "加一個終端" splits: set by TaskDetailView from the stage
@@ -2272,7 +2315,9 @@ final class TaskSession: ObservableObject {
         // Rename-proof attribution: TASKDECK_TASK (slug) goes stale when the
         // task is renamed; the permanent frontmatter uuid doesn't. The status
         // hook records both; the GUI prefers the key when resolving.
-        m.env = ["TASKDECK_TASK_KEY": permanentID()]
+        // TASKDECK_PANE lets the hook report which session runs in WHICH
+        // pane (`PaneSessionFiles`) — the pane menu's 記到 AI Session 紀錄.
+        m.env = ["TASKDECK_TASK_KEY": permanentID(), "TASKDECK_PANE": spec.id]
         app.client.request(m) { [weak self] resp in
             Task { @MainActor in
                 guard let self else { return }
@@ -2314,6 +2359,8 @@ final class TaskSession: ObservableObject {
             machine.layout = LayoutOps.remove(layout, target: spec.id)
         }
         if focusedSpecID == spec.id { focusedSpecID = nil }
+        // The pane's session report dies with it (spec ids are never reused).
+        PaneSessionFiles.remove(directory: Paths.paneSessionsDir, paneID: spec.id)
     }
 
     /// The task's permanent id (frontmatter `id`, rename-proof). Stamped at

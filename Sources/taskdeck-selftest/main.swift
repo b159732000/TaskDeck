@@ -496,21 +496,120 @@ check("archive-lifecycle: manual archive clears stale automatic marker",
       TaskStore.frontmatter(manualAfterAuto)["archived_at"] == "2026-07-30 13:00:00"
       && TaskStore.frontmatter(manualAfterAuto)["auto_archived"] == nil)
 
-// MARK: manifest merge-guard — stale flush must not drop session ids
+// MARK: manifest merge-guard — three-way: rescue external additions only
 
+let baseNote = "---\nstatus: active\n---\n\n# t\n\n- claude3 keep-456\n\n---\n\n內文"
+// Another writer (vault sync) added old-123 on disk since this window synced.
 let diskNote = "---\nstatus: active\n---\n\n# t\n\n- claude-eng old-123\n- claude3 keep-456\n\n---\n\n內文"
 let staleMemory = "---\nstatus: active\n---\n\n# t\n\n- claude3 keep-456\n- claude-eng new-789\n\n---\n\n內文（多打了幾個字）"
-let mergedNote = TaskStore.mergeManifestLines(disk: diskNote, into: staleMemory)
-check("merge: rescued line restored w/ marker",
-      mergedNote.contains("- claude-eng old-123 ←自動保留"))
+let mergedNote = TaskStore.mergeManifestLines(disk: diskNote, into: staleMemory, base: baseNote)
+check("merge: externally added line rescued, no marker",
+      mergedNote.contains("- claude-eng old-123\n") && !mergedNote.contains("←自動保留"))
 check("merge: memory's new line kept", mergedNote.contains("- claude-eng new-789"))
 check("merge: shared line not duplicated",
       mergedNote.components(separatedBy: "keep-456").count == 2)
 check("merge: body edits preserved", mergedNote.contains("內文（多打了幾個字）"))
 check("merge: idempotent",
-      TaskStore.mergeManifestLines(disk: diskNote, into: mergedNote) == mergedNote)
+      TaskStore.mergeManifestLines(disk: diskNote, into: mergedNote, base: baseNote) == mergedNote)
 check("merge: no manifest on disk is a no-op",
-      TaskStore.mergeManifestLines(disk: "# t\n\n無 manifest", into: staleMemory) == staleMemory)
+      TaskStore.mergeManifestLines(disk: "# t\n\n無 manifest", into: staleMemory, base: baseNote)
+          == staleMemory)
+// The 261110 bug: an autosave caught a half-typed line, the user kept typing —
+// the half line must NOT come back as a "←自動保留" ghost.
+let halfTyped = "# t\n\n- claude-eng 53ec99de-248f-40e7-bfc2-dc8b049736e9\n- claude-ext2\n\n---\n"
+let fullyTyped = "# t\n\n- claude-eng 53ec99de-248f-40e7-bfc2-dc8b049736e9\n- claude-ext2 50e3381c-9596-4b8e-9337-0a3e146c4062\n\n---\n"
+check("merge: a half-typed line the user finished is not resurrected",
+      TaskStore.mergeManifestLines(disk: halfTyped, into: fullyTyped, base: halfTyped) == fullyTyped)
+let userDeleted = "# t\n\n- claude-eng 53ec99de-248f-40e7-bfc2-dc8b049736e9\n\n---\n"
+check("merge: a line the user deleted in the app stays deleted",
+      TaskStore.mergeManifestLines(disk: fullyTyped, into: userDeleted, base: fullyTyped) == userDeleted)
+let legacyGhost = "# t\n\n- claude-ext2 50e3381c-9596-4b8e-9337-0a3e146c4062 ←自動保留\n\n---\n"
+let cleaned = "# t\n\n- claude-ext2 50e3381c-9596-4b8e-9337-0a3e146c4062\n\n---\n"
+check("merge: removing a legacy marker in the app is not undone",
+      TaskStore.mergeManifestLines(disk: legacyGhost, into: cleaned, base: legacyGhost) == cleaned)
+let remarkEdited = "# t\n\n- 2611101530 claude-ext2 50e3381c-9596-4b8e-9337-0a3e146c4062 新備註\n\n---\n"
+let externalSameSid = "# t\n\n- 2611101530 claude-ext2 50e3381c-9596-4b8e-9337-0a3e146c4062 舊備註\n\n---\n"
+check("merge: an external line for a session memory already lists is not duplicated",
+      TaskStore.mergeManifestLines(disk: externalSameSid, into: remarkEdited, base: "# t\n")
+          == remarkEdited)
+
+// MARK: AI Session records — dated lines, optional remark, no duplicates
+
+let sidX = "50e3381c-9596-4b8e-9337-0a3e146c4062"
+let sidY = "53ec99de-248f-40e7-bfc2-dc8b049736e9"
+check("record-parse: legacy `- team sid`",
+      TaskStore.parseSessionRecord("- claude-eng \(sidY)")
+          == TaskStore.SessionRecord(stamp: nil, team: "claude-eng", sid: sidY))
+check("record-parse: dated with remark",
+      TaskStore.parseSessionRecord("- 2611101530 claude-ext2 \(sidX) 拆 PR 的討論")
+          == TaskStore.SessionRecord(stamp: "2611101530", team: "claude-ext2", sid: sidX,
+                                     remark: "拆 PR 的討論"))
+check("record-parse: legacy marker + double space tolerated",
+      TaskStore.parseSessionRecord("- claude-product  \(sidX) ←自動保留")?.sid == sidX)
+check("record-parse: half-typed / run-together lines are not records",
+      TaskStore.parseSessionRecord("- claude-ext2") == nil
+      && TaskStore.parseSessionRecord("- claude-ext2= ←自動保留") == nil
+      && TaskStore.parseSessionRecord("- claude-ext2 \(sidX)- claude-ext2 ←自動保留") == nil)
+check("record-parse: opencode ids parse",
+      TaskStore.parseSessionRecord("- 2611101530 opencode ses_01jz9abc123")?.sid == "ses_01jz9abc123")
+
+var recCal = Calendar(identifier: .gregorian)
+recCal.timeZone = .current
+let recAt = recCal.date(from: DateComponents(year: 2026, month: 11, day: 10, hour: 15, minute: 30))!
+check("record-line: `- yyMMddHHmm team sid remark`, remark flattened",
+      TaskStore.sessionLine(team: "claude-ext2", sid: sidX, remark: " 拆 PR\n的討論 ", at: recAt)
+          == "- 2611101530 claude-ext2 \(sidX) 拆 PR 的討論")
+
+let recNoBlock = "---\nid: x\n---\n\n# 任務\n\n自由筆記\n"
+let recAdded = TaskStore.recordSession(recNoBlock, team: "claude-ext2", sid: sidX, at: recAt)
+check("record: first record creates the block under the H1",
+      recAdded.result == .added
+      && recAdded.text.hasPrefix("---\nid: x\n---\n\n# 任務\n\n- 2611101530 claude-ext2 \(sidX)\n\n---\n")
+      && recAdded.text.hasSuffix("\n自由筆記\n"))
+let recTwice = TaskStore.recordSession(recAdded.text, team: "claude-ext2", sid: sidX.uppercased(), at: recAt)
+check("record: same session without remark is a no-op",
+      recTwice.result == .alreadyRecorded && recTwice.text == recAdded.text)
+let recRemark = TaskStore.recordSession(recAdded.text, team: "claude-ext2", sid: sidX,
+                                        remark: "拆 PR 的討論",
+                                        at: recAt.addingTimeInterval(86_400))
+check("record: same session with remark sets it in place, keeps the original stamp",
+      recRemark.result == .remarkUpdated
+      && recRemark.text.contains("- 2611101530 claude-ext2 \(sidX) 拆 PR 的討論\n")
+      && TaskStore.sessionRecords(recRemark.text).count == 1)
+let recSecond = TaskStore.recordSession(recRemark.text, team: "claude-eng", sid: sidY,
+                                        remark: "review", at: recAt)
+check("record: a new session appends below, block still closed by ---",
+      recSecond.result == .added
+      && recSecond.text.contains("# 任務\n\n- 2611101530 claude-ext2 \(sidX) 拆 PR 的討論\n- 2611101530 claude-eng \(sidY) review\n\n---\n")
+      && recSecond.text.hasSuffix("\n自由筆記\n"))
+let recLegacy = "# t\n\n- claude-eng \(sidY) ←自動保留\n\n---\n\nbody"
+let recLegacyRemark = TaskStore.recordSession(recLegacy, team: "claude-eng", sid: sidY,
+                                              remark: "補備註", at: recAt)
+check("record: remark on a legacy line keeps it undated, drops the marker",
+      recLegacyRemark.result == .remarkUpdated
+      && recLegacyRemark.text == "# t\n\n- claude-eng \(sidY) 補備註\n\n---\n\nbody")
+check("record: sessionRecords skips non-record bullets",
+      TaskStore.sessionRecords("# t\n\n- claude-ext2\n- claude-ext2 \(sidX)\n\n---\n").map(\.sid) == [sidX])
+
+// MARK: pane → session map (hook-written) and account resolution
+
+let paneDir = FileManager.default.temporaryDirectory
+    .appendingPathComponent("taskdeck-pane-sessions-\(UUID().uuidString)")
+try? FileManager.default.createDirectory(at: paneDir, withIntermediateDirectories: true)
+try? #"{"session_id": "50E3381C-9596-4B8E-9337-0A3E146C4062", "config_dir": "/Users/me/.claude-ext2", "ts": 1794300000, "event": "SessionStart"}"#
+    .write(to: paneDir.appendingPathComponent("PANE-1.json"), atomically: true, encoding: .utf8)
+let paneRec = PaneSessionFiles.read(directory: paneDir, paneID: "PANE-1")
+check("pane-session: reads sid (lowercased) + config dir",
+      paneRec?.sid == sidX && paneRec?.configDir == "/Users/me/.claude-ext2")
+check("pane-session: a pane that never reported is nil",
+      PaneSessionFiles.read(directory: paneDir, paneID: "PANE-2") == nil)
+check("pane-session: path-like pane ids are refused",
+      PaneSessionFiles.read(directory: paneDir, paneID: "../PANE-1") == nil)
+PaneSessionFiles.remove(directory: paneDir, paneID: "PANE-1")
+check("pane-session: closing a pane forgets its report",
+      PaneSessionFiles.read(directory: paneDir, paneID: "PANE-1") == nil)
+try? FileManager.default.removeItem(at: paneDir)
+// (Account from the reported config dir: AccountRules, tested below.)
 
 // MARK: session discovery — one note scan + batched off-main directory lookup
 
@@ -989,14 +1088,19 @@ let hookTemp = FileManager.default.temporaryDirectory
     .appendingPathComponent("taskdeck-selftest-hook-\(UUID().uuidString)")
 try? FileManager.default.createDirectory(at: hookTemp, withIntermediateDirectories: true)
 
-func runHook(_ script: URL, event: String, payload: [String: Any]) {
+func runHook(_ script: URL, event: String, payload: [String: Any],
+             env extra: [String: String] = [:]) {
     let process = Process()
     process.executableURL = URL(fileURLWithPath: "/bin/sh")
     process.arguments = [script.path, event]
     var environment = ProcessInfo.processInfo.environment
     environment["HOME"] = hookTemp.path
-    environment.removeValue(forKey: "TASKDECK_TASK")
-    environment.removeValue(forKey: "TASKDECK_TASK_KEY")
+    // The selftest itself may run inside a TaskDeck pane / a Claude account:
+    // never let the caller's tags leak into the hook under test.
+    for key in ["TASKDECK_TASK", "TASKDECK_TASK_KEY", "TASKDECK_PANE", "CLAUDE_CONFIG_DIR"] {
+        environment.removeValue(forKey: key)
+    }
+    for (k, v) in extra { environment[k] = v }
     process.environment = environment
     let input = Pipe()
     process.standardInput = input
@@ -1065,6 +1169,25 @@ if let root = selftestRepoRoot() {
     runHook(hook, event: "SessionEnd", payload: ["session_id": orphan])
     check("hook: SessionEnd with no prior file still records ended",
           hookStatus(orphan)?["state"] as? String == "ended" && hookStatus(orphan)?["ts"] != nil)
+
+    // Pane → session map (記到 AI Session 紀錄).
+    let paneSessionsDir = hookTemp.appendingPathComponent(
+        "Library/Application Support/TaskDeck/pane-sessions")
+    let paneEnv = ["TASKDECK_PANE": "PANE-A", "CLAUDE_CONFIG_DIR": "/Users/me/.claude-ext2"]
+    runHook(hook, event: "SessionStart", payload: ["session_id": "hook-pane-first"], env: paneEnv)
+    check("hook: SessionStart maps the pane to its session",
+          PaneSessionFiles.read(directory: paneSessionsDir, paneID: "PANE-A")?.sid == "hook-pane-first"
+          && PaneSessionFiles.read(directory: paneSessionsDir, paneID: "PANE-A")?.configDir
+              == "/Users/me/.claude-ext2")
+    check("hook: SessionStart never touches the badge state",
+          hookStatus("hook-pane-first") == nil)
+    runHook(hook, event: "SessionStart", payload: ["session_id": "hook-pane-cleared"], env: paneEnv)
+    check("hook: /clear (a new SessionStart) moves the pane to the new session",
+          PaneSessionFiles.read(directory: paneSessionsDir, paneID: "PANE-A")?.sid == "hook-pane-cleared")
+    runHook(hook, event: "Stop", payload: ["session_id": "hook-pane-untagged"])
+    check("hook: a session outside TaskDeck panes writes no pane map",
+          (try? FileManager.default.contentsOfDirectory(atPath: paneSessionsDir.path))?
+              .filter { $0.hasSuffix(".json") } == ["PANE-A.json"])
 } else {
     print("skip hook: repo root not found from \(CommandLine.arguments[0])")
     failures += 1

@@ -29,6 +29,15 @@ public enum Paths {
         return d
     }
 
+    /// Which AI session each pane is running, written by the same hook
+    /// script: one `<pane-spec-id>.json` per pane (`TASKDECK_PANE` is set in
+    /// every pane's environment), last session wins. See `PaneSessionFiles`.
+    public static var paneSessionsDir: URL {
+        let d = appSupport.appendingPathComponent("pane-sessions", isDirectory: true)
+        try? FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
+        return d
+    }
+
     public static func expand(_ path: String) -> String {
         (path as NSString).expandingTildeInPath
     }
