@@ -679,7 +679,7 @@ check("sessions: unresolved id omitted", discoveredTeams.count == 2)
 // event. Status fallback must use the latest top-level JSONL timestamp.
 let transcriptURL = projectA.appendingPathComponent("legacy-status.jsonl")
 let embeddedTimestamp = "2026-07-23T05:11:48.151Z"
-let eventLine = #"{"type":"system","subtype":"turn_duration","timestamp":"\#(embeddedTimestamp)"}"#
+let eventLine = #"{"type":"assistant","timestamp":"\#(embeddedTimestamp)"}"#
 let nestedFakeTimestamp = #"{"type":"metadata","payload":{"timestamp":"2099-01-01T00:00:00.000Z"}}"#
 let largeUntimestampedMetadata = try! JSONSerialization.data(withJSONObject: [
     "type": "metadata",
@@ -729,6 +729,43 @@ try? FileManager.default.createDirectory(at: subagentsURL, withIntermediateDirec
 try? Data(eventLine.utf8).write(to: subagentsURL.appendingPathComponent("agent-a.jsonl"))
 check("transcript status: auxiliary sidecar cannot drive task grouping",
       SessionDiscovery.transcriptEventTimestamp(sidecarURL) == nil)
+
+// 11-17 移動端崩潰問題: last turn 11-10 14:53:44 (Stop hook stamped it, the
+// user acked it), then a compaction at 15:48:44 wrote a boundary, a summary
+// `user` row, attachments and a system notice — no turn. Seven days on, the
+// hook file aged out with its ack; the fallback must age out with them, not
+// live on at the compaction's time as an unread 等你.
+let compactedURL = projectA.appendingPathComponent("compacted-after-turn.jsonl")
+let compactedRows = [
+    #"{"type":"user","timestamp":"2026-11-10T06:50:01.000Z"}"#,
+    #"{"type":"assistant","timestamp":"2026-11-10T06:53:44.500Z"}"#,
+    #"{"type":"system","subtype":"stop_hook_summary","timestamp":"2026-11-10T06:53:44.600Z"}"#,
+    #"{"type":"system","subtype":"compact_boundary","timestamp":"2026-11-10T07:48:44.900Z"}"#,
+    #"{"type":"user","isCompactSummary":true,"isVisibleInTranscriptOnly":true,"timestamp":"2026-11-10T07:48:44.910Z"}"#,
+    #"{"type":"attachment","timestamp":"2026-11-10T07:48:44.919Z"}"#,
+    #"{"type":"user","isMeta":true,"timestamp":"2026-11-10T07:48:44.950Z"}"#,
+    #"{"type":"system","subtype":"informational","timestamp":"2026-11-10T07:48:44.982Z"}"#,
+    #"{"type":"last-prompt"}"#,
+]
+try? Data((compactedRows.joined(separator: "\n") + "\n").utf8).write(to: compactedURL)
+let lastTurnAt = timestampParser.date(from: "2026-11-10T06:53:44.500Z")!
+let compactedEventAt = SessionDiscovery.transcriptEventTimestamp(compactedURL)
+check("transcript status: compaction, attachments, notices and meta rows are not a turn",
+      compactedEventAt.map { abs($0.timeIntervalSince(lastTurnAt)) < 0.001 } == true)
+let hookStampedAt = lastTurnAt.addingTimeInterval(0.1) // the Stop hook runs after the row
+let hookExpiredAt = hookStampedAt.addingTimeInterval(7 * 24 * 3600 + 1)
+check("transcript status: fallback ages out with the hook file it replaces",
+      SessionDiscovery.transcriptSignal(
+          eventTimestamp: compactedEventAt, now: hookExpiredAt,
+          signalWindow: 7 * 24 * 3600, runningWindow: 600
+      ) == nil)
+check("transcript status: a real user prompt after the last reply counts",
+      SessionDiscovery.isTurnRow(["type": "user", "timestamp": "x"]))
+check("transcript status: summary / meta / system / attachment rows do not",
+      !SessionDiscovery.isTurnRow(["type": "user", "isCompactSummary": true])
+        && !SessionDiscovery.isTurnRow(["type": "user", "isMeta": true])
+        && !SessionDiscovery.isTurnRow(["type": "system", "subtype": "turn_duration"])
+        && !SessionDiscovery.isTurnRow(["type": "attachment"]))
 try? FileManager.default.removeItem(at: discoveryTemp)
 
 // MARK: Claude native background-task transcript lifecycle

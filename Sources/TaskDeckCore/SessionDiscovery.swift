@@ -154,12 +154,21 @@ public enum SessionDiscovery {
         return [own, newestChild].compactMap { $0 }.max()
     }
 
-    /// Latest real event time recorded inside a Claude JSONL transcript.
+    /// Latest conversation-turn time recorded inside a Claude JSONL transcript.
     ///
     /// Filesystem mtimes are not conversation activity: Claude and unrelated
-    /// indexers can touch an old transcript without appending a turn. Read from
-    /// the tail because JSONL is chronological; progressively widen only when
-    /// trailing metadata rows (which often have no timestamp) require it.
+    /// indexers can touch an old transcript without appending a turn. Neither
+    /// are the rows Claude writes outside a turn — a compaction (boundary,
+    /// summary, re-attached files), system notices, attachments — so only
+    /// `isTurnRow` rows count. 11-17: a session compacted 55 min after its
+    /// last turn; when its hook file aged out (and the ack with it), this
+    /// fallback took over at the compaction's time, 55 min younger than the
+    /// window, and an untouched 已讀 task sat in 等你 as unread for that hour.
+    /// Counting turns only, the fallback is never younger than the hook's
+    /// own stamp (Stop/SessionEnd fire after the last turn row), so it ages
+    /// out with it. Read from the tail because JSONL is chronological;
+    /// progressively widen only when trailing rows that do not count require
+    /// it.
     public static func transcriptEventTimestamp(_ url: URL) -> Date? {
         let fm = FileManager.default
         var isDirectory: ObjCBool = false
@@ -195,6 +204,22 @@ public enum SessionDiscovery {
         return formatter
     }()
 
+    /// Part of a conversation turn: what the AI wrote, or what the user (or a
+    /// tool result) fed it. Compaction summaries and meta rows are `user`
+    /// rows Claude writes on its own; system rows, attachments and metadata
+    /// never mean the AI produced anything.
+    public static func isTurnRow(_ record: [String: Any]) -> Bool {
+        switch record["type"] as? String {
+        case "assistant":
+            return true
+        case "user":
+            return (record["isCompactSummary"] as? Bool) != true
+                && (record["isMeta"] as? Bool) != true
+        default:
+            return false
+        }
+    }
+
     private static func lastJSONLEventTimestamp(_ url: URL) -> Date? {
         guard let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),
               let sizeNumber = attributes[.size] as? NSNumber else { return nil }
@@ -218,6 +243,7 @@ public enum SessionDiscovery {
                 for line in data.split(separator: 0x0A).reversed() {
                     guard let object = try? JSONSerialization.jsonObject(with: Data(line)),
                           let record = object as? [String: Any],
+                          isTurnRow(record),
                           let raw = record["timestamp"] else { continue }
                     if let text = raw as? String,
                        let timestamp = fractionalISO8601.date(from: text)
