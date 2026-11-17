@@ -86,13 +86,26 @@ struct SidebarView: View {
         }
         let semi = groups[.semiArchived] ?? []
         let done = (groups[.done] ?? []).sorted(by: TaskSortRules.archivedNewestFirst)
+        // Which lanes show, top to bottom — the one source for the `if`s
+        // below and for which header is first (that one sits flush under the
+        // search field).
+        // 待開工 stays as a drop target even when empty, except in search.
+        let laneShown: [(AppModel.SidebarGroup, Bool)] = [
+            (.pinned, !pinned.isEmpty), (.needsYou, !needsYou.isEmpty),
+            (.aiRunning, !aiRunning.isEmpty), (.longRunning, !longRun.isEmpty),
+            (.idle, !idle.isEmpty || !searchActive), (.read, !read.isEmpty),
+            (.waitingExt, !waiting.isEmpty), (.semiArchived, !semi.isEmpty),
+            (.done, !done.isEmpty),
+        ]
+        let shownLanes = laneShown.filter(\.1).map(\.0)
+        let firstLane = shownLanes.first
 
         // 不用 List 的 selection 系統：它的選取膠囊跟自畫常駐底是兩個
         // 形狀不同的圖層，焦點在側邊欄時必然疊成兩層色。選取全自管——
         // 點列設 model.selection，唯一的高亮圖層就是 listRowBackground。
         List {
-            if !pinned.isEmpty {
-                sidebarSection(isExpanded: $pinnedExpanded) {
+            if shownLanes.contains(.pinned) {
+                sidebarSection(isExpanded: $pinnedExpanded, first: firstLane == .pinned) {
                     if searchActive {
                         ForEach(pinned) { row($0, group: .pinned) }
                     } else {
@@ -106,8 +119,8 @@ struct SidebarView: View {
                                pinnedAway > 0 ? "另 \(pinnedAway) 個在下方" : "不封存")
                 }
             }
-            if !needsYou.isEmpty {
-                sidebarSection(isExpanded: $needsYouExpanded) {
+            if shownLanes.contains(.needsYou) {
+                sidebarSection(isExpanded: $needsYouExpanded, first: firstLane == .needsYou) {
                     ForEach(needsYou) { row($0, group: .needsYou) }
                 } header: {
                     // Ticks on its own: the sidebar no longer re-renders every
@@ -118,15 +131,15 @@ struct SidebarView: View {
                     }
                 }
             }
-            if !aiRunning.isEmpty {
-                sidebarSection(isExpanded: $aiRunningExpanded) {
+            if shownLanes.contains(.aiRunning) {
+                sidebarSection(isExpanded: $aiRunningExpanded, first: firstLane == .aiRunning) {
                     ForEach(aiRunning) { row($0, group: .aiRunning) }
                 } header: {
                     laneHeader(.aiRunning, aiRunning.count, accountsText(aiRunning))
                 }
             }
-            if !longRun.isEmpty {
-                sidebarSection(isExpanded: $longRunExpanded) {
+            if shownLanes.contains(.longRunning) {
+                sidebarSection(isExpanded: $longRunExpanded, first: firstLane == .longRunning) {
                     if searchActive {
                         ForEach(longRun) { row($0, group: .longRunning) }
                     } else {
@@ -140,8 +153,8 @@ struct SidebarView: View {
                     laneHeader(.longRunning, longRun.count, summary.text, subTint: summary.tint)
                 }
             }
-            if !idle.isEmpty || !searchActive {
-                sidebarSection(isExpanded: $runningExpanded) {
+            if shownLanes.contains(.idle) {
+                sidebarSection(isExpanded: $runningExpanded, first: firstLane == .idle) {
                     if searchActive {
                         ForEach(idle) { row($0, group: .idle) }
                     } else {
@@ -154,29 +167,29 @@ struct SidebarView: View {
                     laneHeader(.idle, idle.count, "")
                 }
             }
-            if !read.isEmpty {
-                sidebarSection(isExpanded: $readExpanded) {
+            if shownLanes.contains(.read) {
+                sidebarSection(isExpanded: $readExpanded, first: firstLane == .read) {
                     ForEach(read) { row($0, group: .read) }
                 } header: {
                     laneHeader(.read, read.count, "看過待回")
                 }
             }
-            if !waiting.isEmpty {
-                sidebarSection(isExpanded: $waitingExpanded) {
+            if shownLanes.contains(.waitingExt) {
+                sidebarSection(isExpanded: $waitingExpanded, first: firstLane == .waitingExt) {
                     ForEach(waiting) { row($0, group: .waitingExt) }
                 } header: {
                     laneHeader(.waitingExt, waiting.count, "同事 / CI")
                 }
             }
-            if !semi.isEmpty {
-                sidebarSection(isExpanded: $sunkExpanded) {
+            if shownLanes.contains(.semiArchived) {
+                sidebarSection(isExpanded: $sunkExpanded, first: firstLane == .semiArchived) {
                     ForEach(semi) { row($0, group: .semiArchived) }
                 } header: {
                     laneHeader(.semiArchived, semi.count, ">3 天")
                 }
             }
-            if !done.isEmpty {
-                sidebarSection(isExpanded: $doneExpanded) {
+            if shownLanes.contains(.done) {
+                sidebarSection(isExpanded: $doneExpanded, first: firstLane == .done) {
                     ForEach(done) { row($0, group: .done) }
                 } header: {
                     laneHeader(.done, done.count, "")
@@ -188,7 +201,13 @@ struct SidebarView: View {
         }
         .listStyle(.sidebar)
         .scrollContentBackground(.hidden)
-        .safeAreaInset(edge: .top, spacing: 0) {
+        // −4: lane headers are plain rows now (see sidebarSection), and a
+        // plain row is at least 32 pt (defaultMinListRowHeight does not reach
+        // the sidebar List — measured) where the old Section header was 28.
+        // The first header pads itself to 32 and the list starts 4 pt
+        // higher, which lands it, and the rows under it, exactly where the
+        // Section header had them.
+        .safeAreaInset(edge: .top, spacing: -Self.firstHeaderLift) {
             searchHeader(resultCount: visibleTasks.count)
         }
         // A floating pill, not a strip: it is opaque enough to read over
@@ -281,17 +300,30 @@ struct SidebarView: View {
     /// on hover, sits off the header's centre line, and shoves the subtitle
     /// left when it appears. Ours is always there (dim, rotates), the whole
     /// header toggles, and nothing moves.
+    ///
+    /// The header is an ordinary row, NOT a `Section` header. A Section
+    /// header is an NSOutlineView group row, and AppKit keeps every group
+    /// row's index in a set (`NSTableBannerRowData`) that it shifts on each
+    /// row insert. Four times (10-26, 10-29, 10-30, 11-17) that set held an
+    /// index at NSNotFound − 1, and the next row a lane gained threw
+    /// NSRangeException out of `shiftBannerRowIndexesStartingAtIndex:by:`.
+    /// Thrown from SwiftUI's update flush it froze the window; thrown from
+    /// layout (11-17 13:42) AppKit killed the GUI outright. With no group
+    /// rows the set stays empty — measured offscreen: [0, 3, 5] with
+    /// Sections, [] with header rows, through the same inserts/moves — so
+    /// there is nothing left to overflow. (Turning off floating headers does
+    /// not help: SwiftUI's sidebar already has floatsGroupRows == false and
+    /// the set is kept regardless.)
     @ViewBuilder
     private func sidebarSection<Content: View, Header: View>(
         isExpanded: Binding<Bool>,
+        first: Bool,
         @ViewBuilder content: () -> Content,
         @ViewBuilder header: () -> Header
     ) -> some View {
-        Section {
-            if searchActive || isExpanded.wrappedValue {
-                content()
-            }
-        } header: {
+        // Group, not a container: the List flattens it, so the header and
+        // each task stay separate rows.
+        Group {
             HStack(spacing: 8) {
                 header()
                 if !searchActive {
@@ -309,8 +341,31 @@ struct SidebarView: View {
                 withAnimation(.easeInOut(duration: 0.15)) { isExpanded.wrappedValue.toggle() }
             }
             .help(searchActive ? "" : (isExpanded.wrappedValue ? "收合" : "展開"))
+            // Where the Section header sat (measured offscreen at 230 pt:
+            // header x 14…228, plain row 16…214). Horizontally listRowInsets
+            // ADD to the plain row's inset (zero = unchanged), so padding
+            // moves it; vertically zero drops the plain row's 4 pt above and
+            // below, which a header never had.
+            .padding(.leading, -2)
+            .padding(.trailing, -14)
+            // The first lane sits flush under the search field, as its
+            // Section header did (see firstHeaderLift); the rest get the
+            // section break's air.
+            .padding(.top, first ? Self.firstHeaderLift : 13)
+            .listRowInsets(EdgeInsets())
+            .listRowSeparator(.hidden)
+            .listRowBackground(Color.clear)
+            .moveDisabled(true)
+            .accessibilityAddTraits(.isHeader)
+            if searchActive || isExpanded.wrappedValue {
+                content()
+            }
         }
     }
+
+    /// A plain sidebar row's 32 pt floor minus the 28 pt Section header it
+    /// replaced (see the List's top safeAreaInset).
+    private static let firstHeaderLift: CGFloat = 4
 
     /// Lane header: the count is the loudest element (display face, lane
     /// colour), the name reads as its label, and a short mono subtitle says

@@ -14,6 +14,15 @@ import UserNotifications
 ///
 /// SwiftUI runs its own NSApplication subclass and ignores NSPrincipalClass,
 /// so the hook wraps `reportException:` on whatever class NSApp really is.
+///
+/// An exception thrown during layout never reaches `reportException:`:
+/// AppKit catches it in `_NSViewLayout` and calls
+/// `+[NSApplication _crashOnException:]`, which traps (nor does
+/// NSSetUncaughtExceptionHandler fire — both checked in an offscreen
+/// harness). On 11-17 the sidebar's row diff threw from inside
+/// NSHostingView.layout and the GUI simply vanished: nothing logged, no
+/// relaunch. So that class method is wrapped too, into the same record →
+/// relaunch path; only when the relaunch rules say no does the trap go on.
 @MainActor
 enum ExceptionRecovery {
     private static var launchedAt = Date()
@@ -26,6 +35,7 @@ enum ExceptionRecovery {
         guard !installed, let app = NSApp else { return }
         installed = true
         launchedAt = Date()
+        installCrashHook()
         let cls: AnyClass = type(of: app)
         let selector = #selector(NSApplication.reportException(_:))
         guard let method = class_getInstanceMethod(cls, selector) else { return }
@@ -34,7 +44,7 @@ enum ExceptionRecovery {
         let replacement: @convention(block) (NSApplication, NSException) -> Void = { app, exception in
             original(app, selector, exception)
             if Thread.isMainThread {
-                MainActor.assumeIsolated { handle(exception) }
+                MainActor.assumeIsolated { handle(exception, fatal: false) }
             }
         }
         let imp = imp_implementationWithBlock(replacement)
@@ -45,20 +55,44 @@ enum ExceptionRecovery {
         }
     }
 
-    private static func handle(_ exception: NSException) {
+    /// Wraps the private `+[NSApplication _crashOnException:]` (see the type
+    /// comment). Replaced in place on NSApplication's metaclass, so a call
+    /// through the SwiftUI subclass resolves to it as well. If a future macOS
+    /// drops the selector this is a no-op and layout exceptions crash as
+    /// before.
+    private static func installCrashHook() {
+        guard let meta = object_getClass(NSApplication.self) else { return }
+        let selector = NSSelectorFromString("_crashOnException:")
+        guard let method = class_getInstanceMethod(meta, selector) else { return }
+        typealias Crash = @convention(c) (AnyObject, Selector, NSException) -> Void
+        let original = unsafeBitCast(method_getImplementation(method), to: Crash.self)
+        let replacement: @convention(block) (AnyObject, NSException) -> Void = { cls, exception in
+            if Thread.isMainThread {
+                // Relaunching ends in exit(0) and never comes back here.
+                MainActor.assumeIsolated { handle(exception, fatal: true) }
+            }
+            original(cls, selector, exception)
+        }
+        method_setImplementation(method, imp_implementationWithBlock(replacement))
+    }
+
+    /// `fatal`: AppKit is about to kill the GUI (layout path) rather than
+    /// carry on with a possibly frozen window (reportException path).
+    private static func handle(_ exception: NSException, fatal: Bool) {
         guard !relaunching else { return }
         let now = Date()
         let defaults = UserDefaults.standard
         let lastRelaunch = defaults.object(forKey: lastRelaunchKey) as? Date
         let relaunch = ExceptionRecoveryRules.shouldRelaunch(
             launchedAt: launchedAt, lastRelaunch: lastRelaunch, now: now)
-        var decision = "up \(Int(now.timeIntervalSince(launchedAt))) s"
+        var decision = fatal ? "fatal (thrown in layout), up " : "up "
+        decision += "\(Int(now.timeIntervalSince(launchedAt))) s"
         if let lastRelaunch {
             decision += ", last auto relaunch \(Int(now.timeIntervalSince(lastRelaunch))) s ago"
         }
         decision += relaunch ? " — relaunching" : " — NOT relaunching (too soon)"
         record(exception, at: now, decision: decision)
-        guard relaunch else { return notifyStuck() }
+        guard relaunch else { return notifyStuck(fatal: fatal) }
 
         relaunching = true
         defaults.set(now, forKey: lastRelaunchKey)
@@ -111,16 +145,27 @@ enum ExceptionRecovery {
         }
     }
 
-    /// No relaunch this time, and the window may well be frozen — so say it
-    /// outside the window.
-    private static func notifyStuck() {
+    /// No relaunch this time, and the window may well be frozen (or, when
+    /// `fatal`, about to be gone) — so say it outside the window.
+    private static func notifyStuck(fatal: Bool) {
         let content = UNMutableNotificationContent()
-        content.title = "JamesDesk 畫面可能卡住了"
-        content.body = "終端都還在背景照常執行。從 Dock 結束 JamesDesk 再打開即可，終端不會中斷。"
+        if fatal {
+            content.title = "JamesDesk 剛剛閃退了"
+            content.body = "終端都還在背景照常執行。從 Dock 打開 JamesDesk 即可，終端不會中斷。"
+        } else {
+            content.title = "JamesDesk 畫面可能卡住了"
+            content.body = "終端都還在背景照常執行。從 Dock 結束 JamesDesk 再打開即可，終端不會中斷。"
+        }
         let request = UNNotificationRequest(identifier: "exception-recovery",
                                             content: content, trigger: nil)
+        // The fatal path traps as soon as this returns: hold on (briefly)
+        // until the request is handed over. The completion runs on a
+        // background queue, so waiting on main cannot deadlock it.
+        let handedOver = DispatchSemaphore(value: 0)
         UNUserNotificationCenter.current().add(request) { error in
             if let error { NSLog("TaskDeck: exception notification failed: \(error)") }
+            handedOver.signal()
         }
+        if fatal { _ = handedOver.wait(timeout: .now() + 1.5) }
     }
 }

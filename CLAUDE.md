@@ -76,11 +76,18 @@ never animate with a SwiftUI `repeatForever` (use a Core Animation layer —
 shows actually changes.
 
 A window that stopped redrawing while `sample` shows the main thread idle is
-an Objective-C exception AppKit swallowed mid SwiftUI update (so far:
-NSRangeException out of the sidebar List's NSOutlineView diff). The GUI now
-relaunches itself on one (`ExceptionRecovery`; terminals live in taskdeckd)
-and appends the exception — with the reason the unified log redacts — to
-`App Support/TaskDeck/exceptions.log`. Start there.
+an Objective-C exception AppKit swallowed mid SwiftUI update; one thrown
+during layout instead kills the GUI outright (AppKit's
+`+[NSApplication _crashOnException:]`, never `reportException:`). The GUI
+relaunches itself on either (`ExceptionRecovery`; terminals live in
+taskdeckd) and appends the exception — with the reason the unified log
+redacts — to `App Support/TaskDeck/exceptions.log`. Start there; a GUI that
+vanished without an entry left a `TaskDeck-*.ips` in
+`~/Library/Logs/DiagnosticReports` (`asiBacktraces` holds the exception's
+stack). The four so far (10-26 → 11-17) were all one AppKit bug: an
+NSRangeException from the sidebar List's group-row index set
+(`NSTableBannerRowData`). Lane headers are therefore plain rows, not
+`Section` headers — keep it that way (`sidebarSection` has the measurements).
 
 Every terminal blank and a red dot in the sidebar dock means the GUI lost its
 daemon connection — usually taskdeckd dropping a GUI that stopped reading
