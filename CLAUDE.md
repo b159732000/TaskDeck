@@ -106,7 +106,7 @@ instead of `.system(size:)` and literal colours in new UI.
 - **Task notes are free-form user documents.** The app (or you) may maintain
   ONLY these structured pieces, and must never reformat the rest of a note:
   - **frontmatter** lifecycle keys: `id` (permanent uuid), `status`,
-    `created`, `group`, `group_since`, `latest`, `auto_archived`
+    `created`, `group`, `group_since`, `latest`, `auto_archived`, `pinned`
     (`TaskStore.setFrontmatterValue` — scoped to the frontmatter block);
   - the top **session-manifest block** ("AI Session 紀錄"): a list right
     after the H1, closed by a `---` rule. Lines are written as
@@ -142,6 +142,15 @@ instead of `.system(size:)` and literal colours in new UI.
   viewing such a task (selecting it, or having it on screen) acks its
   output — the one lane where viewing acks, because there an ack cannot
   move anything. A pending permission prompt is never acked by viewing.
+- The sidebar lane 置頂, at the top (frontmatter `pinned: true`, a marker
+  kept apart from `group`), holds tasks that never finish — daily routines,
+  career exploration — while they rest. Unlike 長期運行 it moves nothing out
+  of the way: AI 執行中 / 等你 still take the task while its AI runs or owes
+  a reply (the row carries a pin there), and every resting state (待開工 /
+  已讀 / 等待外部) lands on the shelf instead, which never sinks to 半封存 or
+  auto-archives. 長期運行 wins over the pin; leaving it falls back to the
+  shelf. Unpinning restamps `group_since`, or the weeks spent on the shelf
+  would count as silence and archive the task on the next sweep.
 - AI pane resume: uuid is written to the note first, then the session
   starts with `--session-id`; restart uses `-r <uuid> || --session-id
   <uuid>` (single line, resumes or creates). `TeamDef.args` are captured

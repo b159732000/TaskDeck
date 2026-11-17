@@ -27,6 +27,7 @@ struct SidebarView: View {
     /// Measured height of the dock pill (with its outer padding); the list
     /// keeps that much bottom margin so the last row can scroll clear of it.
     @State private var dockHeight: CGFloat = 50
+    @AppStorage("pinnedSectionExpanded") private var pinnedExpanded = true
     @AppStorage("needsYouSectionExpanded") private var needsYouExpanded = true
     @AppStorage("aiRunningSectionExpanded") private var aiRunningExpanded = true
     @AppStorage("longRunSectionExpanded") private var longRunExpanded = true
@@ -37,7 +38,9 @@ struct SidebarView: View {
     @AppStorage("sunkSectionExpanded") private var sunkExpanded = false
 
     var body: some View {
-        // 由上而下：等你（自動佇列）→ AI 執行中（訊號驅動）→ 長期運行（手動
+        // 由上而下：置頂（手動釘的常駐任務沒事時的家：AI 在跑／在等你時照常
+        // 去下面的區，看過或沒動靜回到這；不下沉、不自動封存，可拖曳排序）→
+        // 等你（自動佇列）→ AI 執行中（訊號驅動）→ 長期運行（手動
         // 放進去的長跑 agent，訊號不搬動它，可拖曳排序）→ 待開工（預設家：新任務
         //／手動作業／訊號過期，可拖曳排序）→ 已讀（看過待回）→ 等待外部（手動）
         // → 半封存（>3 天沒動靜，預設折疊；滿 30 天自動歸入已完成）→ 已完成
@@ -57,6 +60,13 @@ struct SidebarView: View {
             if ia.since != ib.since { return ia.since < ib.since }      // owed longest on top
             return a.id < b.id
         }
+        let pinned = groups[.pinned] ?? []
+        // Pinned tasks the AI currently has out of the shelf (running, or
+        // owing you a reply below) — the header says so, so the shelf never
+        // looks like it lost a task.
+        let pinnedAway = visibleTasks.filter {
+            $0.isPinned && $0.status == "active" && model.sidebarGroup($0) != .pinned
+        }.count
         let aiRunning = groups[.aiRunning] ?? []
         let longRun = groups[.longRunning] ?? []
         let idle = groups[.idle] ?? []
@@ -81,6 +91,21 @@ struct SidebarView: View {
         // 形狀不同的圖層，焦點在側邊欄時必然疊成兩層色。選取全自管——
         // 點列設 model.selection，唯一的高亮圖層就是 listRowBackground。
         List {
+            if !pinned.isEmpty {
+                sidebarSection(isExpanded: $pinnedExpanded) {
+                    if searchActive {
+                        ForEach(pinned) { row($0, group: .pinned) }
+                    } else {
+                        ForEach(pinned) { row($0, group: .pinned) }
+                            .onMove { from, to in
+                                model.moveLaneTasks(pinned.map(\.id), from: from, to: to)
+                            }
+                    }
+                } header: {
+                    laneHeader(.pinned, pinned.count,
+                               pinnedAway > 0 ? "另 \(pinnedAway) 個在下方" : "不封存")
+                }
+            }
             if !needsYou.isEmpty {
                 sidebarSection(isExpanded: $needsYouExpanded) {
                     ForEach(needsYou) { row($0, group: .needsYou) }
@@ -314,6 +339,7 @@ struct SidebarView: View {
 
     static func laneName(_ group: AppModel.SidebarGroup) -> String {
         switch group {
+        case .pinned: return "置頂"
         case .needsYou: return "等你"
         case .aiRunning: return "AI 執行中"
         case .longRunning: return "長期運行"
@@ -485,11 +511,12 @@ struct SidebarView: View {
     }
 
     /// The 3 pt colour rail on the leading edge: the lane's hue, only in the
-    /// lanes that mean something is happening (等你 / AI / 長期運行 / 已讀 /
-    /// 等待外部).
+    /// lanes that mean something is happening or matters (置頂 / 等你 / AI /
+    /// 長期運行 / 已讀 / 等待外部).
     private func laneRail(_ group: AppModel.SidebarGroup) -> Color? {
         switch group {
-        case .needsYou, .aiRunning, .longRunning, .read, .waitingExt: return Theme.laneColor(group)
+        case .pinned, .needsYou, .aiRunning, .longRunning, .read, .waitingExt:
+            return Theme.laneColor(group)
         default: return nil
         }
     }
@@ -529,6 +556,18 @@ struct SidebarView: View {
                             .padding(.vertical, 1)
                             .background(badge.tint.opacity(0.14), in: Capsule())
                             .help(badge.help)
+                    }
+                    // A pinned task the AI has out of the shelf: the pin says
+                    // it goes back to 置頂 once it is seen.
+                    if t.isPinned && t.status == "active" && group != .pinned {
+                        Image(systemName: "pin.fill")
+                            .font(Theme.Fonts.ui(9 * model.uiScale, .bold))
+                            .foregroundStyle(Theme.Lane.pin)
+                            .lineLimit(1)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1)
+                            .background(Theme.Lane.pin.opacity(0.14), in: Capsule())
+                            .help("置頂任務：AI 跑完、你看過後回到置頂")
                     }
                     if t.isMainline {
                         Image(systemName: "star.fill")
@@ -675,6 +714,15 @@ struct SidebarView: View {
             } label: {
                 Label(t.isMainline ? "取消主線" : "設為主線",
                       systemImage: t.isMainline ? "star.slash" : "star")
+            }
+            if t.isPinned {
+                Button { model.setPinned(t.id, false) } label: {
+                    Label("取消置頂", systemImage: "pin.slash")
+                }
+            } else if t.status == "active" {
+                Button { model.setPinned(t.id, true) } label: {
+                    Label("置頂（常駐、不封存）", systemImage: "pin")
+                }
             }
             Menu("帳號：\(model.taskTeam(t.id) ?? "未設定")") {
                 TaskAccountMenuItems(model: model, slug: t.id)
@@ -1181,10 +1229,14 @@ struct LifecycleChips: View {
             if group != .needsYou {
                 chip("bell", "移到等你（我要 review）") { model.setGroupFlag(task.id, "needsyou") }
             }
-            if group != .read {
-                chip("eye", "標記已讀（看過，先不回）") { model.setGroupFlag(task.id, "read") }
+            // On the shelf, 已讀 / 等待外部 would change nothing you can see:
+            // a pinned task rests on 置頂 whichever of the two it is.
+            if group != .read && group != .pinned {
+                chip("eye", task.isPinned ? "標記已讀（看過，回到置頂）" : "標記已讀（看過，先不回）") {
+                    model.setGroupFlag(task.id, "read")
+                }
             }
-            if group != .waitingExt {
+            if group != .waitingExt && group != .pinned {
                 chip("hourglass", "移到等待外部（同事 / review / CI）") {
                     model.setGroupFlag(task.id, "waiting")
                 }
@@ -1199,6 +1251,13 @@ struct LifecycleChips: View {
             } else {
                 chip("infinity", "移到長期運行（sub-agent 長時間跑，放著不會被搬走）") {
                     model.setGroupFlag(task.id, GroupingRules.longRunGroup)
+                }
+            }
+            if task.isPinned {
+                chip("pin.slash", "取消置頂（交回一般分組）") { model.setPinned(task.id, false) }
+            } else {
+                chip("pin", "置頂（常駐、不封存；AI 在跑或等你時照常去下面的區）") {
+                    model.setPinned(task.id, true)
                 }
             }
         }

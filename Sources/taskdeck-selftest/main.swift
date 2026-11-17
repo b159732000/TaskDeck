@@ -457,6 +457,20 @@ check("archive-sort: legacy done falls back to file mtime",
            ?? .distantPast).timeIntervalSince(legacyMtime)) < 1)
 try? FileManager.default.removeItem(at: archiveTemp)
 
+// MARK: 置頂 marker — parsed from frontmatter only, apart from `group`
+
+let pinTemp = FileManager.default.temporaryDirectory
+    .appendingPathComponent("taskdeck-pin-\(UUID().uuidString)")
+let pinStore = TaskStore(dir: pinTemp)
+pinStore.write("pinned-read", "---\npinned: true\ngroup: read\nstatus: active\n---\n\n# 面試題庫\n")
+pinStore.write("plain", "---\nstatus: active\n---\n\n# plain\n\npinned: true 這行在正文，不算\n")
+let pinRows = pinStore.scan()
+check("pin: frontmatter pinned: true → isPinned, group kept",
+      pinRows.first(where: { $0.id == "pinned-read" }).map { $0.isPinned && $0.group == "read" } == true)
+check("pin: a body line that looks like the key does not pin",
+      pinRows.first(where: { $0.id == "plain" })?.isPinned == false)
+try? FileManager.default.removeItem(at: pinTemp)
+
 let autoParked = """
 ---
 status: active
@@ -818,9 +832,10 @@ let gNow = Date()
 func sig(_ state: String, agoSec: TimeInterval, acked: Bool) -> SessionSignal {
     SessionSignal(state: state, ts: gNow.addingTimeInterval(-agoSec), acked: acked)
 }
-func grp(status: String = "active", group: String? = nil, quiet: TimeInterval = 0,
-         _ signals: [SessionSignal]) -> TaskGroup {
-    GroupingRules.classify(status: status, group: group, quiet: quiet, signals: signals, now: gNow)
+func grp(status: String = "active", group: String? = nil, pinned: Bool = false,
+         quiet: TimeInterval = 0, _ signals: [SessionSignal]) -> TaskGroup {
+    GroupingRules.classify(status: status, group: group, pinned: pinned, quiet: quiet,
+                           signals: signals, now: gNow)
 }
 let sink = GroupingRules.sinkAfter
 
@@ -857,6 +872,26 @@ check("grp: 長期運行 never sinks to 半封存 (so never auto-archives)",
       grp(group: "longrun", quiet: sink + 10, [sig("ended", agoSec: sink + 10, acked: true)]) == .longRunning)
 check("grp: done still wins over 長期運行",
       grp(status: "done", group: "longrun", [sig("running", agoSec: 10, acked: false)]) == .done)
+check("grp: 置頂 with no signal rests on the shelf (not 待開工)",
+      grp(pinned: true, []) == .pinned)
+check("grp: 置頂 + acked stop rests on the shelf (not 已讀)",
+      grp(pinned: true, [sig("waiting", agoSec: 30, acked: true)]) == .pinned
+          && grp(group: "read", pinned: true, [sig("ended", agoSec: 300, acked: true)]) == .pinned)
+check("grp: 置頂 while its AI runs → AI 執行中",
+      grp(pinned: true, [sig("running", agoSec: 60, acked: false)]) == .aiRunning)
+check("grp: 置頂 with fresh unacked output → 等你",
+      grp(group: "read", pinned: true, [sig("waiting", agoSec: 30, acked: false)]) == .needsYou)
+check("grp: 置頂 + manual 等你 stays in 等你 until marked seen",
+      grp(group: "needsyou", pinned: true, []) == .needsYou)
+check("grp: 置頂 never sinks to 半封存 (so never auto-archives)",
+      grp(group: "read", pinned: true, quiet: sink * 20, [sig("ended", agoSec: sink * 20, acked: true)]) == .pinned
+          && grp(group: "waiting", pinned: true, quiet: sink * 20, []) == .pinned
+          && grp(pinned: true, quiet: sink * 20, []) == .pinned)
+check("grp: 長期運行 wins over 置頂 (leaving it falls back to the shelf)",
+      grp(group: "longrun", pinned: true, [sig("waiting", agoSec: 30, acked: false)]) == .longRunning
+          && grp(pinned: true, [sig("waiting", agoSec: 30, acked: true)]) == .pinned)
+check("grp: done wins over 置頂",
+      grp(status: "done", pinned: true, []) == .done)
 check("live: blocked on permission beats running",
       GroupingRules.liveState([sig("running", agoSec: 10, acked: false),
                                sig("permission", agoSec: 20, acked: false)], now: gNow) == .permission)

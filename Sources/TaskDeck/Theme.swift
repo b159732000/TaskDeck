@@ -121,6 +121,7 @@ enum Theme {
     enum Lane {
         static let you = Color(hex: 0xFF7A5C)     // 等你 — coral
         static let ai = Color(hex: 0x4FD1C5)      // AI 執行中 — teal
+        static let pin = Color(hex: 0xBDE66E)     // 置頂 — sprout (evergreen)
         static let long = Color(hex: 0xE88AE6)    // 長期運行 — orchid
         static let idle = Color(hex: 0x8A94A6)    // 待開工 — slate
         static let read = Color(hex: 0xB8A7FF)    // 已讀 — lavender
@@ -131,6 +132,7 @@ enum Theme {
 
     static func laneColor(_ group: TaskGroup) -> Color {
         switch group {
+        case .pinned: return Lane.pin
         case .needsYou: return Lane.you
         case .aiRunning: return Lane.ai
         case .longRunning: return Lane.long

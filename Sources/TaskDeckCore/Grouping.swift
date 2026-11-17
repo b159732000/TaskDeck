@@ -8,7 +8,7 @@ import Foundation
 // `classify`. Everything here is a deterministic function of its inputs.
 
 public enum TaskGroup: Hashable, Sendable {
-    case needsYou, aiRunning, longRunning, idle, read, waitingExt, semiArchived, done
+    case pinned, needsYou, aiRunning, longRunning, idle, read, waitingExt, semiArchived, done
 }
 
 /// What a task's AI is doing right now, as a 長期運行 row shows it: that lane
@@ -44,6 +44,11 @@ public enum GroupingRules {
     /// hours (sub-agents, loops), parked there by hand (James, 2026-11-05) so
     /// every turn they end stops landing in 等你.
     public static let longRunGroup = "longrun"
+    /// Frontmatter key of the 置頂 shelf (James, 2026-11-17): tasks that never
+    /// finish — daily routines, career exploration. Unlike 長期運行 it moves
+    /// nothing out of the way: AI 執行中 / 等你 still take the task while the
+    /// AI runs or owes a reply; only its resting place changes.
+    public static let pinnedKey = "pinned"
 
     public static func runningNow(_ signals: [SessionSignal], now: Date) -> Bool {
         signals.contains { $0.state == "running" && now.timeIntervalSince($0.ts) < runningFresh }
@@ -78,23 +83,29 @@ public enum GroupingRules {
 
     /// The v3 classifier. `quiet` = seconds since the task last showed life
     /// (max signal ts / group_since), used only for the sink threshold.
+    /// `pinned` = the task is on the 置頂 shelf (frontmatter `pinned: true`),
+    /// a marker kept apart from `group` so a trip through 等你 cannot lose it.
     ///
     ///   • group "longrun" (長期運行) → stays put: only the user moves it in
     ///     or out; it never sinks, so it never auto-archives either
     ///   • running now → AI 執行中 (live fact, overrides all the rest)
     ///   • a FRESH unacked stop → 等你 (new AI output overrides manual waiting/read)
-    ///   • group "waiting" (等待外部) → sticky while there is no new AI output
     ///   • manual 等你 that outlived its signal → 等你
+    ///   • pinned → 置頂: every resting state (待開工 / 已讀 / 等待外部) rests
+    ///     on the shelf instead, which never sinks, so never auto-archives
+    ///   • group "waiting" (等待外部) → sticky while there is no new AI output
     ///   • group "read" / an acked stop → 已讀 (sinks to 半封存 when quiet)
     ///   • else → 待開工
-    public static func classify(status: String, group: String?, quiet: TimeInterval,
+    public static func classify(status: String, group: String?, pinned: Bool = false,
+                                quiet: TimeInterval,
                                 signals: [SessionSignal], now: Date) -> TaskGroup {
         if status == "done" { return .done }
         if group == longRunGroup { return .longRunning }
         if runningNow(signals, now: now) { return .aiRunning }
         if attention(signals) != nil { return .needsYou }
-        if group == "waiting" { return quiet > sinkAfter ? .semiArchived : .waitingExt }
         if group == "needsyou" { return .needsYou }
+        if pinned { return .pinned }
+        if group == "waiting" { return quiet > sinkAfter ? .semiArchived : .waitingExt }
         if group == "read" || hasAckedStop(signals) {
             return quiet > sinkAfter ? .semiArchived : .read
         }

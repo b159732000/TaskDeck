@@ -33,6 +33,10 @@ public struct TaskNote: Identifiable, Equatable {
     /// archive stamp, so scan() supplies the file mtime as a best-effort
     /// fallback without rewriting the user's note.
     public var archivedAt: Date? = nil
+    /// On the 置頂 shelf (frontmatter `pinned: true`, see
+    /// `GroupingRules.pinnedKey`). Independent of `group`: a pinned task still
+    /// visits AI 執行中 / 等你 and keeps its pin through the trip.
+    public var isPinned: Bool = false
 
     public var isMainline: Bool { priority == "main" }
 }
@@ -228,7 +232,8 @@ public final class TaskStore {
                                 permanentID: fm["id"],
                                 priority: fm["priority"],
                                 archivedAt: exactArchiveDate
-                                    ?? (status == "done" ? mtime(url) : nil)))
+                                    ?? (status == "done" ? mtime(url) : nil),
+                                isPinned: fm[GroupingRules.pinnedKey] == "true"))
         }
         out.sort { a, b in
             if a.status != b.status { return a.status == "active" }

@@ -603,6 +603,31 @@ final class AppModel: ObservableObject {
         rescan()
     }
 
+    /// 置頂 shelf marker (`pinned: true` in the note, so it syncs like
+    /// `priority: main`). Pinning moves nothing while the AI runs or owes a
+    /// reply — the task rests on the shelf once it is seen or quiet.
+    /// Unpinning restamps `group_since` (with or without a `group`): the
+    /// silence clock otherwise still counts the weeks spent on the shelf, so
+    /// the task would land straight in 半封存 — and past 30 days the next
+    /// sweep would auto-archive it.
+    func setPinned(_ slug: String, _ enabled: Bool) {
+        func transform(_ text: String) -> String {
+            if enabled {
+                return TaskStore.setFrontmatterValue(text, key: GroupingRules.pinnedKey, value: "true")
+            }
+            let updated = TaskStore.removeFrontmatterKey(text, key: GroupingRules.pinnedKey)
+            return TaskStore.setFrontmatterValue(updated, key: "group_since",
+                                                 value: Self.fmDate.string(from: Date()))
+        }
+        if let session = sessions[slug] {
+            session.noteText = transform(session.noteText)
+            session.flushNote()
+        } else {
+            mutateNoteOnDisk(slug, transform)
+        }
+        rescan()
+    }
+
     private func updatePriorityAlertDockBadge() {
         guard NSApp != nil else { return }
         NSApp.dockTile.badgeLabel = priorityAlertKeys.isEmpty
@@ -1212,6 +1237,7 @@ final class AppModel: ObservableObject {
             if let s = t.groupSince.flatMap({ Self.fmDate.date(from: $0) }) { when.append(s) }
             let lastActivity = when.max()
             let group = GroupingRules.classify(status: t.status, group: t.group,
+                                               pinned: t.isPinned,
                                                quiet: lastActivity.map { now.timeIntervalSince($0) } ?? 0,
                                                signals: taskSignals, now: now)
             let backgroundCount = taskSessions.reduce(into: 0) { count, session in
@@ -1523,7 +1549,7 @@ final class AppModel: ObservableObject {
         if let d = derivedCache[t.id] { return d.group }
         // Cold-cache fallback (before the first refresh); refreshDerived caches it.
         let signals = sessionSignals(t.id)
-        return GroupingRules.classify(status: t.status, group: t.group,
+        return GroupingRules.classify(status: t.status, group: t.group, pinned: t.isPinned,
                                       quiet: quietSeconds(t, signals: signals),
                                       signals: signals, now: Date())
     }
