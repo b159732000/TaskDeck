@@ -6,8 +6,11 @@
 # reads the hook payload on stdin and writes
 #   ~/Library/Application Support/TaskDeck/status/<session-id>.json
 # which the GUI watches to light 🟢 (running) / 🟡 (waiting) / 🔴 (needs
-# permission) on the task row. Exit 0 always — a status badge must never
-# block or fail the AI session.
+# permission) on the task row. A Stop also records what the turn left
+# running (`pending`: background tasks, scheduled wake-ups) and sub-agents
+# beat into `sub_seen`, so the GUI can tell an AI that is done from one that
+# stopped talking but will come back by itself (BackgroundHoldRules).
+# Exit 0 always — a status badge must never block or fail the AI session.
 EVENT="$1"
 DIR="$HOME/Library/Application Support/TaskDeck/status"
 mkdir -p "$DIR" 2>/dev/null
@@ -56,6 +59,13 @@ if pane and "/" not in pane and not pane.startswith("."):
     except Exception:
         pass
 
+# Hooks fired inside a sub-agent carry the PARENT's session_id plus an
+# agent_id (Claude 2.1.3xx). Before that was looked at, a background
+# sub-agent's tool call flipped a conversation that had ended its turn back
+# to "running", and the next idle notification flipped it to "waiting":
+# the task bounced between AI 執行中 and 等你 until the sub-agents finished.
+agent_id = payload.get("agent_id") or ""
+
 state = {
     "UserPromptSubmit": "running",
     "PreToolUse": "running",
@@ -79,6 +89,72 @@ except Exception:
     existing = {}
 prev_state = existing.get("state")
 prev_ts = existing.get("ts")
+
+def write(rec):
+    # Atomic tmp+rename, NOT an in-place rewrite: the GUI watches the
+    # directory with kqueue, which only fires on create/delete/RENAME —
+    # truncating the existing file in place updates silently and the
+    # sidebar goes stale.
+    tmp = f"{out_dir}/.{sid}.json.tmp"
+    with open(tmp, "w") as f:
+        json.dump(rec, f)
+    os.replace(tmp, out)
+
+# A sub-agent's tool call after the main turn has stopped (or while the main
+# conversation is blocked on a prompt) is not a new main turn: it is the sign
+# of life of the work that turn left running. Keep state and ts — the stop
+# still says what it said — and record it as `sub_seen`, at most once a
+# minute (the GUI holds the task in AI 執行中 while the beat is recent). A
+# prompt is never cleared by a sub-agent: Notification payloads carry no
+# agent_id, so whose prompt it is cannot be told, and a parallel sub-agent
+# must not hide the main conversation's question.
+if agent_id and event == "PreToolUse" and prev_state in ("waiting", "permission"):
+    now = time.time()
+    try:
+        last_beat = float(existing.get("sub_seen") or 0)
+    except Exception:
+        last_beat = 0
+    if now - last_beat < 60:
+        sys.exit(0)
+    rec = dict(existing)
+    rec["sub_seen"] = now
+    write(rec)
+    sys.exit(0)
+
+# What will bring the conversation back without you. Claude lists it on Stop
+# (2.1.3xx): `background_tasks` = background work still running or pending,
+# `session_crons` = CronCreate tasks and /loop wake-ups. Memory upkeep
+# (dream, memory import / save, auto-mode scan) never wakes the conversation,
+# so it does not count. Kept small: a type + Claude's short description per
+# task, the schedule per cron (the prompt stays out of the status file).
+QUIET_TASKS = {"dream", "auto-mode scan", "memory import", "memory save",
+               "auto_mode_scan", "local_memory_import", "post_turn_memory"}
+FINISHED = {"completed", "failed", "killed", "stopped"}
+
+def pending_work(tasks, crons):
+    out_tasks = []
+    for t in tasks if isinstance(tasks, list) else []:
+        if not isinstance(t, dict):
+            continue
+        kind = str(t.get("type") or "")
+        if kind in QUIET_TASKS or str(t.get("status") or "") in FINISHED:
+            continue
+        out_tasks.append({"type": kind[:40],
+                          "desc": str(t.get("description") or "")[:80]})
+    out_crons = []
+    for c in crons if isinstance(crons, list) else []:
+        if not isinstance(c, dict):
+            continue
+        schedule = str(c.get("schedule") or "").strip()
+        if schedule:
+            out_crons.append({"schedule": schedule[:60],
+                              "recurring": bool(c.get("recurring"))})
+    work = {}
+    if out_tasks:
+        work["tasks"] = out_tasks[:20]
+    if out_crons:
+        work["crons"] = out_crons[:20]
+    return work or None
 
 # PreToolUse fires on EVERY tool call — it exists to keep long turns visibly
 # "running" past the 30-min freshness window. Skip the rewrite when the file
@@ -108,10 +184,19 @@ if isinstance(prev_ts, (int, float)):
     elif event == "Notification" and state == "waiting" and prev_state in ("waiting", "ended"):
         ts = prev_ts
 
-# Atomic tmp+rename, NOT an in-place rewrite: the GUI watches the directory
-# with kqueue, which only fires on create/delete/RENAME — truncating the
-# existing file in place updates silently and the sidebar goes stale.
 rec = {"session_id": sid, "state": state, "ts": ts}
+# The pending list belongs to the stop that reported it. An idle or
+# permission notification during that same stop keeps it (and the sub-agent
+# beat); a new turn, or the session ending, drops it — the work dies with
+# the session, and the next stop reports afresh.
+if event == "Stop":
+    work = pending_work(payload.get("background_tasks"), payload.get("session_crons"))
+    if work:
+        rec["pending"] = work
+elif event == "Notification" and prev_state in ("waiting", "permission"):
+    for key in ("pending", "sub_seen"):
+        if key in existing:
+            rec[key] = existing[key]
 # Diagnostics only (the GUI ignores them): why a session ended, and which
 # notification produced a waiting/permission state.
 if event == "SessionEnd" and payload.get("reason"):
@@ -127,15 +212,11 @@ if task:
 task_key = os.environ.get("TASKDECK_TASK_KEY")
 if task_key:
     rec["task_key"] = task_key
-# Claude includes the append-only conversation record in every hook payload.
-# The GUI tails it off-main to count native background tasks without scraping
-# terminal pixels or walking the pane's process tree.
+# Diagnostics only (the GUI ignores it): where this session's conversation
+# record lives, so a status row can be traced back to its transcript.
 transcript_path = payload.get("transcript_path")
 if isinstance(transcript_path, str) and transcript_path:
     rec["transcript_path"] = transcript_path
-tmp = f"{out_dir}/.{sid}.json.tmp"
-with open(tmp, "w") as f:
-    json.dump(rec, f)
-os.replace(tmp, out)
+write(rec)
 PY
 exit 0

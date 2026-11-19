@@ -21,7 +21,9 @@ public enum LiveState: Hashable, Sendable {
 /// signal was stamped; `acked` = the user has already seen it (ackedAI >= ts).
 /// Only signals still inside AppModel's signal window are passed in.
 public struct SessionSignal: Sendable {
-    public let state: String   // "running" / "waiting" / "permission" / "ended"
+    /// "running" / "waiting" / "permission" / "ended", or "background": a
+    /// stop with work still pending, already resolved by BackgroundHoldRules.
+    public let state: String
     public let ts: Date
     public let acked: Bool
     public init(state: String, ts: Date, acked: Bool) {
@@ -50,8 +52,21 @@ public enum GroupingRules {
     /// AI runs or owes a reply; only its resting place changes.
     public static let pinnedKey = "pinned"
 
+    /// The AI is on it: a fresh running turn, or a stop that left work
+    /// running which will bring it back (background — never owed to you).
     public static func runningNow(_ signals: [SessionSignal], now: Date) -> Bool {
-        signals.contains { $0.state == "running" && now.timeIntervalSince($0.ts) < runningFresh }
+        signals.contains { liveTurn($0, now: now) || $0.state == BackgroundHoldRules.state }
+    }
+
+    private static func liveTurn(_ s: SessionSignal, now: Date) -> Bool {
+        s.state == "running" && now.timeIntervalSince(s.ts) < runningFresh
+    }
+
+    /// Output from a stop that left background work running, not yet seen.
+    /// The task stays in AI 執行中 (or wherever it is parked); this is only
+    /// the row's 新輸出 mark — viewing the task clears it.
+    public static func unseenBackgroundOutput(_ signals: [SessionSignal]) -> Bool {
+        signals.contains { $0.state == BackgroundHoldRules.state && !$0.acked }
     }
 
     /// Strongest UNacked attention signal: permission beats waiting; `since` =
@@ -72,13 +87,16 @@ public enum GroupingRules {
         signals.contains { attentionStates.contains($0.state) && $0.acked }
     }
 
-    /// Most actionable first: a session blocked on permission, then one
-    /// running now, then output nobody has looked at (an unacked stop).
+    /// Most actionable first: a session blocked on permission, then a turn
+    /// running now, then output nobody has looked at (an unacked stop, or an
+    /// unseen stop that left background work running), then background work
+    /// already seen — still running, just quietly.
     public static func liveState(_ signals: [SessionSignal], now: Date) -> LiveState {
         let owed = attention(signals)
         if owed?.permission == true { return .permission }
-        if runningNow(signals, now: now) { return .running }
-        return owed == nil ? .quiet : .newOutput
+        if signals.contains(where: { liveTurn($0, now: now) }) { return .running }
+        if owed != nil || unseenBackgroundOutput(signals) { return .newOutput }
+        return runningNow(signals, now: now) ? .running : .quiet
     }
 
     /// The v3 classifier. `quiet` = seconds since the task last showed life
@@ -88,7 +106,10 @@ public enum GroupingRules {
     ///
     ///   • group "longrun" (長期運行) → stays put: only the user moves it in
     ///     or out; it never sinks, so it never auto-archives either
-    ///   • running now → AI 執行中 (live fact, overrides all the rest)
+    ///   • running now → AI 執行中 (live fact, overrides all the rest) — this
+    ///     includes a stop that left sub-agents / background commands / a
+    ///     scheduled wake-up running (`BackgroundHoldRules`): the AI comes
+    ///     back by itself, so the ball is not in your court yet
     ///   • a FRESH unacked stop → 等你 (new AI output overrides manual waiting/read)
     ///   • manual 等你 that outlived its signal → 等你
     ///   • pinned → 置頂: every resting state (待開工 / 已讀 / 等待外部) rests

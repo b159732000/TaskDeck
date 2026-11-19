@@ -768,56 +768,125 @@ check("transcript status: summary / meta / system / attachment rows do not",
         && !SessionDiscovery.isTurnRow(["type": "attachment"]))
 try? FileManager.default.removeItem(at: discoveryTemp)
 
-// MARK: Claude native background-task transcript lifecycle
+// MARK: background hold — a stop that left work running is not yet yours
 
-let bgStartA = #"{"toolUseResult":{"backgroundTaskId":"bg-a"}}"#
-let bgStartB = #"{"toolUseResult":{"backgroundTaskId":"bg-b"}}"#
-let bgCompleteA = #"{"origin":{"kind":"task-notification"},"message":{"content":"<task-notification><task-id>bg-a</task-id><status>completed</status></task-notification>"}}"#
-let bgFailedB = #"{"origin":{"kind":"task-notification"},"message":{"content":"<task-notification><task-id>bg-b</task-id><status>failed</status></task-notification>"}}"#
-var bgAccumulator = BackgroundTaskAccumulator()
-bgAccumulator.consume(jsonLine: bgStartA)
-bgAccumulator.consume(jsonLine: bgStartB)
-check("background: two native starts are active",
-      bgAccumulator.activeTaskIDs == ["bg-a", "bg-b"])
-bgAccumulator.consume(jsonLine: bgCompleteA)
-bgAccumulator.consume(jsonLine: bgCompleteA) // duplicate notifications are idempotent
-check("background: terminal notification removes + dedupes",
-      bgAccumulator.activeTaskIDs == ["bg-b"])
-bgAccumulator.consume(jsonLine: "{not json")
-check("background: malformed transcript row is ignored",
-      bgAccumulator.activeTaskIDs == ["bg-b"])
-bgAccumulator.consume(jsonLine: bgFailedB)
-check("background: failed is terminal", bgAccumulator.activeTaskIDs.isEmpty)
-check("background: static JSONL reducer handles stopped",
-      BackgroundActivity.activeTaskIDs(inJSONLines: [
-          bgStartA,
-          #"{"origin":{"kind":"task-notification"},"message":{"content":"<task-notification><task-id>bg-a</task-id><status>stopped</status></task-notification>"}}"#,
-      ].joined(separator: "\n")).isEmpty)
-check("background: queue-operation completion is terminal",
-      BackgroundActivity.activeTaskIDs(inJSONLines: [
-          bgStartA,
-          #"{"type":"queue-operation","operation":"enqueue","content":"<task-notification><task-id>bg-a</task-id><status>completed</status></task-notification>"}"#,
-      ].joined(separator: "\n")).isEmpty)
-check("background: queued-command attachment completion is terminal",
-      BackgroundActivity.activeTaskIDs(inJSONLines: [
-          bgStartA,
-          #"{"type":"attachment","attachment":{"type":"queued_command","commandMode":"task-notification","prompt":"<task-notification><task-id>bg-a</task-id><status>failed</status></task-notification>"}}"#,
-      ].joined(separator: "\n")).isEmpty)
-check("background: TaskStop result is terminal",
-      BackgroundActivity.activeTaskIDs(inJSONLines: [
-          bgStartA,
-          #"{"toolUseResult":{"message":"Successfully stopped task: bg-a (command)","task_id":"bg-a","task_type":"local_bash"}}"#,
-      ].joined(separator: "\n")).isEmpty)
-check("background: killed notification is terminal",
-      BackgroundActivity.activeTaskIDs(inJSONLines: [
-          bgStartA,
-          #"{"type":"queue-operation","operation":"enqueue","content":"<task-notification><task-id>bg-a</task-id><status>killed</status></task-notification>"}"#,
-      ].joined(separator: "\n")).isEmpty)
-check("background: pasted notification XML is not treated as lifecycle",
-      BackgroundActivity.activeTaskIDs(inJSONLines: [
-          bgStartA,
-          #"{"type":"user","message":{"content":"Example: <task-notification><task-id>bg-a</task-id><status>completed</status></task-notification>"}}"#,
-      ].joined(separator: "\n")) == ["bg-a"])
+// Fixed local-time instants so cron math is deterministic (Asia/Taipei has
+// no DST; a fixed zone keeps the checks independent of the machine's).
+var cronCal = Calendar(identifier: .gregorian)
+cronCal.timeZone = TimeZone(identifier: "Asia/Taipei")!
+func taipei(_ y: Int, _ mo: Int, _ d: Int, _ h: Int, _ mi: Int, _ s: Int = 0) -> Date {
+    cronCal.date(from: DateComponents(year: y, month: mo, day: d, hour: h, minute: mi, second: s))!
+}
+func nextFire(_ cron: String, after: Date, horizon: TimeInterval = BackgroundHoldRules.cronHorizon) -> Date? {
+    CronSchedule(parsing: cron)?.nextFire(after: after, within: horizon, calendar: cronCal)
+}
+// Thu 2026-11-19 12:25:00 — the stop of the t-1118-1011 case.
+let cronStop = taipei(2026, 11, 19, 12, 25)
+
+check("cron: a one-shot (calendar minute) fires at that minute",
+      nextFire("50 13 19 11 *", after: cronStop) == taipei(2026, 11, 19, 13, 50))
+check("cron: an overdue one-shot finds nothing within the horizon (not next year)",
+      nextFire("17 1 19 11 *", after: cronStop) == nil)
+check("cron: */30 fires at the next half hour",
+      nextFire("*/30 * * * *", after: cronStop) == taipei(2026, 11, 19, 12, 30))
+check("cron: next fire is strictly after the instant, never the same minute",
+      nextFire("25 12 * * *", after: cronStop) == taipei(2026, 11, 20, 12, 25)
+          && nextFire("* * * * *", after: taipei(2026, 11, 19, 12, 25, 30)) == taipei(2026, 11, 19, 12, 26))
+check("cron: weekdays 1-5 skip the weekend (Fri 09:07 → Mon 09:07)",
+      nextFire("7 9 * * 1-5", after: taipei(2026, 11, 20, 10, 0)) == taipei(2026, 11, 23, 9, 7))
+check("cron: day-of-week 7 is Sunday, like 0",
+      nextFire("0 8 * * 7", after: cronStop) == taipei(2026, 11, 22, 8, 0)
+          && nextFire("0 8 * * 0", after: cronStop) == taipei(2026, 11, 22, 8, 0))
+check("cron: both day fields restricted → either matches (Vixie)",
+      nextFire("0 6 1 * 6", after: cronStop) == taipei(2026, 11, 21, 6, 0))
+check("cron: lists, ranges with steps, start/step",
+      nextFire("5,40 12 * * *", after: cronStop) == taipei(2026, 11, 19, 12, 40)
+          && nextFire("10-50/20 12 * * *", after: cronStop) == taipei(2026, 11, 19, 12, 30)
+          && nextFire("5/15 13 * * *", after: cronStop) == taipei(2026, 11, 19, 13, 5))
+check("cron: malformed schedules are rejected",
+      CronSchedule(parsing: "") == nil && CronSchedule(parsing: "* * * *") == nil
+          && CronSchedule(parsing: "60 * * * *") == nil && CronSchedule(parsing: "*/0 * * * *") == nil
+          && CronSchedule(parsing: "a * * * *") == nil && CronSchedule(parsing: "1,,2 * * * *") == nil
+          && CronSchedule(parsing: "5-1 * * * *") == nil && CronSchedule(parsing: "* * 0 * *") == nil)
+
+let holdStop = Date(timeIntervalSince1970: 1_795_062_000)
+let agentWork = PendingWork(tasks: [PendingWork.Task(kind: .agent, label: "Write two vault notes")], crons: [])
+func effective(_ state: String = "waiting", pending: PendingWork?, heartbeat: Date? = nil,
+               after seconds: TimeInterval) -> (state: String, ts: Date) {
+    BackgroundHoldRules.effective(state: state, ts: holdStop, pending: pending, heartbeat: heartbeat,
+                                  now: holdStop.addingTimeInterval(seconds), calendar: cronCal)
+}
+let holdSilence = BackgroundHoldRules.taskSilence
+check("hold: a stop with nothing pending is yours, as before",
+      effective(pending: nil, after: 5).state == "waiting"
+          && effective(pending: nil, after: 5).ts == holdStop)
+check("hold: a stop that left a sub-agent running is background, keeping its stamp",
+      effective(pending: agentWork, after: 60).state == BackgroundHoldRules.state
+          && effective(pending: agentWork, after: 60).ts == holdStop)
+check("hold: only a waiting stop is held (permission / ended / running pass through)",
+      effective("permission", pending: agentWork, after: 60).state == "permission"
+          && effective("ended", pending: agentWork, after: 60).state == "ended"
+          && effective("running", pending: agentWork, after: 60).state == "running")
+check("hold: silent past the limit → a fresh waiting debt stamped at the lapse",
+      effective(pending: agentWork, after: holdSilence + 1).state == "waiting"
+          && effective(pending: agentWork, after: holdSilence + 1).ts == holdStop.addingTimeInterval(holdSilence))
+check("hold: a sub-agent beat keeps it held, counted from the beat",
+      effective(pending: agentWork, heartbeat: holdStop.addingTimeInterval(1500),
+                after: holdSilence + 600).state == BackgroundHoldRules.state
+          && effective(pending: agentWork, heartbeat: holdStop.addingTimeInterval(1500),
+                       after: 1500 + holdSilence + 1).ts == holdStop.addingTimeInterval(1500 + holdSilence))
+check("hold: a beat with no list (older hook) still holds; a beat BEFORE the stop does not",
+      effective(pending: nil, heartbeat: holdStop.addingTimeInterval(30), after: 60).state
+          == BackgroundHoldRules.state
+          && effective(pending: nil, heartbeat: holdStop.addingTimeInterval(-30), after: 60).state == "waiting")
+let cronOnly = PendingWork(tasks: [], crons: [PendingWork.Cron(schedule: "50 13 19 11 *", recurring: false)])
+func cronEffective(after: Date) -> (state: String, ts: Date) {
+    BackgroundHoldRules.effective(state: "waiting", ts: cronStop, pending: cronOnly, heartbeat: nil,
+                                  now: after, calendar: cronCal)
+}
+check("hold: a scheduled wake-up holds until it is due + grace (hours, not 30 min)",
+      cronEffective(after: taipei(2026, 11, 19, 13, 55)).state == BackgroundHoldRules.state
+          && cronEffective(after: taipei(2026, 11, 19, 14, 1)).state == "waiting"
+          && cronEffective(after: taipei(2026, 11, 19, 14, 1)).ts == taipei(2026, 11, 19, 14, 0))
+check("hold: an overdue or unparsable wake-up only holds for the grace",
+      BackgroundHoldRules.holdUntil(
+          stoppedAt: cronStop,
+          pending: PendingWork(tasks: [], crons: [PendingWork.Cron(schedule: "17 1 19 11 *", recurring: false),
+                                                  PendingWork.Cron(schedule: "nonsense", recurring: true)]),
+          heartbeat: nil, calendar: cronCal) == cronStop.addingTimeInterval(BackgroundHoldRules.cronGrace))
+check("hold: tasks AND a wake-up → whichever lasts longer",
+      BackgroundHoldRules.holdUntil(
+          stoppedAt: cronStop,
+          pending: PendingWork(tasks: agentWork.tasks, crons: cronOnly.crons),
+          heartbeat: nil, calendar: cronCal) == taipei(2026, 11, 19, 14, 0))
+check("hold: the earliest of several wake-ups decides",
+      BackgroundHoldRules.nextWake(
+          after: cronStop,
+          pending: PendingWork(tasks: [], crons: [PendingWork.Cron(schedule: "12 16 19 11 *", recurring: false),
+                                                  PendingWork.Cron(schedule: "50 13 19 11 *", recurring: false)]),
+          calendar: cronCal) == taipei(2026, 11, 19, 13, 50))
+check("pending: Claude's type names map to kinds (display and internal names)",
+      PendingWork.kind(forType: "subagent") == .agent && PendingWork.kind(forType: "workflow") == .agent
+          && PendingWork.kind(forType: "local_agent") == .agent && PendingWork.kind(forType: "shell") == .shell
+          && PendingWork.kind(forType: "monitor") == .monitor && PendingWork.kind(forType: "MCP task") == .monitor
+          && PendingWork.kind(forType: "something new") == .other)
+
+var bgSummary = BackgroundSummary()
+bgSummary.add(pending: PendingWork(tasks: [PendingWork.Task(kind: .agent, label: "A"),
+                                           PendingWork.Task(kind: .agent, label: ""),
+                                           PendingWork.Task(kind: .shell, label: "sleep")],
+                                   crons: [PendingWork.Cron(schedule: "12 16 19 11 *", recurring: false)]),
+              heartbeat: nil, stoppedAt: cronStop, calendar: cronCal)
+bgSummary.add(pending: cronOnly, heartbeat: nil, stoppedAt: cronStop, calendar: cronCal)
+check("summary: counts by kind across sessions, labels only when given",
+      bgSummary.agents == 2 && bgSummary.shells == 1 && bgSummary.taskCount == 3
+          && bgSummary.labels == ["A", "sleep"] && !bgSummary.unlisted)
+check("summary: the earliest wake-up across sessions, one-shots are not recurring",
+      bgSummary.nextWake == taipei(2026, 11, 19, 13, 50) && !bgSummary.recurring)
+var beatOnly = BackgroundSummary()
+beatOnly.add(pending: nil, heartbeat: cronStop.addingTimeInterval(10), stoppedAt: cronStop, calendar: cronCal)
+check("summary: a beat with no list is 'running, count unknown'",
+      beatOnly.unlisted && beatOnly.taskCount == 0 && beatOnly.nextWake == nil)
 
 // MARK: slack deep links
 
@@ -950,6 +1019,33 @@ check("attn: unacked permission beats waiting, since = oldest",
       }())
 check("attn: all acked → nil",
       GroupingRules.attention([sig("waiting", agoSec: 30, acked: true)]) == nil)
+// A stop that left background work running (resolved by BackgroundHoldRules).
+let bgState = BackgroundHoldRules.state
+check("grp: a held stop (background) → AI 執行中, seen or not",
+      grp([sig(bgState, agoSec: 600, acked: false)]) == .aiRunning
+          && grp([sig(bgState, agoSec: 600, acked: true)]) == .aiRunning)
+check("grp: a held stop is never owed to you, so it does not resurface 已讀 / 等待外部",
+      grp(group: "read", [sig(bgState, agoSec: 30, acked: false)]) == .aiRunning
+          && grp(group: "waiting", [sig(bgState, agoSec: 30, acked: false)]) == .aiRunning
+          && GroupingRules.attention([sig(bgState, agoSec: 30, acked: false)]) == nil)
+check("grp: a held stop does not age out like a running turn (its hold decides)",
+      grp([sig(bgState, agoSec: 4 * 3600, acked: true)]) == .aiRunning)
+check("grp: 長期運行 still stays put while held",
+      grp(group: "longrun", [sig(bgState, agoSec: 30, acked: false)]) == .longRunning)
+check("grp: 置頂 while held → AI 執行中 (the pin rides along)",
+      grp(pinned: true, [sig(bgState, agoSec: 30, acked: true)]) == .aiRunning)
+check("live: unseen held output → newOutput, seen → running",
+      GroupingRules.liveState([sig(bgState, agoSec: 30, acked: false)], now: gNow) == .newOutput
+          && GroupingRules.liveState([sig(bgState, agoSec: 30, acked: true)], now: gNow) == .running)
+check("live: a live turn still beats unseen held output; permission beats both",
+      GroupingRules.liveState([sig("running", agoSec: 10, acked: false),
+                               sig(bgState, agoSec: 30, acked: false)], now: gNow) == .running
+          && GroupingRules.liveState([sig("permission", agoSec: 10, acked: false),
+                                      sig(bgState, agoSec: 30, acked: false)], now: gNow) == .permission)
+check("unseen: only an unacked held stop counts",
+      GroupingRules.unseenBackgroundOutput([sig(bgState, agoSec: 30, acked: false)])
+          && !GroupingRules.unseenBackgroundOutput([sig(bgState, agoSec: 30, acked: true),
+                                                    sig("waiting", agoSec: 30, acked: false)]))
 
 // MARK: acknowledgement retention — transcript-only fallback sessions
 
@@ -1242,6 +1338,80 @@ if let root = selftestRepoRoot() {
     check("hook: SessionEnd with no prior file still records ended",
           hookStatus(orphan)?["state"] as? String == "ended" && hookStatus(orphan)?["ts"] != nil)
 
+    // A stop that leaves work running: Claude's own list, as 2.1.328 sends it.
+    let held = "hook-held-session"
+    runHook(hook, event: "UserPromptSubmit", payload: ["session_id": held])
+    runHook(hook, event: "Stop", payload: [
+        "session_id": held,
+        "background_tasks": [
+            ["id": "a7ce2761a6591e045", "type": "subagent", "status": "running",
+             "description": "Write two vault notes", "agent_type": "general-purpose"],
+            ["id": "b1", "type": "shell", "status": "pending", "description": "sleep 600",
+             "command": "sleep 600"],
+            ["id": "d1", "type": "dream", "status": "running", "description": "memory upkeep"],
+            ["id": "b2", "type": "shell", "status": "completed", "description": "done already"],
+        ],
+        "session_crons": [
+            ["id": "22c5581a", "schedule": "50 13 19 11 *", "recurring": false,
+             "prompt": "check the deploy and send the Slack note"],
+        ],
+    ])
+    let heldTS = hookStatus(held)?["ts"] as? Double
+    let heldPending = hookStatus(held)?["pending"] as? [String: Any]
+    let heldTasks = heldPending?["tasks"] as? [[String: Any]]
+    let heldCrons = heldPending?["crons"] as? [[String: Any]]
+    check("hook: Stop records what it left running — waking tasks only (no dream, no finished)",
+          hookStatus(held)?["state"] as? String == "waiting"
+          && heldTasks?.compactMap { $0["type"] as? String } == ["subagent", "shell"]
+          && heldTasks?.first?["desc"] as? String == "Write two vault notes")
+    check("hook: Stop records the schedule of each wake-up, never its prompt",
+          heldCrons?.count == 1 && heldCrons?.first?["schedule"] as? String == "50 13 19 11 *"
+          && heldCrons?.first?["recurring"] as? Bool == false && heldCrons?.first?["prompt"] == nil)
+
+    runHook(hook, event: "PreToolUse", payload: ["session_id": held, "agent_id": "a7ce2761a6591e045"])
+    let beat = hookStatus(held)?["sub_seen"] as? Double
+    check("hook: a sub-agent's tool call after the stop is a beat — state and ts untouched",
+          hookStatus(held)?["state"] as? String == "waiting"
+          && hookStatus(held)?["ts"] as? Double == heldTS && beat != nil
+          && hookStatus(held)?["pending"] != nil)
+    runHook(hook, event: "PreToolUse", payload: ["session_id": held, "agent_id": "a7ce2761a6591e045"])
+    check("hook: beats are throttled to one write a minute",
+          hookStatus(held)?["sub_seen"] as? Double == beat)
+
+    runHook(hook, event: "Notification",
+            payload: ["session_id": held, "message": "Claude is waiting for your input",
+                      "notification_type": "idle_prompt"])
+    check("hook: the idle notification of the same stop keeps ts, the list and the beat",
+          hookStatus(held)?["state"] as? String == "waiting"
+          && hookStatus(held)?["ts"] as? Double == heldTS
+          && hookStatus(held)?["pending"] != nil
+          && hookStatus(held)?["sub_seen"] as? Double == beat)
+
+    runHook(hook, event: "Notification",
+            payload: ["session_id": held, "message": "Claude needs your permission to use Bash",
+                      "notification_type": "permission_prompt"])
+    runHook(hook, event: "PreToolUse", payload: ["session_id": held, "agent_id": "a-parallel"])
+    check("hook: a sub-agent never clears a prompt (whose it is cannot be told)",
+          hookStatus(held)?["state"] as? String == "permission"
+          && hookStatus(held)?["pending"] != nil)
+
+    runHook(hook, event: "PreToolUse", payload: ["session_id": held])
+    check("hook: the main conversation's next turn drops the list (the next stop reports afresh)",
+          hookStatus(held)?["state"] as? String == "running"
+          && hookStatus(held)?["pending"] == nil && hookStatus(held)?["sub_seen"] == nil)
+    runHook(hook, event: "PreToolUse", payload: ["session_id": held, "agent_id": "a-foreground"])
+    check("hook: a sub-agent inside a running turn keeps it running (no beat written)",
+          hookStatus(held)?["state"] as? String == "running" && hookStatus(held)?["sub_seen"] == nil)
+
+    runHook(hook, event: "Stop", payload: ["session_id": held, "background_tasks": [],
+                                           "session_crons": []])
+    check("hook: a stop with nothing left running writes no list",
+          hookStatus(held)?["state"] as? String == "waiting" && hookStatus(held)?["pending"] == nil)
+    runHook(hook, event: "Stop", payload: ["session_id": held, "background_tasks": "garbage",
+                                           "session_crons": [["schedule": ""], "x"]])
+    check("hook: malformed lists are ignored, the stop still lands",
+          hookStatus(held)?["state"] as? String == "waiting" && hookStatus(held)?["pending"] == nil)
+
     // Pane → session map (記到 AI Session 紀錄).
     let paneSessionsDir = hookTemp.appendingPathComponent(
         "Library/Application Support/TaskDeck/pane-sessions")
@@ -1284,7 +1454,12 @@ func epoch(_ agoSec: TimeInterval) -> String {
 
 writeStatus("AABBCCDD-0000-0000-0000-000000000001.json", """
 {"state":"waiting","ts":\(epoch(60)),"task_key":"key-renamed","task":"old-slug",
- "transcript_path":"/tmp/live.jsonl"}
+ "transcript_path":"/tmp/live.jsonl","sub_seen":\(epoch(30)),
+ "pending":{"tasks":[{"type":"subagent","desc":"Write notes"},{"type":"shell"}],
+            "crons":[{"schedule":"50 13 19 11 *","recurring":false},{"recurring":true}]}}
+""")
+writeStatus("aabbccdd-0000-0000-0000-000000000005.json", """
+{"state":"waiting","ts":\(epoch(90)),"task":"bad-pending","pending":"not an object","sub_seen":"soon"}
 """)
 writeStatus("aabbccdd-0000-0000-0000-000000000002.json", """
 {"state":"ended","ts":\(epoch(120)),"task":"plain-slug","transcript_path":"/tmp/done.jsonl"}
@@ -1306,15 +1481,25 @@ check("status-dir: an unreadable directory is nil, never an empty scan",
 check("status-dir: fresh records survive, sid comes from the filename lowercased",
       statusScan?.records[live]?.state == "waiting")
 check("status-dir: a corrupt file is skipped without losing its neighbours",
-      statusScan?.records.count == 2)
+      statusScan?.records.count == 3)
 check("status-dir: task_key wins over the slug the hook recorded",
       statusScan?.sessionsByTask["current-slug"] == [live]
       && statusScan?.sessionsByTask["old-slug"] == nil)
 check("status-dir: a session without task_key keeps its recorded slug",
       statusScan?.sessionsByTask["plain-slug"] == [ended])
-check("status-dir: only a live session carries a transcript to follow",
-      statusScan?.records[live]?.transcriptPath == "/tmp/live.jsonl"
-      && statusScan?.records[ended]?.transcriptPath == nil)
+check("status-dir: what a stop left running is read (kinds, labels, schedules)",
+      statusScan?.records[live]?.pending == PendingWork(
+          tasks: [PendingWork.Task(kind: .agent, label: "Write notes"),
+                  PendingWork.Task(kind: .shell, label: "")],
+          crons: [PendingWork.Cron(schedule: "50 13 19 11 *", recurring: false)])
+      && statusScan?.records[live]?.heartbeat
+          == Date(timeIntervalSince1970: Double(epoch(30))!))
+check("status-dir: a record without a list has none",
+      statusScan?.records[ended]?.pending == nil && statusScan?.records[ended]?.heartbeat == nil)
+check("status-dir: a malformed list or beat costs only those fields, not the record",
+      statusScan?.records["aabbccdd-0000-0000-0000-000000000005"]?.state == "waiting"
+      && statusScan?.records["aabbccdd-0000-0000-0000-000000000005"]?.pending == nil
+      && statusScan?.records["aabbccdd-0000-0000-0000-000000000005"]?.heartbeat == nil)
 check("status-dir: an aged-out signal is reported, not returned as a signal",
       statusScan?.expired.count == 1
       && statusScan?.expired.first?.lastPathComponent

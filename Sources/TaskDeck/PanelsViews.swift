@@ -437,9 +437,41 @@ struct SidebarView: View {
         switch state {
         case .permission: return ("要授權", Theme.crit, "有終端停在權限確認，等你處理")
         case .newOutput: return ("新輸出", Theme.Lane.you, "AI 停下來了，有你還沒看的輸出（點開任務就算看過）")
-        case .running: return ("在跑", Theme.Lane.ai, "主對話正在跑")
+        case .running: return ("在跑", Theme.Lane.ai, "AI 正在跑（主對話，或它留下的背景工作）")
         case .quiet: return nil
         }
+    }
+
+    /// Tooltip of a held row's 背景 chip: what is still running, and why the
+    /// task is in AI 執行中 rather than 等你.
+    static func backgroundHelp(_ s: BackgroundSummary) -> String {
+        var kinds: [String] = []
+        if s.agents > 0 { kinds.append("sub-agent \(s.agents)") }
+        if s.shells > 0 { kinds.append("背景指令 \(s.shells)") }
+        if s.monitors > 0 { kinds.append("監看 \(s.monitors)") }
+        if s.others > 0 { kinds.append("其他 \(s.others)") }
+        var lines = [kinds.isEmpty
+            ? "主對話這一輪說完了，sub-agent 還在動；跑完 AI 會自己回來"
+            : "主對話這一輪說完了，背景還在跑（\(kinds.joined(separator: "、"))）；跑完 AI 會自己回來"]
+        lines += s.labels.prefix(6).map { "· \($0)" }
+        return lines.joined(separator: "\n")
+    }
+
+    private static let wakeTimeToday: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "HH:mm"
+        return f
+    }()
+    private static let wakeTimeOtherDay: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "MM-dd HH:mm"
+        return f
+    }()
+
+    /// "13:50" for a wake-up today, "11-20 09:00" for another day.
+    static func wakeText(_ date: Date, now: Date = Date()) -> String {
+        (Calendar.current.isDate(date, inSameDayAs: now) ? wakeTimeToday : wakeTimeOtherDay)
+            .string(from: date)
     }
 
     private func searchHeader(resultCount: Int) -> some View {
@@ -583,7 +615,7 @@ struct SidebarView: View {
     // 已讀 task resurfaced to 等你 by a fresh AI turn must still offer 已讀.
     private func row(_ t: TaskNote, group: AppModel.SidebarGroup) -> some View {
         let needsYou = group == .needsYou
-        let backgroundCount = model.backgroundTaskCount(t.id)
+        let background = model.backgroundSummary(t.id)
         let priorityAlert = model.hasPriorityAlert(t.id)
         return HStack(spacing: 8) {
             VStack(alignment: .leading, spacing: 1) {
@@ -611,6 +643,18 @@ struct SidebarView: View {
                             .padding(.vertical, 1)
                             .background(badge.tint.opacity(0.14), in: Capsule())
                             .help(badge.help)
+                    } else if model.hasUnseenBackgroundOutput(t.id) {
+                        // The stop that left background work running said
+                        // something: the task stays in AI 執行中, the mark
+                        // says there is output to read (viewing clears it).
+                        Text("新輸出")
+                            .font(Theme.Fonts.ui(9 * model.uiScale, .semibold))
+                            .foregroundStyle(Theme.Lane.you)
+                            .lineLimit(1)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1)
+                            .background(Theme.Lane.you.opacity(0.14), in: Capsule())
+                            .help("AI 這一輪說完了，但留了背景工作在跑、之後會自己回來；它說的話你還沒看（點開任務就算看過）")
                     }
                     // A pinned task the AI has out of the shelf: the pin says
                     // it goes back to 置頂 once it is seen.
@@ -645,15 +689,29 @@ struct SidebarView: View {
                             .padding(.vertical, 1)
                             .background(Theme.accent.opacity(0.14), in: Capsule())
                     }
-                    if backgroundCount > 0 {
-                        Text("背景 \(backgroundCount)")
+                    // What a stop left running — why the task is in AI 執行中
+                    // although the conversation itself has stopped.
+                    if let background, background.taskCount > 0 || background.unlisted {
+                        Text(background.taskCount > 0 ? "背景 \(background.taskCount)" : "背景")
                             .font(Theme.Fonts.ui(9 * model.uiScale, .medium))
                             .foregroundStyle(Theme.text2)
                             .lineLimit(1)
                             .padding(.horizontal, 5)
                             .padding(.vertical, 1)
                             .background(Color.white.opacity(0.06), in: Capsule())
-                            .help("Claude 背景工作仍在執行；不影響目前任務分組")
+                            .help(Self.backgroundHelp(background))
+                    }
+                    if let wake = background?.nextWake {
+                        Text("⏰ \(Self.wakeText(wake))")
+                            .font(Theme.Fonts.mono(9 * model.uiScale, .medium))
+                            .foregroundStyle(Theme.text2)
+                            .lineLimit(1)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1)
+                            .background(Color.white.opacity(0.06), in: Capsule())
+                            .help(background?.recurring == true
+                                  ? "AI 排了循環喚醒，下一次在這個時間；到時它會自己回來"
+                                  : "AI 排了定時喚醒，到時它會自己回來")
                     }
                     // 本機服務（dev server / DB / watcher）——這個任務有東西還開著。
                     let services = model.services(t.id)

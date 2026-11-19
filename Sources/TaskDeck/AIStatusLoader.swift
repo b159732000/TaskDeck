@@ -4,12 +4,27 @@ import TaskDeckCore
 struct AIStatusEntry: Equatable, Sendable {
     let state: String
     let ts: Date
+    /// Work the main turn left running at its stop, and the last sub-agent
+    /// sign of life since (hook sessions only; see BackgroundHoldRules).
+    var pending: PendingWork? = nil
+    var heartbeat: Date? = nil
+
+    init(state: String, ts: Date, pending: PendingWork? = nil, heartbeat: Date? = nil) {
+        self.state = state
+        self.ts = ts
+        self.pending = pending
+        self.heartbeat = heartbeat
+    }
+
+    init(_ record: AIStatusFileRecord) {
+        self.init(state: record.state, ts: record.ts,
+                  pending: record.pending, heartbeat: record.heartbeat)
+    }
 }
 
 struct AIStatusSnapshot: Equatable, Sendable {
     let statusBySession: [String: AIStatusEntry]
     let sessionsByTask: [String: Set<String>]
-    let backgroundTasksBySession: [String: Int]
     /// nil means this reload intentionally skipped task documents (a bursty
     /// hook event); a dictionary means the periodic/background validation ran.
     let taskSources: [String: TaskAISource]?
@@ -45,14 +60,6 @@ actor AIStatusLoader {
         let timestamp: Date?
     }
 
-    private struct TranscriptProgress {
-        let fileNumber: UInt64
-        var offset: UInt64
-        var carry = Data()
-        var accumulator = BackgroundTaskAccumulator()
-    }
-
-    private var transcriptProgress: [String: TranscriptProgress] = [:]
     private var transcriptActivityCache: [String: CachedTranscriptActivity] = [:]
 
     func load(from directory: URL, keyToSlug: [String: String],
@@ -68,17 +75,8 @@ actor AIStatusLoader {
         // would immediately re-trigger the reload it is supposed to feed.
         for file in scan.expired { try? FileManager.default.removeItem(at: file) }
 
-        var statuses = scan.records.mapValues { AIStatusEntry(state: $0.state, ts: $0.ts) }
+        var statuses = scan.records.mapValues(AIStatusEntry.init)
         let byTask = scan.sessionsByTask
-        var backgroundTasks: [String: Int] = [:]
-        var liveTranscriptPaths = Set<String>()
-        for (sid, record) in scan.records {
-            guard let path = record.transcriptPath else { continue }
-            liveTranscriptPaths.insert(path)
-            let count = backgroundTaskCount(at: path)
-            if count > 0 { backgroundTasks[sid] = count }
-        }
-        transcriptProgress = transcriptProgress.filter { liveTranscriptPaths.contains($0.key) }
 
         // Hook status is authoritative. Older sessions have no hook file, so
         // derive their fallback from the JSONL event timestamp — never the
@@ -108,7 +106,6 @@ actor AIStatusLoader {
         return AIStatusSnapshot(
             statusBySession: statuses,
             sessionsByTask: byTask,
-            backgroundTasksBySession: backgroundTasks,
             taskSources: taskSources
         )
     }
@@ -140,60 +137,6 @@ actor AIStatusLoader {
             signature: signature, timestamp: timestamp
         )
         return timestamp
-    }
-
-    /// Incrementally reduce newly-appended JSONL records. A large conversation
-    /// is read once; the 20-second refresh normally consumes only a few lines.
-    private func backgroundTaskCount(at path: String) -> Int {
-        let fm = FileManager.default
-        guard fm.fileExists(atPath: path) else {
-            transcriptProgress.removeValue(forKey: path)
-            return 0
-        }
-        guard let attributes = try? fm.attributesOfItem(atPath: path),
-              let sizeNumber = attributes[.size] as? NSNumber else {
-            return transcriptProgress[path]?.accumulator.activeTaskIDs.count ?? 0
-        }
-
-        let size = sizeNumber.uint64Value
-        let fileNumber = (attributes[.systemFileNumber] as? NSNumber)?.uint64Value ?? 0
-        var progress = transcriptProgress[path]
-        if progress == nil || progress!.fileNumber != fileNumber || size < progress!.offset {
-            progress = TranscriptProgress(fileNumber: fileNumber, offset: 0)
-        }
-        guard var progress else { return 0 }
-        guard size > progress.offset else {
-            transcriptProgress[path] = progress
-            return progress.accumulator.activeTaskIDs.count
-        }
-
-        do {
-            let handle = try FileHandle(forReadingFrom: URL(fileURLWithPath: path))
-            defer { try? handle.close() }
-            try handle.seek(toOffset: progress.offset)
-            let chunk = try handle.readToEnd() ?? Data()
-            progress.offset += UInt64(chunk.count)
-
-            var combined = progress.carry
-            combined.append(chunk)
-            var lineStart = combined.startIndex
-            for index in combined.indices where combined[index] == 0x0A {
-                if lineStart < index {
-                    progress.accumulator.consume(
-                        jsonLine: combined.subdata(in: lineStart ..< index)
-                    )
-                }
-                lineStart = combined.index(after: index)
-            }
-            progress.carry = lineStart < combined.endIndex
-                ? combined.subdata(in: lineStart ..< combined.endIndex)
-                : Data()
-            transcriptProgress[path] = progress
-            return progress.accumulator.activeTaskIDs.count
-        } catch {
-            transcriptProgress[path] = progress
-            return progress.accumulator.activeTaskIDs.count
-        }
     }
 
     private func loadTaskSources(_ requests: [TaskAISourceRequest]) -> [String: TaskAISource] {

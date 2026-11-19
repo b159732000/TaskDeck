@@ -147,8 +147,19 @@ instead of `.system(size:)` and literal colours in new UI.
   sinks to 半封存 or auto-archives. The live state rides on the row as a
   badge instead (`GroupingRules.liveState`: 要授權 / 在跑 / 新輸出), and
   viewing such a task (selecting it, or having it on screen) acks its
-  output — the one lane where viewing acks, because there an ack cannot
-  move anything. A pending permission prompt is never acked by viewing.
+  output — viewing acks only where an ack cannot move anything (here, and
+  held stops below). A pending permission prompt is never acked by viewing.
+- A stop that left work running is not 等你 (James, 2026-11-19). Claude's
+  Stop hook payload lists `background_tasks` (sub-agents, workflows,
+  background commands, monitors) and `session_crons` (CronCreate, /loop
+  wake-ups); the status hook records the waking ones as `pending`, and a
+  sub-agent's tool call after the stop (hooks inside a sub-agent carry the
+  parent's session_id plus `agent_id`) only beats `sub_seen` instead of
+  flipping the session back to running. `BackgroundHoldRules` resolves such
+  a stop to "background": AI 執行中, with 背景 N / ⏰ HH:mm chips and a 新輸出
+  mark until viewed (viewing acks only those held sessions). The hold lapses
+  — a fresh 等你 debt — after 30 min without a beat, or 10 min past the
+  earliest wake-up; the AI's next turn reports its list afresh.
 - The sidebar lane 置頂, at the top (frontmatter `pinned: true`, a marker
   kept apart from `group`), holds tasks that never finish — daily routines,
   career exploration — while they rest. Unlike 長期運行 it moves nothing out

@@ -4,14 +4,18 @@ import Foundation
 public struct AIStatusFileRecord: Equatable, Sendable {
     public let state: String // "running" / "waiting" / "permission" / "ended"
     public let ts: Date
-    /// Transcript of a session that has NOT ended (background-task counting
-    /// follows it). nil for ended sessions and for hooks that wrote no path.
-    public let transcriptPath: String?
+    /// What the main turn left running when it stopped (Claude's own list,
+    /// see `PendingWork`); nil = nothing, or a hook too old to record it.
+    public let pending: PendingWork?
+    /// Last tool call a sub-agent made after the main turn stopped — the
+    /// background work's sign of life (`BackgroundHoldRules`).
+    public let heartbeat: Date?
 
-    public init(state: String, ts: Date, transcriptPath: String?) {
+    public init(state: String, ts: Date, pending: PendingWork? = nil, heartbeat: Date? = nil) {
         self.state = state
         self.ts = ts
-        self.transcriptPath = transcriptPath
+        self.pending = pending
+        self.heartbeat = heartbeat
     }
 }
 
@@ -47,12 +51,52 @@ public enum AIStatusFiles {
         let ts: Double?
         let task: String?
         let taskKey: String?
-        let transcriptPath: String?
+        let pending: PendingFile?
+        let subSeen: Double?
 
         enum CodingKeys: String, CodingKey {
-            case state, ts, task
+            case state, ts, task, pending
             case taskKey = "task_key"
-            case transcriptPath = "transcript_path"
+            case subSeen = "sub_seen"
+        }
+
+        // The fields added for background work are decoded leniently: a
+        // malformed `pending` must not cost the session its badge.
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            state = try c.decode(String.self, forKey: .state)
+            ts = try c.decodeIfPresent(Double.self, forKey: .ts)
+            task = try c.decodeIfPresent(String.self, forKey: .task)
+            taskKey = try c.decodeIfPresent(String.self, forKey: .taskKey)
+            pending = try? c.decodeIfPresent(PendingFile.self, forKey: .pending)
+            subSeen = try? c.decodeIfPresent(Double.self, forKey: .subSeen)
+        }
+    }
+
+    private struct PendingFile: Decodable {
+        struct TaskRow: Decodable {
+            let type: String?
+            let desc: String?
+        }
+        struct CronRow: Decodable {
+            let schedule: String?
+            let recurring: Bool?
+        }
+        let tasks: [TaskRow]?
+        let crons: [CronRow]?
+
+        var work: PendingWork? {
+            let work = PendingWork(
+                tasks: (tasks ?? []).map {
+                    PendingWork.Task(kind: PendingWork.kind(forType: $0.type ?? ""),
+                                     label: $0.desc ?? "")
+                },
+                crons: (crons ?? []).compactMap { row in
+                    guard let schedule = row.schedule, !schedule.isEmpty else { return nil }
+                    return PendingWork.Cron(schedule: schedule, recurring: row.recurring ?? false)
+                }
+            )
+            return work.isEmpty ? nil : work
         }
     }
 
@@ -80,12 +124,11 @@ public enum AIStatusFiles {
                 expired.append(file)
                 continue
             }
-            var transcript: String?
-            if record.state != "ended", let path = record.transcriptPath, !path.isEmpty {
-                transcript = path
-            }
-            records[sid] = AIStatusFileRecord(state: record.state, ts: timestamp,
-                                              transcriptPath: transcript)
+            records[sid] = AIStatusFileRecord(
+                state: record.state, ts: timestamp,
+                pending: record.pending?.work,
+                heartbeat: record.subSeen.map(Date.init(timeIntervalSince1970:))
+            )
             if let slug = slug(for: record.taskKey, task: record.task, keyToSlug: keyToSlug) {
                 byTask[slug, default: []].insert(sid)
             }

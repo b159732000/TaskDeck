@@ -85,14 +85,13 @@ final class AppModel: ObservableObject {
 
     /// AI session states from the Claude Code hook script
     /// (`Scripts/taskdeck-ai-status.sh` → `Paths.statusDir/<session>.json`):
-    /// sessionID → (running | waiting | permission | ended, written-at).
+    /// sessionID → (running | waiting | permission | ended, written-at, plus
+    /// the work a stop left pending). Read through `statusEntry`, which
+    /// resolves a held stop to "background".
     private var aiStatus: [String: AIStatusEntry] = [:]
     /// Reverse index of the hook's task attribution. Building it once per
     /// status load avoids scanning every status row once for every task.
     private var hookSessionsByTask: [String: Set<String>] = [:]
-    /// Native Claude background tasks still active in each session. This is a
-    /// secondary activity badge only; it never changes the sidebar group.
-    private var backgroundTasksBySession: [String: Int] = [:]
     /// "已看過"：sessionID → the status timestamp the user acknowledged by
     /// clicking the badge. Entries at or before this ts stop showing; the
     /// next state change (newer ts) lights the badge again.
@@ -538,14 +537,18 @@ final class AppModel: ObservableObject {
 
     /// Selecting a task dismisses only the high-priority visual reminder. It
     /// intentionally does NOT acknowledge the AI signal or move the task out
-    /// of 等你; lifecycle state remains an explicit user decision. The one
-    /// exception is 長期運行: no ack can move a task there, it only clears
-    /// the row's 新輸出 badge — so looking at the task is what clears it.
+    /// of 等你; lifecycle state remains an explicit user decision. Two
+    /// exceptions, both where an ack cannot move anything — it only clears a
+    /// 新輸出 mark, so looking at the task is what clears it: 長期運行, and a
+    /// stop that left background work running (AI 執行中 holds the task
+    /// until that work brings the AI back; only those sessions are acked).
     func selectTask(_ slug: String) {
         selection = slug
         dismissPriorityAlert(slug)
         if derivedCache[slug]?.group == .longRunning {
             ackAIStatus(slug, keepingPermission: true)
+        } else if derivedCache[slug]?.unseenBackground == true {
+            ackAIStatus(slug, keepingPermission: true, onlyBackground: true)
         }
     }
 
@@ -1084,17 +1087,24 @@ final class AppModel: ObservableObject {
     /// `keepingPermission`: a session blocked on a permission prompt stays
     /// unacked — seeing the prompt does not answer it (the 長期運行 lane
     /// keeps showing 要授權 until the session moves on).
-    func ackAIStatus(_ slug: String, keepingPermission: Bool = false) {
-        let next = acking(slug, keepingPermission: keepingPermission)
+    /// `onlyBackground`: ack just the sessions whose stop left work running —
+    /// what viewing a task does; another session's stop still owed to you
+    /// keeps waiting for an explicit decision.
+    func ackAIStatus(_ slug: String, keepingPermission: Bool = false,
+                     onlyBackground: Bool = false) {
+        let next = acking(slug, keepingPermission: keepingPermission,
+                          onlyBackground: onlyBackground)
         if next != ackedAI { ackedAI = next }
         refreshDerived() // ack changes grouping (等你 → 已讀)
     }
 
-    private func acking(_ slug: String, keepingPermission: Bool) -> [String: Date] {
+    private func acking(_ slug: String, keepingPermission: Bool,
+                        onlyBackground: Bool = false) -> [String: Date] {
         var next = ackedAI
         for s in taskAISessions(slug) {
             if let entry = statusEntry(sid: s.sid),
-               !(keepingPermission && entry.state == "permission") {
+               !(keepingPermission && entry.state == "permission"),
+               !onlyBackground || entry.state == BackgroundHoldRules.state {
                 next[s.sid] = entry.ts
             }
         }
@@ -1131,11 +1141,16 @@ final class AppModel: ObservableObject {
     private static let signalWindow: TimeInterval = 7 * 24 * 3600
 
     /// Effective AI state for a session. The background loader combines
-    /// authoritative hook signals with legacy transcript-event fallbacks.
+    /// authoritative hook signals with legacy transcript-event fallbacks; a
+    /// stop that left work running resolves to "background" while that work
+    /// can still bring the AI back (BackgroundHoldRules). Grouping AND acking
+    /// both read this, so an ack always matches the stamp grouping compares.
     private func statusEntry(sid: String, now: Date = Date()) -> (state: String, ts: Date)? {
         guard let entry = aiStatus[sid],
               now.timeIntervalSince(entry.ts) < Self.signalWindow else { return nil }
-        return (entry.state, entry.ts)
+        return BackgroundHoldRules.effective(state: entry.state, ts: entry.ts,
+                                             pending: entry.pending,
+                                             heartbeat: entry.heartbeat, now: now)
     }
 
     private func transcriptActivityRequest(
@@ -1209,7 +1224,8 @@ final class AppModel: ObservableObject {
         let attention: (permission: Bool, since: Date)?
         let live: LiveState            // the 長期運行 row badge (liveState)
         let team: String?              // the account set by hand (taskTeam)
-        let backgroundCount: Int       // informational only; never drives grouping
+        let background: BackgroundSummary? // what held sessions wait on (row chips)
+        let unseenBackground: Bool     // a held stop's output not yet seen (新輸出)
         let lastActivity: Date?        // for silence(); cached so the sidebar sort
                                        // (re-run on every hover) does zero disk I/O
     }
@@ -1217,12 +1233,15 @@ final class AppModel: ObservableObject {
 
     @discardableResult
     private func refreshDerived(allowPriorityAlertTriggers: Bool = true) -> Bool {
-        // A 長期運行 task on screen is being looked at: output landing there
-        // must not light 新輸出 under the user's eyes (selectTask acks the
-        // same way on arrival).
-        if let slug = selection, derivedCache[slug]?.group == .longRunning,
+        // A task on screen is being looked at: output landing there must not
+        // light 新輸出 under the user's eyes (selectTask acks the same way on
+        // arrival) — all of a 長期運行 task's output, and elsewhere a stop
+        // that left background work running.
+        if let slug = selection,
            let task = tasks.first(where: { $0.id == slug }), isCurrentlyViewing(task) {
-            let next = acking(slug, keepingPermission: true)
+            let next = derivedCache[slug]?.group == .longRunning
+                ? acking(slug, keepingPermission: true)
+                : acking(slug, keepingPermission: true, onlyBackground: true)
             if next != ackedAI { ackedAI = next }
         }
         let now = Date()
@@ -1240,14 +1259,20 @@ final class AppModel: ObservableObject {
                                                pinned: t.isPinned,
                                                quiet: lastActivity.map { now.timeIntervalSince($0) } ?? 0,
                                                signals: taskSignals, now: now)
-            let backgroundCount = taskSessions.reduce(into: 0) { count, session in
-                count += backgroundTasksBySession[session.sid] ?? 0
+            var background: BackgroundSummary?
+            for item in resolved where item.entry.state == BackgroundHoldRules.state {
+                let raw = aiStatus[item.session.sid]
+                var summary = background ?? BackgroundSummary()
+                summary.add(pending: raw?.pending, heartbeat: raw?.heartbeat,
+                            stoppedAt: item.entry.ts)
+                background = summary
             }
             cache[t.id] = Derived(group: group,
                                   attention: GroupingRules.attention(taskSignals),
                                   live: GroupingRules.liveState(taskSignals, now: now),
                                   team: primaryTeam(t.id),
-                                  backgroundCount: backgroundCount,
+                                  background: background,
+                                  unseenBackground: GroupingRules.unseenBackgroundOutput(taskSignals),
                                   lastActivity: lastActivity)
         }
         reconcilePriorityAlerts(current: cache, allowTriggers: allowPriorityAlertTriggers)
@@ -1326,7 +1351,8 @@ final class AppModel: ObservableObject {
                   a.group == b.group,
                   a.live == b.live,
                   a.team == b.team,
-                  a.backgroundCount == b.backgroundCount,
+                  a.background == b.background,
+                  a.unseenBackground == b.unseenBackground,
                   a.lastActivity == b.lastActivity,
                   a.attention?.permission == b.attention?.permission,
                   a.attention?.since == b.attention?.since else { return false }
@@ -1370,13 +1396,14 @@ final class AppModel: ObservableObject {
         refreshDerived()
     }
 
-    /// Informational count of Claude-native background tasks. It is orthogonal
-    /// to ownership/attention, so "等你 · 背景 1" is a valid simultaneous state.
-    func backgroundTaskCount(_ slug: String) -> Int {
-        if let derived = derivedCache[slug] { return derived.backgroundCount }
-        return taskAISessions(slug).reduce(into: 0) { count, session in
-            count += backgroundTasksBySession[session.sid] ?? 0
-        }
+    /// What the task's held sessions — stops that left sub-agents, background
+    /// commands or a scheduled wake-up running — are waiting on; nil = none.
+    /// Such a task sits in AI 執行中 (BackgroundHoldRules).
+    func backgroundSummary(_ slug: String) -> BackgroundSummary? { derivedCache[slug]?.background }
+
+    /// A held stop said something the user has not looked at yet.
+    func hasUnseenBackgroundOutput(_ slug: String) -> Bool {
+        derivedCache[slug]?.unseenBackground ?? false
     }
 
     /// What the task's AI is doing right now — the badge on a 長期運行 row,
@@ -1683,7 +1710,7 @@ final class AppModel: ObservableObject {
                                             keyToSlug: taskKeyToSlug(),
                                             now: Date(),
                                             signalWindow: Self.signalWindow) else { return }
-        aiStatus = scan.records.mapValues { AIStatusEntry(state: $0.state, ts: $0.ts) }
+        aiStatus = scan.records.mapValues(AIStatusEntry.init)
         hookSessionsByTask = scan.sessionsByTask
         hasAIStatusPicture = true
     }
@@ -1765,9 +1792,6 @@ final class AppModel: ObservableObject {
         }
         if hookSessionsByTask != snapshot.sessionsByTask {
             hookSessionsByTask = snapshot.sessionsByTask
-        }
-        if backgroundTasksBySession != snapshot.backgroundTasksBySession {
-            backgroundTasksBySession = snapshot.backgroundTasksBySession
         }
         if let loadedSources = snapshot.taskSources {
             // Merge instead of replacing: a transient read/decode failure for
