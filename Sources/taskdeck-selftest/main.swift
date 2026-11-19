@@ -1407,6 +1407,20 @@ if let root = selftestRepoRoot() {
                                            "session_crons": []])
     check("hook: a stop with nothing left running writes no list",
           hookStatus(held)?["state"] as? String == "waiting" && hookStatus(held)?["pending"] == nil)
+    runHook(hook, event: "Stop", payload: ["session_id": held, "background_tasks": [
+        ["id": "w1", "type": "monitor", "status": "running",
+         "description": "live updates for artifact https://claude.ai/artifact/6NqHeScUjTmbCNYBwywhbj (review)"],
+    ]])
+    check("hook: an artifact watch (wakes only on a comment) is not work the AI comes back from",
+          hookStatus(held)?["state"] as? String == "waiting" && hookStatus(held)?["pending"] == nil)
+    runHook(hook, event: "Stop", payload: ["session_id": held, "background_tasks": [
+        ["id": "w1", "type": "monitor", "status": "running",
+         "description": "live updates for artifact https://claude.ai/artifact/x (review)"],
+        ["id": "m1", "type": "monitor", "status": "running", "description": "until CI is green"],
+    ]])
+    check("hook: other monitors still count next to an artifact watch",
+          ((hookStatus(held)?["pending"] as? [String: Any])?["tasks"] as? [[String: Any]])?
+              .compactMap { $0["desc"] as? String } == ["until CI is green"])
     runHook(hook, event: "Stop", payload: ["session_id": held, "background_tasks": "garbage",
                                            "session_crons": [["schedule": ""], "x"]])
     check("hook: malformed lists are ignored, the stop still lands",

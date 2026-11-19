@@ -152,7 +152,9 @@ instead of `.system(size:)` and literal colours in new UI.
 - A stop that left work running is not 等你 (James, 2026-11-19). Claude's
   Stop hook payload lists `background_tasks` (sub-agents, workflows,
   background commands, monitors) and `session_crons` (CronCreate, /loop
-  wake-ups); the status hook records the waking ones as `pending`, and a
+  wake-ups); the status hook records the waking ones as `pending` (not
+  memory upkeep, not an artifact's live-update watch, which wakes the
+  session only when someone comments), and a
   sub-agent's tool call after the stop (hooks inside a sub-agent carry the
   parent's session_id plus `agent_id`) only beats `sub_seen` instead of
   flipping the session back to running. `BackgroundHoldRules` resolves such

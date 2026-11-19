@@ -130,6 +130,11 @@ if agent_id and event == "PreToolUse" and prev_state in ("waiting", "permission"
 QUIET_TASKS = {"dream", "auto-mode scan", "memory import", "memory save",
                "auto_mode_scan", "local_memory_import", "post_turn_memory"}
 FINISHED = {"completed", "failed", "killed", "stopped"}
+# A watch on a published artifact is a monitor that lives as long as the
+# session and wakes it only when someone comments — not work the AI comes
+# back from. The payload carries no "ambient" flag, only Claude's description
+# ("live updates for artifact <url> (…)", 2.1.328), so that is the tell.
+PASSIVE_PREFIXES = ("live updates for artifact",)
 
 def pending_work(tasks, crons):
     out_tasks = []
@@ -137,10 +142,12 @@ def pending_work(tasks, crons):
         if not isinstance(t, dict):
             continue
         kind = str(t.get("type") or "")
+        desc = str(t.get("description") or "")
         if kind in QUIET_TASKS or str(t.get("status") or "") in FINISHED:
             continue
-        out_tasks.append({"type": kind[:40],
-                          "desc": str(t.get("description") or "")[:80]})
+        if kind in ("monitor", "monitor_ws") and desc.startswith(PASSIVE_PREFIXES):
+            continue
+        out_tasks.append({"type": kind[:40], "desc": desc[:80]})
     out_crons = []
     for c in crons if isinstance(crons, list) else []:
         if not isinstance(c, dict):
