@@ -15,10 +15,11 @@ fi
 rm -rf "$DEST"
 ditto dist/JamesDesk.app "$DEST"
 
-# The running GUI, found with ps — NOT pgrep/pkill: on macOS 27 they skip a
-# process whose executable was replaced on disk, which is exactly the old
-# GUI right after the ditto above. (2026-11-19: dev.sh then quit nothing,
-# `open` just raised the old window, and it still printed "Relaunched".)
+# The running GUI, found with ps — NOT pgrep/pkill: macOS pgrep/pkill leave
+# out their own ancestors unless given -a. A GUI that started taskdeckd is an
+# ancestor of every pane shell, so dev.sh run from a JamesDesk terminal found
+# no GUI to quit; `open` just raised the old window and it still printed
+# "Relaunched" (2026-11-19). The same rule hides taskdeckd itself from a pane.
 gui_pids() {
   ps -axo pid=,comm= | awk '{ pid = $1; $1 = ""; sub(/^ +/, "")
                               n = split($0, part, "/"); if (part[n] == "TaskDeck") print pid }'
