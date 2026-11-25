@@ -1384,6 +1384,7 @@ struct PaneContainerView: View {
         case .added: text = "已記到 AI Session 紀錄"
         case .remarkUpdated: text = "已更新備註"
         case .alreadyRecorded: text = "已經在紀錄裡了"
+        case .switchedBack: text = "已記一筆：切回這個 session"
         }
         withAnimation { recordFlash = text }
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
@@ -1572,8 +1573,9 @@ struct RecordSessionRequest: Identifiable {
 }
 
 /// Sheet for 記到 AI Session 紀錄: shows which session will be recorded (or a
-/// pick-list when the terminal can't tell), plus the optional remark field.
-/// Return records, Esc cancels.
+/// pick-list when the terminal can't tell) and, when it is already listed,
+/// what recording it does, plus the optional remark field. Return records,
+/// Esc cancels.
 struct RecordSessionSheet: View {
     @ObservedObject var session: TaskSession
     @ObservedObject var model: AppModel
@@ -1610,6 +1612,12 @@ struct RecordSessionSheet: View {
                     .textSelection(.enabled)
             } else {
                 picker
+            }
+            if let outcome = outcomeHint {
+                Text(outcome)
+                    .font(Theme.Fonts.ui(11))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             if request.withRemark {
                 TextField("備註（例如：拆 PR 的討論）", text: Binding(
@@ -1687,11 +1695,32 @@ struct RecordSessionSheet: View {
         return f
     }()
 
-    /// Editing an already-recorded session starts from its current remark.
+    /// What 記錄 does to an already-listed session (`TaskStore.recordSession`),
+    /// so the sheet never implies an edit that won't happen. nil when the
+    /// session isn't listed yet: it is simply added.
+    private var outcomeHint: String? {
+        guard let sid = target?.sid else { return nil }
+        switch TaskStore.sessionPosition(session.noteText, sid: sid) {
+        case .latest:
+            return request.withRemark
+                ? "這是紀錄最後一筆（正在用的 session），備註會改在這一筆。"
+                : "這是紀錄最後一筆（正在用的 session），不會重複記。"
+        case .earlier:
+            return "這個 session 上面記過：會在最下面再記一筆（切回），上面那筆和它的備註不動。"
+        case .notListed:
+            return nil
+        }
+    }
+
+    /// Recording the session in use (the manifest's last record) edits that
+    /// line, so the field starts from its remark. Any other session gets a
+    /// new line (a switch back, or its first), so the field starts empty.
     private func prefillRemark() {
-        guard request.withRemark, !remarkEdited, let sid = target?.sid.lowercased() else { return }
-        remark = TaskStore.sessionRecords(session.noteText)
-            .first { $0.sid.lowercased() == sid }?.remark ?? ""
+        guard request.withRemark, !remarkEdited, let sid = target?.sid else { return }
+        let text = session.noteText
+        remark = TaskStore.sessionPosition(text, sid: sid) == .latest
+            ? TaskStore.sessionRecords(text).last?.remark ?? ""
+            : ""
     }
 
     private func save() {

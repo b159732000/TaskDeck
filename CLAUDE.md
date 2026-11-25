@@ -119,12 +119,17 @@ instead of `.system(size:)` and literal colours in new UI.
     after the H1, closed by a `---` rule. Lines are written as
     `- <yyMMddHHmm> <team> <session-id> [remark]`
     (`TaskStore.recordSession`); legacy `- <team> <session-id>` lines stay
-    as written (never back-filled). Written when the app launches an AI pane,
-    and when the user picks 記到 AI Session 紀錄 in a pane's ⋯ menu — a
-    session is listed once; recording it again with a remark edits that
-    line. The flush guard (`mergeManifestLines`) is three-way: it only
-    re-adds lines something ELSE added on disk, never the user's own edits
-    or deletions;
+    as written (never back-filled). Written when the app launches an AI pane
+    (a fresh id) or rebinds one to an id the block lacks — one line per
+    session — and when the user picks 記到 AI Session 紀錄 in a pane's ⋯
+    menu. The block is a timeline of account switches; its last record is
+    the session in use. Recording that one again with a remark edits its
+    line; recording one listed only above appends a new dated line (a
+    switch back) and leaves the earlier line, remark included, as written.
+    The flush guard (`mergeManifestLines`) is three-way: it only re-adds
+    lines something ELSE added on disk, never the user's own edits or
+    deletions; a dated line is matched by session + stamp (a legacy one by
+    session alone), so a switch back made elsewhere survives;
   - the **`## 狀態` log**: newest-first status-history bullets
     (`TaskStore.prependStatusLog` / `replaceStatusLogEntry`) — James chose
     keeping status history IN the note (Obsidian-visible) over a sidecar

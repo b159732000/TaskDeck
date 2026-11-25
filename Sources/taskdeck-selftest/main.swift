@@ -543,11 +543,13 @@ check("merge: removing a legacy marker in the app is not undone",
       TaskStore.mergeManifestLines(disk: legacyGhost, into: cleaned, base: legacyGhost) == cleaned)
 let remarkEdited = "# t\n\n- 2611101530 claude-ext2 50e3381c-9596-4b8e-9337-0a3e146c4062 新備註\n\n---\n"
 let externalSameSid = "# t\n\n- 2611101530 claude-ext2 50e3381c-9596-4b8e-9337-0a3e146c4062 舊備註\n\n---\n"
-check("merge: an external line for a session memory already lists is not duplicated",
+check("merge: an external remark edit of a dated line (same session + stamp) is not duplicated",
       TaskStore.mergeManifestLines(disk: externalSameSid, into: remarkEdited, base: "# t\n")
           == remarkEdited)
+// (A session listed again under a new stamp, a switch back: see the merge
+// checks after the AI Session record section.)
 
-// MARK: AI Session records — dated lines, optional remark, no duplicates
+// MARK: AI Session records — a timeline: dated lines, optional remark, switch backs
 
 let sidX = "50e3381c-9596-4b8e-9337-0a3e146c4062"
 let sidY = "53ec99de-248f-40e7-bfc2-dc8b049736e9"
@@ -581,12 +583,12 @@ check("record: first record creates the block under the H1",
       && recAdded.text.hasPrefix("---\nid: x\n---\n\n# 任務\n\n- 2611101530 claude-ext2 \(sidX)\n\n---\n")
       && recAdded.text.hasSuffix("\n自由筆記\n"))
 let recTwice = TaskStore.recordSession(recAdded.text, team: "claude-ext2", sid: sidX.uppercased(), at: recAt)
-check("record: same session without remark is a no-op",
+check("record: the latest (only) session again without remark is a no-op",
       recTwice.result == .alreadyRecorded && recTwice.text == recAdded.text)
 let recRemark = TaskStore.recordSession(recAdded.text, team: "claude-ext2", sid: sidX,
                                         remark: "拆 PR 的討論",
                                         at: recAt.addingTimeInterval(86_400))
-check("record: same session with remark sets it in place, keeps the original stamp",
+check("record: the latest (only) session + remark sets it in place, keeps the original stamp",
       recRemark.result == .remarkUpdated
       && recRemark.text.contains("- 2611101530 claude-ext2 \(sidX) 拆 PR 的討論\n")
       && TaskStore.sessionRecords(recRemark.text).count == 1)
@@ -604,6 +606,143 @@ check("record: remark on a legacy line keeps it undated, drops the marker",
       && recLegacyRemark.text == "# t\n\n- claude-eng \(sidY) 補備註\n\n---\n\nbody")
 check("record: sessionRecords skips non-record bullets",
       TaskStore.sessionRecords("# t\n\n- claude-ext2\n- claude-ext2 \(sidX)\n\n---\n").map(\.sid) == [sidX])
+
+// The block is a timeline of account switches; its last record is the session
+// in use. James's 261124 note: ext4 → eng (週用量 95%) → ext2 (5hr 用量到).
+let sidExt4 = "21168334-c83f-454c-8bca-166f7fadc947"
+let sidEng = "022fdee5-87da-4420-a7c3-52a8d11eafa9"
+let sidExt2 = "c475a5e7-0e12-41a6-b9a6-5efaa7cd82ae"
+let lineExt4 = "- 2611240912 claude-ext4 \(sidExt4)"
+let lineEng = "- 2611241531 claude-eng \(sidEng) 上面的 session 週用量 95%，提早改成這個 session 繼續執行。"
+let lineExt2 = "- 2611241739 claude-ext2 \(sidExt2) 上面 session 5hr 用量到，後續切來這個主做"
+func walkthroughNote(_ manifest: [String]) -> String {
+    "---\nid: x\n---\n\n# Agent Viewer 走查\n\n" + manifest.joined(separator: "\n") + "\n\n---\n\n走查筆記\n"
+}
+let walkthrough = walkthroughNote([lineExt4, lineEng, lineExt2])
+let backAt = recCal.date(from: DateComponents(year: 2026, month: 11, day: 25, hour: 10, minute: 5))!
+
+check("record-position: last record is latest, earlier ones earlier, any case; unknown not listed",
+      TaskStore.sessionPosition(walkthrough, sid: sidExt2) == .latest
+      && TaskStore.sessionPosition(walkthrough, sid: sidEng.uppercased()) == .earlier
+      && TaskStore.sessionPosition(walkthrough, sid: sidExt4) == .earlier
+      && TaskStore.sessionPosition(walkthrough, sid: sidX) == .notListed)
+
+let walkLatestRemark = TaskStore.recordSession(walkthrough, team: "claude-ext2", sid: sidExt2,
+                                               remark: "主做 viewer 走查", at: backAt)
+check("record: latest session + remark edits only the last line (stamp, team kept), no new line",
+      walkLatestRemark.result == .remarkUpdated
+      && walkLatestRemark.text == walkthroughNote([
+          lineExt4, lineEng, "- 2611241739 claude-ext2 \(sidExt2) 主做 viewer 走查",
+      ]))
+let walkLatestBare = TaskStore.recordSession(walkthrough, team: "claude-ext2", sid: sidExt2, at: backAt)
+check("record: latest session without remark is already recorded, text unchanged",
+      walkLatestBare.result == .alreadyRecorded && walkLatestBare.text == walkthrough)
+
+// James 261125: ext2 hit its limit, back to the eng session.
+let walkBack = TaskStore.recordSession(walkthrough, team: "claude-eng", sid: sidEng,
+                                       remark: "ext2 5hr 用量到，切回 eng 這個 session 繼續",
+                                       at: backAt)
+let lineEngBack = "- 2611251005 claude-eng \(sidEng) ext2 5hr 用量到，切回 eng 這個 session 繼續"
+check("record: switching back to 022fdee5 (James's note) → 4 lines, earlier lines byte-identical",
+      walkBack.result == .switchedBack
+      && walkBack.text == walkthroughNote([lineExt4, lineEng, lineExt2, lineEngBack]))
+check("record: after the switch back, eng is the latest record",
+      TaskStore.sessionPosition(walkBack.text, sid: sidEng) == .latest
+      && TaskStore.sessionRecords(walkBack.text).map(\.sid) == [sidExt4, sidEng, sidExt2, sidEng])
+let walkBackBare = TaskStore.recordSession(walkthrough, team: "claude-eng", sid: sidEng, at: backAt)
+check("record: switching back without remark appends a bare dated line",
+      walkBackBare.result == .switchedBack
+      && walkBackBare.text == walkthroughNote([
+          lineExt4, lineEng, lineExt2, "- 2611251005 claude-eng \(sidEng)",
+      ]))
+let walkBackEdit = TaskStore.recordSession(walkBack.text, team: "claude-eng", sid: sidEng,
+                                           remark: "改：切回 eng 收尾",
+                                           at: backAt.addingTimeInterval(3_600))
+check("record: after a switch back, a remark edits the NEW bottom line, not the old eng line",
+      walkBackEdit.result == .remarkUpdated
+      && walkBackEdit.text == walkthroughNote([
+          lineExt4, lineEng, lineExt2, "- 2611251005 claude-eng \(sidEng) 改：切回 eng 收尾",
+      ]))
+let walkBackAgain = TaskStore.recordSession(walkBack.text, team: "claude-eng", sid: sidEng, at: backAt)
+check("record: after a switch back, eng again without remark adds no third eng line",
+      walkBackAgain.result == .alreadyRecorded && walkBackAgain.text == walkBack.text)
+let walkBackTwice = TaskStore.recordSession(walkBack.text, team: "claude-ext2", sid: sidExt2,
+                                            at: backAt.addingTimeInterval(7_200))
+check("record: moving on again (back to ext2) appends again — the timeline keeps every move",
+      walkBackTwice.result == .switchedBack
+      && walkBackTwice.text == walkthroughNote([
+          lineExt4, lineEng, lineExt2, lineEngBack, "- 2611251205 claude-ext2 \(sidExt2)",
+      ]))
+
+// Legacy undated lines follow the same rule.
+let legacyTimeline = "# t\n\n- claude-eng \(sidY) 舊的\n- claude-ext2 \(sidX)\n\n---\n\nbody"
+let legacyLatest = TaskStore.recordSession(legacyTimeline, team: "claude-ext2", sid: sidX,
+                                           remark: "主做", at: backAt)
+check("record: latest legacy line + remark edits it in place, stays undated",
+      legacyLatest.result == .remarkUpdated
+      && legacyLatest.text == "# t\n\n- claude-eng \(sidY) 舊的\n- claude-ext2 \(sidX) 主做\n\n---\n\nbody")
+let legacyBack = TaskStore.recordSession(legacyTimeline, team: "claude-eng", sid: sidY,
+                                         remark: "切回", at: backAt)
+check("record: switching back to an earlier legacy line appends a dated line, legacy line untouched",
+      legacyBack.result == .switchedBack
+      && legacyBack.text
+          == "# t\n\n- claude-eng \(sidY) 舊的\n- claude-ext2 \(sidX)\n- 2611251005 claude-eng \(sidY) 切回\n\n---\n\nbody")
+
+// A free bullet inside the block is not a record (so it doesn't displace the
+// last record), and lines below the --- are not the manifest — even ones that
+// look like records. Both stay byte-identical whatever is recorded.
+let sidZ = "9b1d4c2e-0f3a-4e5b-8c7d-6a5b4c3d2e1f"
+let freeBody = "\n\n---\n\n- 2611101700 claude-eng \(sidY) 正文裡像紀錄的一行\n"
+    + "- 2611101800 claude-eng \(sidZ) 只在正文的 session\n正文\n"
+let freeHead = "# t\n\n- 2611101530 claude-eng \(sidY)\n- 2611101600 claude-ext2 \(sidX) 主做\n- 備忘：週三前收尾"
+let freeNote = freeHead + freeBody
+check("record-position: a free bullet after the last record doesn't displace it; body ids not listed",
+      TaskStore.sessionPosition(freeNote, sid: sidX) == .latest
+      && TaskStore.sessionPosition(freeNote, sid: sidY) == .earlier
+      && TaskStore.sessionPosition(freeNote, sid: sidZ) == .notListed)
+let freeLatest = TaskStore.recordSession(freeNote, team: "claude-ext2", sid: sidX,
+                                         remark: "改備註", at: backAt)
+check("record: editing the latest leaves the free bullet and the body untouched",
+      freeLatest.result == .remarkUpdated
+      && freeLatest.text == freeHead.replacingOccurrences(of: "\(sidX) 主做", with: "\(sidX) 改備註")
+          + freeBody)
+let freeBack = TaskStore.recordSession(freeNote, team: "claude-eng", sid: sidY,
+                                       remark: "切回", at: backAt)
+check("record: a switch back appends below the free bullet; free bullet and body untouched",
+      freeBack.result == .switchedBack
+      && freeBack.text == freeHead + "\n- 2611251005 claude-eng \(sidY) 切回" + freeBody)
+let freeAdded = TaskStore.recordSession(freeNote, team: "claude-eng", sid: sidZ, at: backAt)
+check("record: an id found only below the --- is added to the block; the body untouched",
+      freeAdded.result == .added
+      && freeAdded.text == freeHead + "\n- 2611251005 claude-eng \(sidZ)" + freeBody)
+
+// MARK: manifest merge-guard — a session listed again (switch back)
+
+// Another Mac switched back to eng while this window held unsaved typing.
+let mergeTyping = walkthrough.replacingOccurrences(of: "走查筆記", with: "走查筆記（多打了幾個字）")
+let mergedBack = TaskStore.mergeManifestLines(disk: walkBack.text, into: mergeTyping, base: walkthrough)
+check("merge: a switch back (same session, new stamp) that is only on disk is rescued",
+      mergedBack == walkthroughNote([lineExt4, lineEng, lineExt2, lineEngBack])
+          .replacingOccurrences(of: "走查筆記", with: "走查筆記（多打了幾個字）"))
+check("merge: rescuing a switch back is idempotent",
+      TaskStore.mergeManifestLines(disk: walkBack.text, into: mergedBack, base: walkthrough) == mergedBack)
+// Obsidian edited the OLD eng line's remark while memory lists eng twice.
+let diskOldEngEdited = walkBack.text.replacingOccurrences(
+    of: lineEng, with: "- 2611241531 claude-eng \(sidEng) 週用量 95%")
+check("merge: a disk-only remark edit of a listed line (same session + stamp) is not duplicated",
+      TaskStore.mergeManifestLines(disk: diskOldEngEdited, into: walkBack.text, base: walkBack.text)
+          == walkBack.text)
+// A legacy (undated) line is matched by session alone …
+let legacyMemory = "# t\n\n- claude-eng \(sidY) 新備註\n- 2611101530 claude-ext2 \(sidX)\n\n---\n"
+let legacyDiskEdit = "# t\n\n- claude-eng \(sidY) 舊備註\n- 2611101530 claude-ext2 \(sidX)\n\n---\n"
+check("merge: a legacy line is matched by session alone — its remark edited elsewhere isn't duplicated",
+      TaskStore.mergeManifestLines(disk: legacyDiskEdit, into: legacyMemory, base: "# t\n") == legacyMemory)
+// … but a dated switch back to a session listed by a legacy line is a new entry.
+let legacyDiskBack = "# t\n\n- claude-eng \(sidY) 新備註\n- 2611101530 claude-ext2 \(sidX)\n"
+    + "- 2611251005 claude-eng \(sidY) 切回\n\n---\n"
+check("merge: a dated switch back to a legacy-listed session is rescued",
+      TaskStore.mergeManifestLines(disk: legacyDiskBack, into: legacyMemory, base: legacyMemory)
+          == legacyDiskBack)
 
 // MARK: pane → session map (hook-written) and account resolution
 

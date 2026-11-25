@@ -1010,7 +1010,8 @@ final class AppModel: ObservableObject {
                 guard seen.insert(sid).inserted else { continue }
                 out.append(TaskAISession(sid: sid, team: pane.team, cwd: pane.cwd))
             }
-            // Legacy `- team sid` and dated `- stamp team sid remark` lines.
+            // Legacy `- team sid` and dated `- stamp team sid remark` lines. A
+            // session switched back to is listed again; `seen` keeps it once.
             for record in TaskStore.sessionRecords(text) where !record.sid.hasPrefix("ses_") {
                 guard seen.insert(record.sid.lowercased()).inserted else { continue }
                 out.append(TaskAISession(sid: record.sid.lowercased(), team: record.team, cwd: nil))
@@ -2204,6 +2205,8 @@ final class TaskSession: ObservableObject {
         if team.kind == "claude" {
             let sid = UUID().uuidString.lowercased()
             spec.sessionID = sid
+            // A fresh id is never listed, so this only ever appends its one
+            // line (`.added`), never a switch back.
             noteText = TaskStore.recordSession(noteText, team: team.id, sid: sid).text
         }
         // The pick for the task's first AI pane seeds its account; after that
@@ -2252,7 +2255,12 @@ final class TaskSession: ObservableObject {
         machine.panes[i].extraArgs = app.config.teams.first(where: { $0.id == team })?.args
         if let sid, !sid.isEmpty {
             machine.panes[i].sessionID = sid
-            if !TaskStore.manifestLines(noteText).contains(where: { $0.contains(sid) }) {
+            // Only an id the block doesn't mention at all, in any case (the
+            // way recordSession matches): this automatic path keeps one line
+            // per session, and recordSession would take an id listed above
+            // the last line for a switch back and add a second one.
+            let key = sid.lowercased()
+            if !TaskStore.manifestLines(noteText).contains(where: { $0.lowercased().contains(key) }) {
                 noteText = TaskStore.recordSession(noteText, team: team, sid: sid).text
             }
         }

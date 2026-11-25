@@ -689,40 +689,77 @@ public final class TaskStore {
     }
 
     public enum SessionRecordResult: Equatable, Sendable {
-        /// A new dated line was appended.
+        /// The session was not listed; a new dated line was appended.
         case added
-        /// The session was already listed; its remark was set to the new one.
+        /// The session is the last record (the one in use); its remark was
+        /// set to the new one.
         case remarkUpdated
-        /// The session was already listed and there was no remark to write.
+        /// The session is the last record and there was no remark to write.
         case alreadyRecorded
+        /// The session is listed only above the last record (the user moved
+        /// back to it): a new dated line was appended, earlier lines untouched.
+        case switchedBack
+    }
+
+    /// Where a session stands in the manifest block, which decides what
+    /// recording it does (`recordSession`). The block is a timeline of
+    /// account switches; its last session record is the session in use.
+    public enum SessionPosition: Equatable, Sendable {
+        /// Not listed.
+        case notListed
+        /// The last session record: the session in use.
+        case latest
+        /// Listed only above the last session record.
+        case earlier
+    }
+
+    public static func sessionPosition(_ text: String, sid: String) -> SessionPosition {
+        position(of: sid, in: manifestRecordLines(text).map { $0.record })
+    }
+
+    private static func position(of sid: String, in records: [SessionRecord]) -> SessionPosition {
+        let key = sid.lowercased()
+        if records.last?.sid.lowercased() == key { return .latest }
+        return records.contains { $0.sid.lowercased() == key } ? .earlier : .notListed
     }
 
     /// Record a session in the manifest block — the "記到 AI Session 紀錄"
-    /// action. A session already listed is never duplicated: with a remark,
-    /// that line's remark is replaced (its stamp and team stay as written);
-    /// without one, the note is returned unchanged.
+    /// action. The block is a timeline (when one account runs out of quota
+    /// the task moves to another session, and may later move back), so:
+    /// - the last record, the session in use, is never listed twice: a remark
+    ///   replaces its remark (stamp and team stay as written); without one,
+    ///   the note is returned unchanged;
+    /// - a session listed only above it is a switch back: a new dated line is
+    ///   appended at the bottom, and every earlier line, remark included,
+    ///   stays as written;
+    /// - a session not listed is appended.
+    /// The app's automatic recording (a new AI pane, a rebind) only passes ids
+    /// the block lacks, so it keeps one line per session.
     public static func recordSession(_ text: String, team: String, sid: String,
                                      remark: String = "",
                                      at date: Date = Date()) -> (text: String, result: SessionRecordResult) {
         let remark = oneLine(remark)
-        let key = sid.lowercased()
-        if let existing = manifestLineRange(text, where: { $0.sid.lowercased() == key }) {
+        let records = manifestRecordLines(text)
+        let pos = position(of: sid, in: records.map { $0.record })
+        if pos == .latest, let last = records.last {
             guard !remark.isEmpty else { return (text, .alreadyRecorded) }
-            var record = existing.record
+            var record = last.record
             record.remark = remark
             var t = text
-            t.replaceSubrange(existing.range, with: record.line)
+            t.replaceSubrange(last.range, with: record.line)
             return (t, .remarkUpdated)
         }
         let line = sessionLine(team: team, sid: sid, remark: remark, at: date)
-        return (appendSessionLine(text, line: line), .added)
+        return (appendSessionLine(text, line: line), pos == .earlier ? .switchedBack : .added)
     }
 
-    /// Range (whole line, no newline) + parsed record of the first manifest
-    /// line matching `predicate`.
-    private static func manifestLineRange(
-        _ text: String, where predicate: (SessionRecord) -> Bool
-    ) -> (range: Range<String.Index>, record: SessionRecord)? {
+    /// Every session record of the manifest block, in note order, with its
+    /// line's range (whole line, no newline). Bullets that aren't session
+    /// records (free notes, half-typed lines) are skipped, so the last entry
+    /// is the last session record even when free text follows it.
+    private static func manifestRecordLines(
+        _ text: String
+    ) -> [(range: Range<String.Index>, record: SessionRecord)] {
         let anchor: String.Index
         if let h1 = text.range(of: "(?m)^# .*$", options: .regularExpression) {
             anchor = h1.upperBound
@@ -732,20 +769,21 @@ public final class TaskStore {
             anchor = text.startIndex
         }
         guard let divider = text.range(of: "(?m)^---[ \\t]*$", options: .regularExpression,
-                                       range: anchor ..< text.endIndex) else { return nil }
+                                       range: anchor ..< text.endIndex) else { return [] }
+        var out: [(range: Range<String.Index>, record: SessionRecord)] = []
         var lineStart = anchor
         while lineStart < divider.lowerBound {
             let lineEnd = text.range(of: "\n", range: lineStart ..< divider.lowerBound)?.lowerBound
                 ?? divider.lowerBound
             let raw = String(text[lineStart ..< lineEnd])
             let trimmed = raw.trimmingCharacters(in: .whitespaces)
-            if trimmed.hasPrefix("- "), let record = parseSessionRecord(trimmed), predicate(record) {
-                return (lineStart ..< lineEnd, record)
+            if trimmed.hasPrefix("- "), let record = parseSessionRecord(trimmed) {
+                out.append((lineStart ..< lineEnd, record))
             }
             guard lineEnd < divider.lowerBound else { break }
             lineStart = text.index(after: lineEnd)
         }
-        return nil
+        return out
     }
 
     /// Session-id loss guard, three-way: before the in-memory note overwrites
@@ -758,6 +796,13 @@ public final class TaskStore {
     /// by the user in the app, and stays that way. (The old two-way guard
     /// could not tell the difference: every half-typed version of a line that
     /// an autosave had caught came back marked "←自動保留".) Idempotent.
+    ///
+    /// A disk record that memory already holds under another spelling is not
+    /// re-added. A dated line is the same entry when memory has a line with
+    /// the same session AND stamp (its remark edited elsewhere); a legacy line
+    /// (no stamp) when memory lists the session at all. Matching on the
+    /// session alone would swallow a switch back recorded elsewhere: the same
+    /// session again under a new stamp (see `recordSession`).
     public static func mergeManifestLines(disk: String, into memory: String,
                                           base: String) -> String {
         func normalize(_ s: String) -> String {
@@ -769,10 +814,15 @@ public final class TaskStore {
         for line in manifestLines(disk).map(normalize) where !baseLines.contains(line) {
             let have = manifestLines(out)
             guard !have.map(normalize).contains(line) else { continue }
-            // Already represented under another spelling (e.g. remark edited).
-            if let sid = parseSessionRecord(line)?.sid.lowercased(),
-               have.contains(where: { parseSessionRecord($0)?.sid.lowercased() == sid }) {
-                continue
+            if let record = parseSessionRecord(line) {
+                let sid = record.sid.lowercased()
+                let represented = have.contains { raw in
+                    guard let mine = parseSessionRecord(raw), mine.sid.lowercased() == sid else {
+                        return false
+                    }
+                    return record.stamp == nil || mine.stamp == record.stamp
+                }
+                if represented { continue }
             }
             out = appendSessionLine(out, line: line)
         }
