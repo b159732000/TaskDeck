@@ -1631,11 +1631,21 @@ struct HeaderIconButton: View {
 /// plus a bar per cell, colour at ≥70% / 100%, a countdown beside the 5h
 /// usage and the weekly window's reset time. Every window's reset is in
 /// the row tooltip.
+///
+/// Rows come in claude-quota's order until a header is clicked: each
+/// header sorts by its column, ascending → descending → back to that order
+/// (QuotaSort in TaskDeckCore has the rules; the choice persists under the
+/// `quotaSort` default). A column sorts by exactly what its cells show —
+/// `sortKey` reads it with the cells' own helpers — and a "—" / 未登入 cell
+/// sorts last either way. codex, aigw and any other non-Claude account stay
+/// at the bottom in claude-quota's order whatever the sort.
 struct QuotaGrid: View {
     let accounts: [AppModel.QuotaAccount]
     let scale: Double
     /// Squeezed: no bars, half the row spacing — every number stays.
     var compact = false
+    /// QuotaSort's stored form; "" (or anything unreadable) = claude-quota's order.
+    @AppStorage("quotaSort") private var sortStored = ""
 
     /// Height the grid wants (including its 8 pt paddings) for `rows`
     /// accounts, so the section can decide between full, compact and
@@ -1652,26 +1662,53 @@ struct QuotaGrid: View {
     /// ~470 pt column the table was tuned on plus a little; past that the
     /// extra column width stays blank on the right. (James 261008.)
     static let maxWidth: Double = 460
+    private static let columnSpacing: CGFloat = 6
 
-    private static let columns: [(title: String, match: (String) -> Bool)] = [
-        ("5h", { $0.lowercased().contains("5h") }),
-        ("週", { $0.lowercased().hasPrefix("weekly all") || $0.lowercased() == "weekly" }),
-        ("Fable", { $0.lowercased().contains("fable") || $0.lowercased().contains("model") }),
-        ("點數", { $0.lowercased().contains("credit") }),
+    private static let columns: [(title: String, sort: QuotaSortColumn, match: (String) -> Bool)] = [
+        ("5h", .fiveHour, { $0.lowercased().contains("5h") }),
+        ("週", .weekly, { $0.lowercased().hasPrefix("weekly all") || $0.lowercased() == "weekly" }),
+        ("Fable", .fable, { $0.lowercased().contains("fable") || $0.lowercased().contains("model") }),
+        ("點數", .credits, { $0.lowercased().contains("credit") }),
     ]
+
+    /// The header row, left to right: a title per column, and the hairline
+    /// column between 點數 and 重置.
+    private enum HeaderSlot: Hashable {
+        case column(QuotaSortColumn)
+        case hairline
+    }
+
+    private static let headerSlots: [(slot: HeaderSlot, title: String)] =
+        [(.column(.account), "帳號")] + columns.map { (.column($0.sort), $0.title) }
+            + [(.hairline, ""), (.column(.reset), "重置")]
+
+    /// Where the Grid put each header-row cell, for the clickable headers
+    /// laid over them.
+    private struct HeaderAnchors: PreferenceKey {
+        static let defaultValue: [HeaderSlot: Anchor<CGRect>] = [:]
+        static func reduce(value: inout [HeaderSlot: Anchor<CGRect>],
+                           nextValue: () -> [HeaderSlot: Anchor<CGRect>]) {
+            value.merge(nextValue()) { $1 }
+        }
+    }
+
+    private var sort: QuotaSort? { QuotaSort(stored: sortStored) }
 
     var body: some View {
         // The 5h countdown is derived from the reset time at render; tick
         // once a minute so it does not sit still between quota polls.
         TimelineView(.periodic(from: .now, by: 60)) { context in
+            // Sorted once here, with the same `now` the cells render with,
+            // and shared by both copies ViewThatFits lays out.
+            let rows = sorted(now: context.date)
             // Fill the column when the grid's minimum fits; otherwise scroll
             // sideways rather than clip the reset column — with the trailing
             // edge faded, so a half glyph reads as "more this way", not as a
             // layout bug.
             ViewThatFits(in: .horizontal) {
-                grid(now: context.date)
+                grid(rows, now: context.date)
                 ScrollView(.horizontal, showsIndicators: false) {
-                    grid(now: context.date).padding(.trailing, 14)
+                    grid(rows, now: context.date).padding(.trailing, 14)
                 }
                 .mask(
                     HStack(spacing: 0) {
@@ -1684,23 +1721,25 @@ struct QuotaGrid: View {
         }
     }
 
-    private func grid(now: Date) -> some View {
-        Grid(alignment: .leading, horizontalSpacing: 6, verticalSpacing: compact ? 3 : 6) {
+    private func grid(_ rows: [AppModel.QuotaAccount], now: Date) -> some View {
+        Grid(alignment: .leading, horizontalSpacing: Self.columnSpacing, verticalSpacing: compact ? 3 : 6) {
+            // The titles as plain, hidden text, so the Grid sizes every
+            // column exactly as it did before headers sorted. The clickable
+            // headers are drawn over them (`headers`): a header that fills
+            // its cell, or carries an arrow, inside the Grid moves the
+            // columns — measured 2026-11-26, 1–5 pt at various widths, and
+            // gridCellUnsizedAxes does not stop it.
             GridRow {
-                Text("帳號").gridColumnAlignment(.leading)
+                headerTitle("帳號", .column(.account)).gridColumnAlignment(.leading)
                 ForEach(Self.columns, id: \.title) { column in
-                    Text(column.title)
-                        .help(column.title == "5h"
-                              ? "5h 窗口用量；旁邊的時間 = 這個窗口還有多久重置。窗口從你的第一則訊息起算 5 小時，到期後下一則訊息才開新窗口，所以重置時間會一段一段往後跳。"
-                              : "")
+                    headerTitle(column.title, .column(column.sort))
                 }
                 Color.clear.frame(width: 1)
-                Text("重置").gridColumnAlignment(.trailing)
-                    .help("長窗口還有多久重置。週 = 週額度（週 / Fable 共用同一個窗口；opencode 的週預算也是）、月 = 月額度（codex 的點數）。確切的日期時間在列的提示裡；5h 窗口的倒數在 5h 那格。")
+                    .anchorPreference(key: HeaderAnchors.self, value: .bounds) { [.hairline: $0] }
+                headerTitle("重置", .column(.reset)).gridColumnAlignment(.trailing)
             }
             .font(Theme.Fonts.mono(9 * scale))
-            .foregroundStyle(Theme.text4)
-            ForEach(accounts) { account in
+            ForEach(rows) { account in
                 // One missed poll (a 429) keeps numbers under five minutes
                 // old; badge only what has stayed unreachable — a dead token.
                 // Badge only: the row keeps its colours (James's call — the
@@ -1721,7 +1760,7 @@ struct QuotaGrid: View {
                     .fixedSize()
                     .help(account.alias)
                     ForEach(Self.columns, id: \.title) { column in
-                        if let bucket = bucket(account, column.match) {
+                        if let bucket = Self.bucket(account, column.match) {
                             let countdown = column.title == "5h"
                                 ? bucket.resetsAt.flatMap { Self.remaining(until: $0, now: now) } : nil
                             cell(bucket, note: countdown, narrow: column.title == "點數")
@@ -1732,10 +1771,16 @@ struct QuotaGrid: View {
                     // A hairline keeps the reset column from reading as part
                     // of the 點數 column, which is mostly "—".
                     Rectangle().fill(Theme.border).frame(width: 1).frame(maxHeight: .infinity)
-                    resetCell(account, Self.longWindow(account.buckets), now: now)
+                    resetCell(account, now: now)
                 }
                 .help(rowHelp(account))
             }
+        }
+        .overlayPreferenceValue(HeaderAnchors.self) { anchors in
+            GeometryReader { proxy in
+                headers(anchors.mapValues { proxy[$0] })
+            }
+            .font(Theme.Fonts.mono(9 * scale))
         }
         // Capped, then left-aligned in whatever the column offers: a wider
         // notes column leaves blank space on the right instead of longer
@@ -1745,8 +1790,91 @@ struct QuotaGrid: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    private func bucket(_ account: AppModel.QuotaAccount,
-                        _ match: (String) -> Bool) -> AppModel.QuotaBucket? {
+    private func headerTitle(_ title: String, _ slot: HeaderSlot) -> some View {
+        Text(title)
+            .hidden()
+            .anchorPreference(key: HeaderAnchors.self, value: .bounds) { [slot: $0] }
+    }
+
+    /// The clickable headers, each over its hidden title. A cell runs from
+    /// its title's leading edge to where the next column starts (less the
+    /// spacing); 重置, right-aligned, from past the hairline to its title's
+    /// trailing edge. Every cell is the height of the header row.
+    @ViewBuilder
+    private func headers(_ frames: [HeaderSlot: CGRect]) -> some View {
+        let slots = Self.headerSlots
+        let top = frames.values.map(\.minY).min() ?? 0
+        let bottom = frames.values.map(\.maxY).max() ?? 0
+        let sort = self.sort
+        ForEach(slots.indices, id: \.self) { index in
+            if case let .column(column) = slots[index].slot, let title = frames[slots[index].slot],
+               let start = column == .reset ? frames[.hairline].map({ $0.maxX + Self.columnSpacing }) : title.minX,
+               let end = column == .reset ? title.maxX
+                   : frames[slots[index + 1].slot].map({ $0.minX - Self.columnSpacing }),
+               end > start {
+                QuotaHeaderCell(title: slots[index].title,
+                                direction: sort?.column == column ? sort?.direction : nil,
+                                help: Self.headerHelp(column),
+                                titleFrame: title,
+                                cellFrame: CGRect(x: start, y: top, width: end - start, height: bottom - top),
+                                trailing: column == .reset) {
+                    sortStored = QuotaSort.afterClick(on: column, from: sort)?.stored ?? ""
+                }
+            }
+        }
+    }
+
+    /// Every header's tooltip ends with how sorting works; 5h and 重置 keep
+    /// their explanations in front of it.
+    private static func headerHelp(_ column: QuotaSortColumn) -> String {
+        var note: String?
+        var detail = ""
+        switch column {
+        case .account:
+            detail = "（依顯示的名稱，ext2 在 ext10 前）"
+        case .fiveHour:
+            note = "5h 窗口用量；旁邊的時間 = 這個窗口還有多久重置。窗口從你的第一則訊息起算 5 小時，到期後下一則訊息才開新窗口，所以重置時間會一段一段往後跳。"
+        case .reset:
+            note = "長窗口還有多久重置。週 = 週額度（週 / Fable 共用同一個窗口；opencode 的週預算也是）、月 = 月額度（codex 的點數）。確切的日期時間在列的提示裡；5h 窗口的倒數在 5h 那格。"
+            detail = "（升冪 = 最快重置的在前）"
+        case .weekly, .fable, .credits:
+            break
+        }
+        let hint = "點標題排序：升冪 → 降冪 → 原始順序\(detail)；沒有值的（—、未登入）排在有值的後面，codex、aigw 等非 Claude 帳號固定在最後"
+        return note.map { $0 + "\n\n" + hint } ?? hint
+    }
+
+    /// `accounts` in the chosen order (QuotaSortRules.order). Unsorted, the
+    /// non-Claude accounts still sit below the Claude ones — claude-quota
+    /// already lists them last, so that order is unchanged.
+    private func sorted(now: Date) -> [AppModel.QuotaAccount] {
+        let sort = self.sort
+        let rows = accounts.map { account in
+            QuotaSortRow(key: sort.flatMap { Self.sortKey(account, $0.column, now: now) },
+                         pinned: QuotaSortRules.isPinned(alias: account.alias))
+        }
+        return QuotaSortRules.order(rows, by: sort).map { accounts[$0] }
+    }
+
+    /// The value `column` sorts by: what its cell shows, read with the cell's
+    /// own helpers so the order cannot drift from the display. nil where the
+    /// cell shows "—" or 未登入.
+    private static func sortKey(_ account: AppModel.QuotaAccount, _ column: QuotaSortColumn,
+                                now: Date) -> QuotaSortKey? {
+        switch column {
+        case .account:
+            return .text(shortAlias(account.alias))
+        case .reset:
+            return resetCountdown(account, now: now).map { .time($0.resetsAt) }
+        case .fiveHour, .weekly, .fable, .credits:
+            return columns.first { $0.sort == column }
+                .flatMap { bucket(account, $0.match) }
+                .map { .number(Double($0.percent)) }
+        }
+    }
+
+    private static func bucket(_ account: AppModel.QuotaAccount,
+                               _ match: (String) -> Bool) -> AppModel.QuotaBucket? {
         account.buckets.first { match($0.key) }?.value
     }
 
@@ -1824,15 +1952,26 @@ struct QuotaGrid: View {
             .map { ($0.value, $0.key.lowercased().contains("credit") ? "月" : "週") }
     }
 
+    /// What the 重置 cell counts down: the long window's unit, its reset and
+    /// the time left. nil where the cell shows 未登入, or "—" (no long window,
+    /// or its reset has passed and the next poll brings the new one). The
+    /// 重置 sort key reads the same value.
+    static func resetCountdown(_ account: AppModel.QuotaAccount, now: Date)
+        -> (unit: String, resetsAt: Date, text: String)? {
+        guard account.error == nil, let window = longWindow(account.buckets),
+              let resetsAt = window.bucket.resetsAt,
+              let text = remaining(until: resetsAt, now: now) else { return nil }
+        return (window.unit, resetsAt, text)
+    }
+
     /// "週 5d19h" / "月 4d10h": time left, not a weekday — it answers the
     /// question directly — and the unit names the window. Under it, how far
     /// through the window we are (a week, or the calendar month for 點數).
     /// Both in neutral grey: neither is a usage signal. The exact day and
     /// time stay in the row tooltip.
-    private func resetCell(_ account: AppModel.QuotaAccount,
-                           _ window: (bucket: AppModel.QuotaBucket, unit: String)?,
-                           now: Date) -> some View {
-        let countdown = window?.bucket.resetsAt.flatMap { Self.remaining(until: $0, now: now) }
+    private func resetCell(_ account: AppModel.QuotaAccount, now: Date) -> some View {
+        let window = Self.longWindow(account.buckets)
+        let countdown = Self.resetCountdown(account, now: now)
         let elapsed = window.flatMap { w in
             w.bucket.resetsAt.flatMap { Self.windowElapsed(unit: w.unit, resetsAt: $0, now: now) }
         }
@@ -1840,12 +1979,12 @@ struct QuotaGrid: View {
             HStack(spacing: 3) {
                 if account.error != nil {
                     Text("未登入")
-                } else if let window, let countdown {
+                } else if let countdown {
                     // No usage tint here: the time left says nothing about
                     // trouble on its own (lots of time + high usage is the
                     // worrying case), so the colour only misled.
-                    Text(window.unit).foregroundStyle(Theme.text4)
-                    Text(countdown).foregroundStyle(Theme.text2).monospacedDigit()
+                    Text(countdown.unit).foregroundStyle(Theme.text4)
+                    Text(countdown.text).foregroundStyle(Theme.text2).monospacedDigit()
                 } else {
                     Text("—")
                 }
@@ -1928,6 +2067,69 @@ struct QuotaGrid: View {
             "· \(name) \(bucket.percent)% · 重置 \(bucket.resetsAt.map(Self.dayLabel) ?? "—")"
         }
         return (head + lines).joined(separator: "\n")
+    }
+}
+
+/// A QuotaGrid column header, laid over the Grid on top of its hidden title
+/// (`QuotaGrid.headers`), so nothing here takes part in the Grid's sizing.
+/// A click sorts by the column (the cycle is QuotaSort.afterClick); the
+/// whole cell is the hit area; it brightens on hover so it reads as
+/// clickable, and the sorted column stays brighter with ▴ / ▾ for its
+/// direction. Its own hover state: a hover redraws this header, not the grid.
+struct QuotaHeaderCell: View {
+    let title: String
+    /// nil: not the sorted column.
+    let direction: QuotaSortDirection?
+    let help: String
+    /// Where the Grid put the hidden title, and the whole header cell around
+    /// it, in the overlay's space.
+    let titleFrame: CGRect
+    let cellFrame: CGRect
+    /// The right-aligned 重置 column: its arrow goes before the title.
+    var trailing = false
+    let action: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            Color.clear
+                .frame(width: cellFrame.width, height: cellFrame.height)
+                .contentShape(Rectangle())
+                .overlay(alignment: .topLeading) {
+                    label
+                        .frame(width: titleFrame.width, height: titleFrame.height,
+                               alignment: trailing ? .topTrailing : .topLeading)
+                        .offset(x: titleFrame.minX - cellFrame.minX, y: titleFrame.minY - cellFrame.minY)
+                }
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(direction != nil
+                         ? (hovering ? Theme.text : Theme.text2)
+                         : (hovering ? Theme.text2 : Theme.text4))
+        .onHover { hovering = $0 }
+        .help(help)
+        .position(x: cellFrame.midX, y: cellFrame.midY)
+    }
+
+    /// The title exactly where the Grid put it, and beside it the arrow,
+    /// which takes no width, so the sorted column's header never widens its
+    /// column. The arrow hangs off a zero-size anchor at the title's edge (an
+    /// overlay aligns by frame edges, not by an alignment guide set on its
+    /// content); the glyph's own side bearing is the gap, which centres it
+    /// in the column spacing where a title fills its column (Fable, scrolled
+    /// layout). Both triangles are in JetBrains Mono, the header's face.
+    private var label: some View {
+        Text(title)
+            .lineLimit(1)
+            .fixedSize()
+            .overlay(alignment: trailing ? .leading : .trailing) {
+                if let direction {
+                    Color.clear.frame(width: 0, height: 0)
+                        .overlay(alignment: trailing ? .trailing : .leading) {
+                            Text(direction == .ascending ? "▴" : "▾").fixedSize()
+                        }
+                }
+            }
     }
 }
 

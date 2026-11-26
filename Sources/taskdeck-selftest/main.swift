@@ -1772,5 +1772,127 @@ check("bq-reader: first frame parses", fr.next()?.type == "ping")
 check("bq-reader: second frame parses", fr.next()?.id == "x")
 check("bq-reader: drained", fr.next() == nil)
 
+// MARK: quota sort — header clicks cycle a column; non-Claude accounts never move
+
+/// Aliases in display order for rows given in claude-quota's order.
+func quotaOrder(_ rows: [(alias: String, key: QuotaSortKey?)], _ sort: QuotaSort?) -> [String] {
+    let input = rows.map { QuotaSortRow(key: $0.key, pinned: QuotaSortRules.isPinned(alias: $0.alias)) }
+    return QuotaSortRules.order(input, by: sort).map { rows[$0].alias }
+}
+
+check("quota sort: every column × direction round-trips through the stored string",
+      QuotaSortColumn.allCases.allSatisfy { column in
+          [QuotaSortDirection.ascending, .descending].allSatisfy { direction in
+              QuotaSort(stored: QuotaSort(column, direction).stored) == QuotaSort(column, direction)
+          }
+      })
+check("quota sort: the stored form is what `defaults write … quotaSort` takes",
+      QuotaSort(.weekly, .descending).stored == "weekly:desc"
+      && QuotaSort(stored: "5h:asc") == QuotaSort(.fiveHour, .ascending))
+check("quota sort: an empty or unknown stored value is claude-quota's order",
+      ["", "weekly", "weekly:", ":asc", "weekly:up", "Weekly:asc", "weekly:asc:x", "5h:desc "]
+          .allSatisfy { QuotaSort(stored: $0) == nil })
+
+let clickOnce = QuotaSort.afterClick(on: .weekly, from: nil)
+let clickTwice = QuotaSort.afterClick(on: .weekly, from: clickOnce)
+check("quota sort: first click on a column sorts ascending", clickOnce == QuotaSort(.weekly, .ascending))
+check("quota sort: second click on it sorts descending", clickTwice == QuotaSort(.weekly, .descending))
+check("quota sort: third click on it goes back to claude-quota's order",
+      QuotaSort.afterClick(on: .weekly, from: clickTwice) == nil)
+check("quota sort: another column starts at ascending, whatever the current direction",
+      QuotaSort.afterClick(on: .reset, from: QuotaSort(.weekly, .ascending)) == QuotaSort(.reset, .ascending)
+      && QuotaSort.afterClick(on: .account, from: QuotaSort(.weekly, .descending)) == QuotaSort(.account, .ascending))
+
+check("quota sort: codex / aigw / opencode are pinned, Claude accounts are not",
+      ["codex", "aigw", "opencode"].allSatisfy { QuotaSortRules.isPinned(alias: $0) }
+      && !["claude", "claude3", "claude-eng", "claude-ext5"].contains { QuotaSortRules.isPinned(alias: $0) })
+
+// claude-quota --json, 2026-11-26 (percent per column; nil = the cell shows "—").
+let quotaAliases = ["claude", "claude3", "claude-eng", "claude-ext2", "claude-ext3", "claude-product",
+                    "claude-ext4", "claude-dataset", "claude-ext5", "codex", "aigw"]
+func percentRows(_ values: [Double?]) -> [(alias: String, key: QuotaSortKey?)] {
+    zip(quotaAliases, values).map { ($0, $1.map { QuotaSortKey.number($0) }) }
+}
+let weeklyRows = percentRows([26, 94, 95, 67, 88, 24, 0, 39, 39, nil, nil])
+check("quota sort: no sort keeps claude-quota's order", quotaOrder(weeklyRows, nil) == quotaAliases)
+check("quota sort: 週 ascending (39 tie keeps dataset before ext5)",
+      quotaOrder(weeklyRows, QuotaSort(.weekly, .ascending))
+      == ["claude-ext4", "claude-product", "claude", "claude-dataset", "claude-ext5",
+          "claude-ext2", "claude-ext3", "claude3", "claude-eng", "codex", "aigw"])
+check("quota sort: 週 descending (the tie still keeps dataset before ext5)",
+      quotaOrder(weeklyRows, QuotaSort(.weekly, .descending))
+      == ["claude-eng", "claude3", "claude-ext3", "claude-ext2", "claude-dataset", "claude-ext5",
+          "claude", "claude-product", "claude-ext4", "codex", "aigw"])
+let fiveHourRows = percentRows([1, 17, 0, 0, 0, 44, 0, 32, 12, nil, nil])
+check("quota sort: 5h ascending — four 0% accounts stay in claude-quota's order",
+      quotaOrder(fiveHourRows, QuotaSort(.fiveHour, .ascending))
+      == ["claude-eng", "claude-ext2", "claude-ext3", "claude-ext4", "claude", "claude-ext5",
+          "claude3", "claude-dataset", "claude-product", "codex", "aigw"])
+check("quota sort: 5h descending — the 0% accounts too",
+      quotaOrder(fiveHourRows, QuotaSort(.fiveHour, .descending))
+      == ["claude-product", "claude-dataset", "claude3", "claude-ext5", "claude",
+          "claude-eng", "claude-ext2", "claude-ext3", "claude-ext4", "codex", "aigw"])
+// 點數: three Claude accounts have credits; codex 58 / aigw 94 would sort in
+// if they took part.
+let creditRows = percentRows([nil, nil, 100, nil, nil, 100, nil, 59, nil, 58, 94])
+check("quota sort: 點數 ascending — '—' rows after every value, codex / aigw still last",
+      quotaOrder(creditRows, QuotaSort(.credits, .ascending))
+      == ["claude-dataset", "claude-eng", "claude-product", "claude", "claude3", "claude-ext2",
+          "claude-ext3", "claude-ext4", "claude-ext5", "codex", "aigw"])
+check("quota sort: 點數 descending — '—' rows still after every value",
+      quotaOrder(creditRows, QuotaSort(.credits, .descending))
+      == ["claude-eng", "claude-product", "claude-dataset", "claude", "claude3", "claude-ext2",
+          "claude-ext3", "claude-ext4", "claude-ext5", "codex", "aigw"])
+
+let nameRows: [(alias: String, key: QuotaSortKey?)] = [
+    ("claude", .text("claude")), ("claude3", .text("claude3")), ("claude-ext10", .text("ext10")),
+    ("claude-eng", .text("eng")), ("claude-ext2", .text("ext2")), ("claude-product", .text("product")),
+    ("claude-dataset", .text("dataset")), ("codex", .text("codex")), ("aigw", .text("aigw")),
+]
+check("quota sort: 帳號 ascending in natural order (ext2 before ext10), aigw not first",
+      quotaOrder(nameRows, QuotaSort(.account, .ascending))
+      == ["claude", "claude3", "claude-dataset", "claude-eng", "claude-ext2", "claude-ext10",
+          "claude-product", "codex", "aigw"])
+check("quota sort: 帳號 descending (ext10 before ext2)",
+      quotaOrder(nameRows, QuotaSort(.account, .descending))
+      == ["claude-product", "claude-ext10", "claude-ext2", "claude-eng", "claude-dataset",
+          "claude3", "claude", "codex", "aigw"])
+
+let quotaISO = ISO8601DateFormatter()
+quotaISO.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+func resetKey(_ stamp: String) -> QuotaSortKey { .time(quotaISO.date(from: stamp)!) }
+// claude and claude-ext3 reset at the same minute; the API's sub-second
+// jitter (08:59:59.8 vs 09:00:00.138) must not order them.
+let resetRows: [(alias: String, key: QuotaSortKey?)] = [
+    ("claude", resetKey("2026-11-27T09:00:00.138Z")), ("claude3", resetKey("2026-11-28T08:00:00.178Z")),
+    ("claude-ext3", resetKey("2026-11-27T08:59:59.800Z")), ("claude-ext2", nil),
+    ("claude-ext4", resetKey("2026-11-26T12:40:00.000Z")), ("codex", resetKey("2026-11-26T00:00:00.000Z")),
+]
+check("quota sort: 重置 ascending = soonest first; same-minute resets tie; 未登入 last",
+      quotaOrder(resetRows, QuotaSort(.reset, .ascending))
+      == ["claude-ext4", "claude", "claude-ext3", "claude3", "claude-ext2", "codex"])
+check("quota sort: 重置 descending = latest first; the tie and 未登入 as before",
+      quotaOrder(resetRows, QuotaSort(.reset, .descending))
+      == ["claude3", "claude", "claude-ext3", "claude-ext4", "claude-ext2", "codex"])
+
+// Non-Claude accounts listed mid-table, with keys that would sort first in
+// either direction: in every mode they sit below every Claude row, in
+// claude-quota's order.
+let mixedRows: [(alias: String, key: QuotaSortKey?)] = [
+    ("claude", .number(50)), ("codex", .number(0)), ("claude3", .number(60)),
+    ("opencode", .number(100)), ("aigw", nil), ("claude-eng", .number(40)),
+]
+let everyQuotaSort: [QuotaSort?] = [nil] + QuotaSortColumn.allCases.flatMap {
+    [QuotaSort($0, .ascending), QuotaSort($0, .descending)]
+}
+check("quota sort: non-Claude rows stay last in claude-quota's order in every mode",
+      everyQuotaSort.allSatisfy { sort in
+          let order = quotaOrder(mixedRows, sort)
+          return Array(order.suffix(3)) == ["codex", "opencode", "aigw"]
+              && Set(order.prefix(3)) == ["claude", "claude3", "claude-eng"]
+      })
+check("quota sort: unsorted, a mid-table non-Claude row drops below the Claude rows",
+      quotaOrder(mixedRows, nil) == ["claude", "claude3", "claude-eng", "codex", "opencode", "aigw"])
+
 print(failures == 0 ? "\nALL PASS" : "\n\(failures) FAILURE(S)")
 exit(failures == 0 ? 0 : 1)
